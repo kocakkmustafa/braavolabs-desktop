@@ -24,18 +24,36 @@ import {
   type CascadeView,
   type CompareView,
 } from "./render";
+import {
+  resolveOllamaHost,
+  resolveOllamaModel,
+  ollamaChat,
+  OllamaUnreachableError,
+} from "./local";
+import {
+  DIRECT_PROVIDERS,
+  type DirectProvider,
+  isDirectProvider,
+  resolveDirectModel,
+  directChat,
+  DirectApiError,
+} from "./direct";
+import type { KeyVault } from "./keyvault";
 import type { Translator } from "./i18n";
 
 export interface UiDeps {
   root: HTMLElement;
   cfg: Config;
   t: Translator;
+  /** Local BYOK key vault (Tauri-backed at runtime, memory in dev/test). */
+  vault: KeyVault;
   /** Persist secrets after login/refresh/logout. */
   persist: (c: Config) => Promise<void> | void;
   onSignedOut: () => void;
 }
 
-type Mode = "compare" | "cascade";
+/** Dispatch lane: server cascade/compare, local Ollama, or BYOK direct. */
+type Mode = "compare" | "cascade" | "local" | "direct";
 
 const el = <K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -172,6 +190,8 @@ export function renderWorkspace(deps: UiDeps): void {
   const newChatBtn = el("button", "rail-btn", t("rail.newChat"));
   const memoryBtn = el("button", "rail-btn", t("rail.memory"));
 
+  const keysSec = renderKeysSection(deps);
+
   const spacer = el("div", "rail-spacer");
 
   const savingsCard = el("div", "savings-card");
@@ -182,7 +202,7 @@ export function renderWorkspace(deps: UiDeps): void {
 
   const signOutBtn = el("button", "rail-btn", t("rail.signOut"));
 
-  rail.append(brand, connSec, newChatBtn, memoryBtn, spacer, savingsCard, signOutBtn);
+  rail.append(brand, connSec, newChatBtn, memoryBtn, keysSec, spacer, savingsCard, signOutBtn);
 
   // --- center chat ---
   const chat = el("div", "chat");
@@ -196,22 +216,48 @@ export function renderWorkspace(deps: UiDeps): void {
   companyInput.placeholder = t("chat.companyId");
   companyInput.style.display = "none"; // only for compare mode
 
+  // Local (Ollama): optional model override.
+  const localModelInput = el("input", "company-input") as HTMLInputElement;
+  localModelInput.placeholder = t("chat.localModel");
+  localModelInput.style.display = "none";
+
+  // Direct (BYOK): provider select + optional model override.
+  const directProviderSel = el("select", "company-input") as HTMLSelectElement;
+  for (const p of DIRECT_PROVIDERS) {
+    const opt = el("option", undefined, p) as HTMLOptionElement;
+    opt.value = p;
+    directProviderSel.append(opt);
+  }
+  directProviderSel.style.display = "none";
+  const directModelInput = el("input", "company-input") as HTMLInputElement;
+  directModelInput.placeholder = t("chat.directModel");
+  directModelInput.style.display = "none";
+
   const modeToggle = el("div", "mode-toggle");
   const cascadeBtn = el("button", undefined, t("chat.modeCascade"));
   const compareBtn = el("button", undefined, t("chat.modeCompare"));
+  const localBtn = el("button", undefined, t("chat.modeLocal"));
+  const directBtn = el("button", undefined, t("chat.modeDirect"));
   cascadeBtn.classList.add("active");
   const applyMode = (m: Mode) => {
     mode = m;
     cascadeBtn.classList.toggle("active", m === "cascade");
     compareBtn.classList.toggle("active", m === "compare");
+    localBtn.classList.toggle("active", m === "local");
+    directBtn.classList.toggle("active", m === "direct");
     companyInput.style.display = m === "compare" ? "block" : "none";
+    localModelInput.style.display = m === "local" ? "block" : "none";
+    directProviderSel.style.display = m === "direct" ? "block" : "none";
+    directModelInput.style.display = m === "direct" ? "block" : "none";
   };
   cascadeBtn.addEventListener("click", () => applyMode("cascade"));
   compareBtn.addEventListener("click", () => applyMode("compare"));
-  modeToggle.append(cascadeBtn, compareBtn);
+  localBtn.addEventListener("click", () => applyMode("local"));
+  directBtn.addEventListener("click", () => applyMode("direct"));
+  modeToggle.append(cascadeBtn, compareBtn, localBtn, directBtn);
 
   const topRow = el("div", "composer-row");
-  topRow.append(modeToggle, companyInput);
+  topRow.append(modeToggle, companyInput, localModelInput, directProviderSel, directModelInput);
 
   const ta = el("textarea") as HTMLTextAreaElement;
   ta.placeholder = t("chat.placeholder");
@@ -279,6 +325,56 @@ export function renderWorkspace(deps: UiDeps): void {
         const view = toCascadeView(raw);
         renderCascadeAnswer(scroll, view, t);
         renderCascadeInspector(inspectorBody, view, t);
+      } else if (mode === "local") {
+        // Lane-A local — no key, no Forge-server round-trip, works offline.
+        const host = resolveOllamaHost();
+        const thinking = el("div", "thinking");
+        thinking.append(el("span", "spinner"), document.createTextNode(t("chat.localThinking")));
+        scroll.append(thinking);
+        scrollToEnd();
+        try {
+          const model = await resolveOllamaModel(host, localModelInput.value.trim() || undefined);
+          const res = await ollamaChat(host, model, text);
+          thinking.remove();
+          renderPlainAnswer(scroll, res.content, t);
+          renderSourceInspector(inspectorBody, t("chat.localSource"), res.model, t);
+        } catch (e) {
+          thinking.remove();
+          if (e instanceof OllamaUnreachableError) {
+            renderErrorCard(scroll, t("chat.localUnreachable", { host: e.host }));
+          } else {
+            renderErrorCard(scroll, String(e instanceof Error ? e.message : e));
+          }
+        }
+      } else if (mode === "direct") {
+        // Lane-A direct — BYOK, straight to the provider, bypassing the server.
+        const providerRaw = directProviderSel.value;
+        if (!isDirectProvider(providerRaw)) {
+          renderErrorCard(scroll, t("chat.empty"));
+        } else {
+          const provider: DirectProvider = providerRaw;
+          // One-time raw key retrieval at dispatch — never rendered to the DOM.
+          const apiKey = await deps.vault.get(provider);
+          if (!apiKey) {
+            renderErrorCard(scroll, t("chat.noKey", { provider }));
+          } else {
+            const model = resolveDirectModel(provider, directModelInput.value.trim() || undefined);
+            const thinking = el("div", "thinking");
+            thinking.append(el("span", "spinner"), document.createTextNode(t("chat.directThinking", { provider })));
+            scroll.append(thinking);
+            scrollToEnd();
+            try {
+              const res = await directChat(provider, apiKey, model, text);
+              thinking.remove();
+              renderPlainAnswer(scroll, res.content, t);
+              renderSourceInspector(inspectorBody, t("chat.directSource", { provider }), res.model, t);
+            } catch (e) {
+              thinking.remove();
+              const msg = e instanceof DirectApiError ? `${e.status} · ${e.message}` : String(e instanceof Error ? e.message : e);
+              renderErrorCard(scroll, msg);
+            }
+          }
+        }
       } else {
         const companyId = companyInput.value.trim();
         const stub = await startCompare(cfg, { companyId, query: text });
@@ -389,6 +485,110 @@ function chipBlock(label: string, items: string[], warn: boolean): HTMLElement {
   for (const it of items) list.append(el("div", warn ? "chip warn" : "chip", it));
   box.append(list);
   return box;
+}
+
+/** Plain single-model answer card (Lane-A local / direct). */
+function renderPlainAnswer(scroll: HTMLElement, content: string, t: Translator): void {
+  const card = el("div", "msg-final");
+  card.append(el("div", "msg-label", t("chat.finalAnswer")));
+  card.append(document.createTextNode(content || t("chat.empty")));
+  scroll.append(card);
+}
+
+/** Molten-rimmed error card (honest failure, never a fabricated answer). */
+function renderErrorCard(scroll: HTMLElement, message: string): void {
+  const card = el("div", "msg-final");
+  card.style.borderLeftColor = "var(--molten)";
+  card.append(el("div", "msg-label", "error"), document.createTextNode(message));
+  scroll.append(card);
+}
+
+/** Inspector view for Lane-A: just the source + resolved model (no cost/tier). */
+function renderSourceInspector(body: HTMLElement, source: string, model: string, t: Translator): void {
+  body.innerHTML = "";
+  body.append(
+    kv(t("inspector.provider"), source),
+    kv(t("inspector.model"), model || "—"),
+  );
+}
+
+/**
+ * Left-rail BYOK keys section: masked list + add/remove. Delegates every
+ * mutation to the injected vault; a raw key value is NEVER rendered (only the
+ * masked fingerprint the vault returns). The secret input is cleared the instant
+ * a key is added so it never lingers in the DOM.
+ */
+function renderKeysSection(deps: UiDeps): HTMLElement {
+  const { t, vault } = deps;
+  const sec = el("div", "keys-sec");
+  sec.append(el("div", "rail-section-label", t("keys.title")));
+
+  const listEl = el("div", "keys-list");
+  const emptyEl = el("div", "keys-empty", t("keys.empty"));
+
+  const refresh = async () => {
+    listEl.innerHTML = "";
+    const entries = await vault.list();
+    if (!entries.length) {
+      listEl.append(emptyEl);
+      return;
+    }
+    for (const e of entries) {
+      const row = el("div", "key-row");
+      row.append(
+        el("span", "key-provider", e.provider),
+        el("span", "key-masked mono", e.masked),
+      );
+      const rm = el("button", "key-remove", "×");
+      rm.title = t("keys.remove");
+      rm.addEventListener("click", () => {
+        void (async () => {
+          await vault.remove(e.provider);
+          await refresh();
+        })();
+      });
+      row.append(rm);
+      listEl.append(row);
+    }
+  };
+
+  const providerSel = el("select", "key-input") as HTMLSelectElement;
+  for (const p of DIRECT_PROVIDERS) {
+    const opt = el("option", undefined, p) as HTMLOptionElement;
+    opt.value = p;
+    providerSel.append(opt);
+  }
+  const secretInput = el("input", "key-input") as HTMLInputElement;
+  secretInput.type = "password";
+  secretInput.placeholder = t("keys.secret");
+  secretInput.autocomplete = "off";
+
+  const addBtn = el("button", "key-add-btn", t("keys.add"));
+  const doAdd = async () => {
+    const secret = secretInput.value.trim();
+    if (!secret) return;
+    addBtn.disabled = true;
+    try {
+      await vault.add(providerSel.value, secret);
+      secretInput.value = ""; // never linger a raw secret in the DOM
+      await refresh();
+    } finally {
+      addBtn.disabled = false;
+    }
+  };
+  addBtn.addEventListener("click", () => void doAdd());
+  secretInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") void doAdd();
+  });
+
+  const addRow = el("div", "key-add-row");
+  addRow.append(providerSel, secretInput, addBtn);
+
+  const note = el("div", "keys-note", t("keys.stored"));
+
+  sec.append(listEl, addRow, note);
+  void refresh();
+  return sec;
 }
 
 // ── inspector renderers (right) ─────────────────────────────────────────────

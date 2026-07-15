@@ -3,9 +3,11 @@
 Native desktop app (Tauri v2) for multi-model chat, cascade, and savings —
 the same Forge server that powers the CLI, in an obsidian three-pane UI.
 
-> **Server = orchestration.** There is **no AI logic in this app** (neither the
-> Rust host nor the frontend). Every model call is an authenticated request to
-> the Forge API; the desktop only renders and steers.
+> **Server = orchestration.** The Forge server owns multi-model routing,
+> cascade, and savings. The desktop adds two **Lane-A** side-channels that do
+> NOT touch the server — **Local (Ollama)** and **BYOK Direct** — but even these
+> carry no AI/orchestration logic in the Rust host: dispatch and provider request
+> shaping live in the frontend TypeScript; the host is a thin secret-store pipe.
 
 ---
 
@@ -21,32 +23,42 @@ packages/desktop/
 │   │                       refresh, ApiError, raw mode). The contract.
 │   ├── config.ts           { apiUrl, token, refreshToken } — CLI-parity
 │   │                       field names; token persisted via the secure store.
-│   ├── store.ts            secret storage: Tauri OS-scoped command under the
+│   ├── store.ts            token storage: Tauri OS-scoped command under the
 │   │                       app, in-memory fallback in dev/test. NEVER
 │   │                       localStorage / plaintext for the token.
+│   ├── keyvault.ts         BYOK provider-key vault — masked list, one-time raw
+│   │                       get at dispatch. Tauri keys.json (0600) / memory.
+│   ├── local.ts            Lane-A local: Ollama /api/tags + /api/chat
+│   │                       (stream:false). Keyless, offline. Port of CLI local.ts.
+│   ├── direct.ts           Lane-A direct: BYOK single-shot to anthropic /
+│   │                       openai / groq. Port of CLI direct.ts.
 │   ├── render.ts           pure view-model mappers (savings honesty gate,
 │   │                       cascade / compare / login-error mapping). Tested.
 │   ├── i18n.ts             single messages object, en + tr (i18n-ready).
-│   ├── ui.ts               thin DOM shell (3-pane) — not unit-tested.
+│   ├── ui.ts               thin DOM shell (3-pane + keys section) — not unit-tested.
 │   ├── main.ts             entry: hydrate → login or workspace.
 │   ├── styles.css          obsidian palette (arc-blue / ember / molten; NO green).
-│   └── __tests__/          35 tests (client / render / store / i18n).
+│   └── __tests__/          62 tests (client / render / store / i18n /
+│                           keyvault / local / direct / identity).
 └── src-tauri/              Rust host (STANDALONE cargo package)
     ├── Cargo.toml          tauri = "2"; not part of any cargo workspace.
-    ├── tauri.conf.json      window + CSP (self + braavolabs.com only).
+    ├── tauri.conf.json      window + CSP (self + braavolabs.com + Ollama
+    │                        localhost + 3 BYOK provider API hosts).
     ├── capabilities/default.json  core webview permissions for "main".
     ├── icons/              app icons (ember mark).
-    └── src/{main,lib}.rs   window + 3 OS-scoped secret commands. THIN.
+    └── src/{main,lib}.rs   window + token + BYOK-key OS-scoped commands. THIN.
 ```
 
 ### Panes (obsidian identity, §5)
 
-- **Left rail** — connection status, New chat, memory-vault link, savings summary.
-- **Center** — multi-model chat: **Cascade** (sync `/research/cascade`) and
-  **Compare** (async `/research/compare` → poll `/research/:id`, ember
-  "N faces thinking" spinner). Each candidate is an arc-rim card; a final
-  synthesis card follows. An ember footer shows `≈ saved $X` **only when the
-  server reports a real positive figure** (never fabricated).
+- **Left rail** — connection status, New chat, memory-vault link, **BYOK keys**
+  (masked list + add/remove), savings summary.
+- **Center** — multi-model chat, four source lanes. Server: **Cascade** (sync
+  `/research/cascade`) and **Compare** (async `/research/compare` → poll
+  `/research/:id`, ember "N faces thinking" spinner) — each candidate an arc-rim
+  card, final synthesis card, ember `≈ saved $X` footer shown **only when the
+  server reports a real positive figure** (never fabricated). Lane-A (server
+  bypass): **Local** (Ollama) and **Direct** (BYOK provider) — see below.
 - **Right inspector** — last call's tier / model / provider / confidence /
   escalated / cost breakdown (cascade), or per-model / synthesis / cost
   (compare).
@@ -73,10 +85,59 @@ Base URL: `VITE_FORGE_API_URL` at build time, else `https://braavolabs.com/api/v
 
 ---
 
+## Lane-A — Local (Ollama) & BYOK Direct (server-bypassing)
+
+The chat composer has four source lanes: **Cascade** and **Compare** hit the
+Forge server (above); **Local** and **Direct** bypass it entirely.
+
+### Local · Ollama (`local.ts`)
+
+Keyless, offline. Talks straight to a local Ollama daemon:
+
+| Call | Endpoint | Notes |
+|---|---|---|
+| model list | `GET http://localhost:11434/api/tags` | first installed model is the default; no guessing |
+| completion | `POST /api/chat` `{stream:false}` | one-shot, non-streamed |
+
+Base URL: `VITE_OLLAMA_HOST` at build time, else `http://localhost:11434`.
+Only `localhost:11434` is allow-listed in the Tauri CSP `connect-src`; pointing
+`OLLAMA_HOST` at another origin is a documented limitation (the CSP is static).
+An unreachable daemon renders an honest "Ollama not reachable" error — never a
+fabricated answer.
+
+### Direct · BYOK (`direct.ts` + `keyvault.ts`)
+
+Single-shot straight to a provider with a locally stored key, bypassing the
+Forge server. Providers and their **dated, conservative default models** (NOT a
+claim of "latest" — override per-call in the composer):
+
+| Provider | Endpoint | Auth header | Default model (override-able) |
+|---|---|---|---|
+| `anthropic` | `api.anthropic.com/v1/messages` | `x-api-key` (+ `anthropic-version`) | `claude-3-5-sonnet-20241022` |
+| `openai` | `api.openai.com/v1/chat/completions` | `Authorization: Bearer` | `gpt-4o-mini` |
+| `groq` | `api.groq.com/openai/v1/chat/completions` | `Authorization: Bearer` | `llama-3.1-8b-instant` |
+
+Pick a current model from each provider's own docs and paste it into the
+composer's optional model field — the defaults above are pinned so a build never
+silently changes behavior.
+
+**Key storage.** BYOK keys are stored by the Rust host in `keys.json` (0600 on
+unix) in the OS app-config dir — never localStorage, never a webview-readable
+file. The Settings → **BYOK keys** rail section lists only **masked**
+fingerprints (`first4…last4`); the raw value leaves the store solely via
+`key_get`, retrieved **one-time at dispatch** and passed straight into the
+provider's auth header — never rendered to the DOM, never logged. Only the three
+provider API hosts above are added to the CSP `connect-src`; the closed
+`default-src 'self'` / `object-src 'none'` / `frame-ancestors 'none'` policy is
+otherwise preserved. Production hardening to the OS keychain is the same human
+gate as the auth token (below).
+
+---
+
 ## Develop & verify (headless)
 
 ```bash
-pnpm --filter @ai-company-os/desktop test    # vitest — 35 tests
+pnpm --filter @ai-company-os/desktop test    # vitest — 62 tests
 pnpm --filter @ai-company-os/desktop build   # tsc --noEmit && vite build → dist/
 pnpm --filter @ai-company-os/desktop lint    # tsc --noEmit
 
@@ -91,21 +152,31 @@ exists.
 
 ## Secret storage
 
-Tokens are handed to the Rust `secure_store_{get,set,clear}` commands, which
-write `secrets.json` to the OS app-config dir with `0600` perms (unix) — an
-**interim** measure that keeps tokens out of localStorage and the webview.
-Outside Tauri (vitest / `vite` browser preview) storage falls back to memory,
-so a token never lands on disk in dev/test.
+Two kinds of secret, same host-side pattern:
 
-**Production hardening (human gate):** move to the real OS keychain (macOS
-Keychain / Windows Credential Manager) via a keyring/stronghold plugin. Not
-wired here to keep the crate's dependency surface and `cargo check` time small.
+- **Auth token + refresh** → `secure_store_{get,set,clear}` → `secrets.json`.
+- **BYOK provider keys** → `key_{add,list,remove,get}` → `keys.json`.
 
-## Human gates (NOT done here — require a GUI session / signing identity)
+Both are written to the OS app-config dir with `0600` perms (unix) — an
+**interim** measure that keeps secrets out of localStorage and the webview.
+`key_list` returns masked fingerprints only; `key_get` returns a raw value and
+is called only at direct-dispatch. Outside Tauri (vitest / `vite` browser
+preview) storage falls back to an in-memory map, so a secret never lands on disk
+in dev/test.
+
+**Production hardening (human gate):** move both stores to the real OS keychain
+(macOS Keychain / Windows Credential Manager) via a keyring/stronghold plugin.
+Not wired here to keep the crate's dependency surface and `cargo check` time small.
+
+## Human gates (NOT done here — require a GUI session / signing identity / live services)
 
 - `cargo tauri dev` / `cargo tauri build` — launches the actual window; needs a
   desktop session. (`pnpm --filter @ai-company-os/desktop dev:ui` serves just
   the frontend in a browser for UI iteration.)
+- **Live Lane-A dispatch** — driving a real Ollama daemon (Local) or a real BYOK
+  key against a provider (Direct) needs those services present; the request
+  shaping is unit-tested with injected fetch, but an end-to-end round-trip is a
+  GUI/live-service gate.
 - **Signed build** — Apple Developer ID / Windows code-signing cert.
 - **Notarization** — Apple notary submission + stapling.
 - **OS-keychain secret storage** — see above.

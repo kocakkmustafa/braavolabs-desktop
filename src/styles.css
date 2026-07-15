@@ -142,6 +142,93 @@ textarea {
 .rail-spacer {
   flex: 1;
 }
+/* ── BYOK keys section (left rail) ───────────────────────────────────── */
+.keys-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.keys-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.keys-empty {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+.key-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--steel-900);
+  border: 1px solid var(--steel-800);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+}
+.key-provider {
+  font-size: 12px;
+  color: var(--text-muted);
+  flex: 1;
+}
+.key-masked {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.key-remove {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.key-remove:hover {
+  color: var(--molten);
+}
+.key-add-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.key-input {
+  width: 100%;
+  background: var(--steel-900);
+  border: 1px solid var(--steel-700);
+  border-radius: var(--radius-sm);
+  padding: 7px 9px;
+  outline: none;
+  font-size: 12px;
+  color: inherit;
+  user-select: text;
+}
+.key-input:focus {
+  border-color: var(--arc-blue);
+}
+.key-add-btn {
+  background: var(--steel-800);
+  border: 1px solid var(--steel-700);
+  color: var(--text);
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.key-add-btn:hover {
+  background: var(--steel-700);
+  border-color: var(--steel-600);
+}
+.key-add-btn:disabled {
+  color: var(--text-dim);
+  cursor: not-allowed;
+}
+.keys-note {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
 .savings-card {
   background: var(--steel-900);
   border: 1px solid var(--steel-800);

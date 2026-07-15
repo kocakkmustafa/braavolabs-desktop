@@ -6,6 +6,7 @@
 import "./styles.css";
 import { type Config, DEFAULT_API, setPersist } from "./config";
 import { resolveStore, loadApiUrl, hydrateConfig } from "./store";
+import { resolveKeyVault } from "./keyvault";
 import { detectLocale, makeT } from "./i18n";
 import { renderLogin, renderWorkspace, type UiDeps } from "./ui";
 
@@ -29,6 +30,7 @@ async function boot(): Promise<void> {
     root,
     cfg,
     t,
+    vault: resolveKeyVault(),
     persist,
     onSignedOut: () => {
       void store.clear();
