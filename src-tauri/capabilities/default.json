@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Core webview permissions for the Forge main window. The three secure-store commands are application-defined (registered via generate_handler) and are NOT plugin/core commands, so they need no ACL entry here.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

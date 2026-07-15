@@ -1,0 +1,30 @@
+# Standalone cargo package (NOT part of a cargo workspace — the monorepo root
+# has no Cargo.toml, so this crate builds on its own). The Rust side is
+# deliberately THIN: it opens the obsidian window and exposes three OS-scoped
+# secret commands. All orchestration (multi-model compare, cascade, savings)
+# is the SERVER's job — there is no AI logic in this binary.
+[package]
+name = "forge-desktop"
+version = "0.1.0"
+description = "Forge Desktop — native multi-model chat & cascade control."
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "forge_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

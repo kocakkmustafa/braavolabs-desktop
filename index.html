@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      CSP is enforced authoritatively by src-tauri/tauri.conf.json (app.security.csp).
+      This meta tag mirrors it so `vite build` / a plain browser preview behaves the
+      same: self only + connect to the Forge API host. No inline scripts.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://braavolabs.com https://*.braavolabs.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    />
+    <title>Forge</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
