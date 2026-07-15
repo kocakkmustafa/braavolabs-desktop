@@ -47,6 +47,11 @@ import {
   type SpawnProbe,
   type VendorStatus,
 } from "./spawn";
+import {
+  type Governance,
+  type ActionDetail,
+  type AuditEntry,
+} from "./governance";
 import type { Translator } from "./i18n";
 
 export interface UiDeps {
@@ -57,6 +62,8 @@ export interface UiDeps {
   vault: KeyVault;
   /** Lane-B vendor CLI detection (Tauri-backed at runtime, memory in dev/test). */
   spawn: SpawnProbe;
+  /** Governance gate — every side-effecting action passes through it (fail-closed). */
+  gov: Governance;
   /** Persist secrets after login/refresh/logout. */
   persist: (c: Config) => Promise<void> | void;
   onSignedOut: () => void;
@@ -279,15 +286,64 @@ export function renderWorkspace(deps: UiDeps): void {
   composer.append(hint, topRow, bottomRow);
   chat.append(scroll, composer);
 
-  // --- right inspector ---
+  // --- right inspector (Inspector | Activity tabs) ---
   const inspector = el("aside", "inspector");
-  inspector.append(el("h2", undefined, t("inspector.title")));
-  const inspectorBody = el("div");
+  const inspTabs = el("div", "insp-tabs");
+  const inspTabDetail = el("button", "insp-tab active", t("gov.inspectorTab"));
+  const inspTabActivity = el("button", "insp-tab", t("gov.activity"));
+  inspTabs.append(inspTabDetail, inspTabActivity);
+  const inspectorBody = el("div", "insp-detail");
   inspectorBody.append(el("div", "inspector-empty", t("inspector.empty")));
-  inspector.append(inspectorBody);
+  const activityBody = el("div", "insp-activity");
+  activityBody.style.display = "none";
+  inspector.append(inspTabs, inspectorBody, activityBody);
 
   shell.append(rail, chat, inspector);
   root.append(shell);
+
+  // --- governance activity view (policy visibility + audit ledger) ---
+  let activeTab: "detail" | "activity" = "detail";
+  const refreshActivity = async () => {
+    activityBody.innerHTML = "";
+    // Policy visibility — which kinds auto-run vs ask; a constant, not host-trusted.
+    const pol = el("div", "policy-sec");
+    pol.append(el("div", "insp-h", t("gov.policyTitle")));
+    pol.append(el("div", "policy-hint", t("gov.policyHint")));
+    for (const rowSpec of deps.gov.policy()) {
+      const r = el("div", "policy-row");
+      r.append(el("span", "policy-kind mono", rowSpec.kind));
+      const cls =
+        rowSpec.decision === "auto-allow" ? "policy-badge auto" : rowSpec.decision === "deny" ? "policy-badge deny" : "policy-badge ask";
+      const txt =
+        rowSpec.decision === "auto-allow" ? t("gov.decisionAuto") : rowSpec.decision === "deny" ? t("gov.decisionDeny") : t("gov.decisionApproval");
+      r.append(el("span", cls, txt));
+      pol.append(r);
+    }
+    activityBody.append(pol);
+    // Audit ledger — newest first, secret-free by construction.
+    const aud = el("div", "audit-sec");
+    aud.append(el("div", "insp-h", t("gov.auditTitle")));
+    const entries = await deps.gov.recent(30);
+    if (!entries.length) {
+      aud.append(el("div", "inspector-empty", t("gov.auditEmpty")));
+    } else {
+      for (const e of [...entries].reverse()) aud.append(renderAuditRow(e));
+    }
+    activityBody.append(aud);
+  };
+  const showTab = (tab: "detail" | "activity") => {
+    activeTab = tab;
+    inspTabDetail.classList.toggle("active", tab === "detail");
+    inspTabActivity.classList.toggle("active", tab === "activity");
+    inspectorBody.style.display = tab === "detail" ? "block" : "none";
+    activityBody.style.display = tab === "activity" ? "block" : "none";
+    if (tab === "activity") void refreshActivity();
+  };
+  inspTabDetail.addEventListener("click", () => showTab("detail"));
+  inspTabActivity.addEventListener("click", () => showTab("activity"));
+  const bumpActivity = () => {
+    if (activeTab === "activity") void refreshActivity();
+  };
 
   // --- behavior ---
   const scrollToEnd = () => (scroll.scrollTop = scroll.scrollHeight);
@@ -337,55 +393,77 @@ export function renderWorkspace(deps: UiDeps): void {
         renderCascadeAnswer(scroll, view, t);
         renderCascadeInspector(inspectorBody, view, t);
       } else if (mode === "local") {
-        // Lane-A local — no key, no Forge-server round-trip, works offline.
-        const host = resolveOllamaHost();
-        const thinking = el("div", "thinking");
-        thinking.append(el("span", "spinner"), document.createTextNode(t("chat.localThinking")));
-        scroll.append(thinking);
-        scrollToEnd();
-        try {
-          const model = await resolveOllamaModel(host, localModelInput.value.trim() || undefined);
-          const res = await ollamaChat(host, model, text);
-          thinking.remove();
-          renderPlainAnswer(scroll, res.content, t);
-          renderSourceInspector(inspectorBody, t("chat.localSource"), res.model, t);
-        } catch (e) {
-          thinking.remove();
-          if (e instanceof OllamaUnreachableError) {
-            renderErrorCard(scroll, t("chat.localUnreachable", { host: e.host }));
-          } else {
-            renderErrorCard(scroll, String(e instanceof Error ? e.message : e));
+        // Lane-A local — governed (auto-allow), keyless, offline. Even an
+        // auto-allowed action is audited so the ledger is a complete record.
+        const localDetail: ActionDetail = { summary: t("gov.kindLocalDispatch") };
+        const gate = await gateAction(deps, "local.dispatch", localDetail);
+        if (!gate.ok) {
+          renderErrorCard(scroll, gate.reason);
+        } else {
+          const host = resolveOllamaHost();
+          const thinking = el("div", "thinking");
+          thinking.append(el("span", "spinner"), document.createTextNode(t("chat.localThinking")));
+          scroll.append(thinking);
+          scrollToEnd();
+          try {
+            const model = await resolveOllamaModel(host, localModelInput.value.trim() || undefined);
+            const res = await ollamaChat(host, model, text);
+            thinking.remove();
+            renderPlainAnswer(scroll, res.content, t);
+            renderSourceInspector(inspectorBody, t("chat.localSource"), res.model, t);
+            await deps.gov.settle("local.dispatch", "success", localDetail);
+          } catch (e) {
+            thinking.remove();
+            if (e instanceof OllamaUnreachableError) {
+              renderErrorCard(scroll, t("chat.localUnreachable", { host: e.host }));
+            } else {
+              renderErrorCard(scroll, String(e instanceof Error ? e.message : e));
+            }
+            await deps.gov.settle("local.dispatch", "error", localDetail);
           }
         }
+        bumpActivity();
       } else if (mode === "direct") {
-        // Lane-A direct — BYOK, straight to the provider, bypassing the server.
+        // Lane-A direct — BYOK egress. GOVERNED: a human must approve before the
+        // key leaves the box (the moat vs an allow-all host). The raw key is
+        // fetched one-time only AFTER approval, and never reaches the DOM/audit.
         const providerRaw = directProviderSel.value;
         if (!isDirectProvider(providerRaw)) {
           renderErrorCard(scroll, t("chat.empty"));
         } else {
           const provider: DirectProvider = providerRaw;
-          // One-time raw key retrieval at dispatch — never rendered to the DOM.
-          const apiKey = await deps.vault.get(provider);
-          if (!apiKey) {
-            renderErrorCard(scroll, t("chat.noKey", { provider }));
+          const directDetail: ActionDetail = { provider, summary: t("gov.kindDirectDispatch", { provider }) };
+          const gate = await gateAction(deps, "direct.dispatch", directDetail);
+          if (!gate.ok) {
+            renderErrorCard(scroll, gate.reason);
           } else {
-            const model = resolveDirectModel(provider, directModelInput.value.trim() || undefined);
-            const thinking = el("div", "thinking");
-            thinking.append(el("span", "spinner"), document.createTextNode(t("chat.directThinking", { provider })));
-            scroll.append(thinking);
-            scrollToEnd();
-            try {
-              const res = await directChat(provider, apiKey, model, text);
-              thinking.remove();
-              renderPlainAnswer(scroll, res.content, t);
-              renderSourceInspector(inspectorBody, t("chat.directSource", { provider }), res.model, t);
-            } catch (e) {
-              thinking.remove();
-              const msg = e instanceof DirectApiError ? `${e.status} · ${e.message}` : String(e instanceof Error ? e.message : e);
-              renderErrorCard(scroll, msg);
+            // One-time raw key retrieval at dispatch — never rendered to the DOM.
+            const apiKey = await deps.vault.get(provider);
+            if (!apiKey) {
+              renderErrorCard(scroll, t("chat.noKey", { provider }));
+              await deps.gov.settle("direct.dispatch", "error", directDetail);
+            } else {
+              const model = resolveDirectModel(provider, directModelInput.value.trim() || undefined);
+              const thinking = el("div", "thinking");
+              thinking.append(el("span", "spinner"), document.createTextNode(t("chat.directThinking", { provider })));
+              scroll.append(thinking);
+              scrollToEnd();
+              try {
+                const res = await directChat(provider, apiKey, model, text);
+                thinking.remove();
+                renderPlainAnswer(scroll, res.content, t);
+                renderSourceInspector(inspectorBody, t("chat.directSource", { provider }), res.model, t);
+                await deps.gov.settle("direct.dispatch", "success", directDetail);
+              } catch (e) {
+                thinking.remove();
+                const msg = e instanceof DirectApiError ? `${e.status} · ${e.message}` : String(e instanceof Error ? e.message : e);
+                renderErrorCard(scroll, msg);
+                await deps.gov.settle("direct.dispatch", "error", directDetail);
+              }
             }
           }
         }
+        bumpActivity();
       } else {
         const companyId = companyInput.value.trim();
         const stub = await startCompare(cfg, { companyId, query: text });
@@ -523,6 +601,102 @@ function renderSourceInspector(body: HTMLElement, source: string, model: string,
   );
 }
 
+// ── governance (approval gate + audit) ──────────────────────────────────────
+
+/**
+ * Drive one side-effecting action through the governance gate. Returns ok only
+ * when the action may proceed — auto-allowed, or human-approved — and the
+ * one-time token has ALREADY been consumed here, so the caller runs its effect
+ * exactly once. A deny (policy) or a reject (human) returns an honest reason and
+ * NOTHING runs. This is the single chokepoint the UI funnels effects through.
+ */
+async function gateAction(
+  deps: UiDeps,
+  kind: string,
+  detail: ActionDetail,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const { gov, t } = deps;
+  const res = await gov.request(kind, detail);
+  if (res.decision === "deny") {
+    return { ok: false, reason: t("gov.denied", { reason: res.reason }) };
+  }
+  let token = res.token;
+  if (res.decision === "require-approval") {
+    const approved = await showApprovalModal(deps, detail, res.reason);
+    if (!approved) {
+      await gov.reject(res.actionId);
+      return { ok: false, reason: t("gov.rejectedByUser") };
+    }
+    const r = await gov.approve(res.actionId);
+    token = r.token;
+  }
+  if (!token) return { ok: false, reason: t("gov.rejectedByUser") };
+  const consumed = await gov.consume(token, kind, detail);
+  // A failed consume (replay/forgery/mismatch) means the effect must NOT run.
+  if (!consumed) return { ok: false, reason: t("gov.rejectedByUser") };
+  return { ok: true };
+}
+
+/**
+ * Arc-rim approval modal with a molten accent — the "coin-flip" moment where the
+ * user decides. Blocks on a promise until Approve or Reject. The action summary
+ * is the only thing shown; no secret ever reaches this surface.
+ */
+function showApprovalModal(deps: UiDeps, detail: ActionDetail, reason: string): Promise<boolean> {
+  const { t, root } = deps;
+  return new Promise<boolean>((resolve) => {
+    const overlay = el("div", "approve-overlay");
+    const card = el("div", "approve-card");
+    const flip = el("div", "approve-flip"); // coin-flip micro-animation host
+    flip.append(el("span", "approve-coin"));
+    card.append(flip);
+    card.append(el("h2", "approve-title", t("gov.approveTitle")));
+    card.append(el("div", "approve-body", t("gov.approveBody")));
+
+    const detailBox = el("div", "approve-detail");
+    const actionRow = el("div", "approve-kv");
+    actionRow.append(el("span", "approve-k", t("gov.approveAction")), el("span", "approve-v", detail.summary ?? ""));
+    const reasonRow = el("div", "approve-kv");
+    reasonRow.append(el("span", "approve-k", t("gov.approveReason")), el("span", "approve-v mono", reason));
+    detailBox.append(actionRow, reasonRow);
+    card.append(detailBox);
+
+    const btns = el("div", "approve-btns");
+    const rejectBtn = el("button", "approve-reject", t("gov.rejectBtn"));
+    const approveBtn = el("button", "approve-approve", t("gov.approveBtn"));
+    btns.append(rejectBtn, approveBtn);
+    card.append(btns);
+
+    const close = (v: boolean) => {
+      overlay.remove();
+      resolve(v);
+    };
+    rejectBtn.addEventListener("click", () => close(false));
+    approveBtn.addEventListener("click", () => close(true));
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close(false); // click-outside = reject (fail-closed)
+    });
+
+    overlay.append(card);
+    root.append(overlay);
+    approveBtn.focus();
+  });
+}
+
+/** One audit-log row: time · kind · outcome, molten when the outcome is a block. */
+function renderAuditRow(e: AuditEntry): HTMLElement {
+  const row = el("div", "audit-row");
+  const time = new Date(e.ts);
+  const hh = String(time.getHours()).padStart(2, "0");
+  const mm = String(time.getMinutes()).padStart(2, "0");
+  const ss = String(time.getSeconds()).padStart(2, "0");
+  row.append(el("span", "audit-ts mono", `${hh}:${mm}:${ss}`));
+  row.append(el("span", "audit-kind mono", e.kind));
+  const blocked = e.outcome === "denied" || e.outcome === "rejected" || e.outcome === "replay-rejected" || e.outcome === "error";
+  row.append(el("span", blocked ? "audit-outcome bad" : "audit-outcome", e.outcome));
+  return row;
+}
+
 /**
  * Left-rail BYOK keys section: masked list + add/remove. Delegates every
  * mutation to the injected vault; a raw key value is NEVER rendered (only the
@@ -639,22 +813,42 @@ function renderLaneBSection(deps: UiDeps): HTMLElement {
       const plan = buildLaunchCommand(status.vendor);
       const cmdText = plan.cliDelegation.join(" ");
       const copyBtn = el("button", "laneb-btn", t("laneB.copy"));
+      copyBtn.append(el("span", "laneb-gov-badge", t("gov.governedBadge")));
       const cmdBox = el("div", "laneb-cmd mono");
       cmdBox.style.display = "none";
       cmdBox.append(el("div", "laneb-cmd-hint", t("laneB.launchHint")));
       cmdBox.append(el("code", undefined, cmdText));
+      const gateErr = el("div", "laneb-gate-err");
+      gateErr.style.display = "none";
       copyBtn.addEventListener("click", () => {
-        cmdBox.style.display = "block";
-        // Best-effort clipboard; the visible command is the reliable fallback.
-        void navigator.clipboard?.writeText(cmdText).then(
-          () => {
-            copyBtn.textContent = t("laneB.copied");
-            setTimeout(() => (copyBtn.textContent = t("laneB.copy")), 1600);
-          },
-          () => {},
-        );
+        void (async () => {
+          // Revealing/copying a launch command is a GOVERNED action — a human
+          // approves before Forge surfaces a command it could run for you.
+          const detail: ActionDetail = {
+            vendor: status.vendor,
+            summary: t("gov.kindSpawnLaunch", { vendor: status.vendor }),
+          };
+          const gate = await gateAction(deps, "spawn.launch", detail);
+          if (!gate.ok) {
+            gateErr.textContent = gate.reason;
+            gateErr.style.display = "block";
+            await deps.gov.settle("spawn.launch", "error", detail);
+            return;
+          }
+          gateErr.style.display = "none";
+          cmdBox.style.display = "block";
+          // Best-effort clipboard; the visible command is the reliable fallback.
+          void navigator.clipboard?.writeText(cmdText).then(
+            () => {
+              copyBtn.textContent = t("laneB.copied");
+              setTimeout(() => (copyBtn.textContent = t("laneB.copy")), 1600);
+            },
+            () => {},
+          );
+          await deps.gov.settle("spawn.launch", "success", detail);
+        })();
       });
-      row.append(copyBtn, cmdBox);
+      row.append(copyBtn, cmdBox, gateErr);
     } else {
       const fb = spawnFallbackMessage(status.vendor);
       const fbBox = el("div", "laneb-fallback");

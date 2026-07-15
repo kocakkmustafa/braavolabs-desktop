@@ -8,6 +8,7 @@ import { type Config, DEFAULT_API, setPersist } from "./config";
 import { resolveStore, loadApiUrl, hydrateConfig } from "./store";
 import { resolveKeyVault } from "./keyvault";
 import { resolveSpawnProbe } from "./spawn";
+import { resolveGovernance } from "./governance";
 import { detectLocale, makeT } from "./i18n";
 import { renderLogin, renderWorkspace, type UiDeps } from "./ui";
 
@@ -33,6 +34,7 @@ async function boot(): Promise<void> {
     t,
     vault: resolveKeyVault(),
     spawn: resolveSpawnProbe(),
+    gov: resolveGovernance(),
     persist,
     onSignedOut: () => {
       void store.clear();

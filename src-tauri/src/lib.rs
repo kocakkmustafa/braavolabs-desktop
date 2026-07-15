@@ -1,10 +1,15 @@
 //! Forge Desktop — Rust host.
 //!
 //! Thin by design: window creation + OS-scoped secret commands (auth tokens +
-//! BYOK provider keys). The frontend (packages/desktop/ui) owns every model
-//! call — Lane-A local (Ollama) and BYOK direct dispatch happen in the webview;
-//! NO AI/orchestration logic lives here (server = orchestration). The host only
-//! persists secrets to disk with owner-only perms and hands them back on demand.
+//! BYOK provider keys) + the GOVERNANCE gate. The frontend (packages/desktop/ui)
+//! owns every model call — Lane-A local (Ollama) and BYOK direct dispatch happen
+//! in the webview; NO AI/orchestration logic lives here (server = orchestration).
+//! The host persists secrets to disk with owner-only perms, and — legitimately —
+//! owns the security-critical governance: a FAIL-CLOSED policy gate, one-time
+//! approval tokens, an append-only audit log, and the single command choke point.
+//! Permission/sandbox logic on the host is deliberate (a webview can't forge a
+//! host token); AI/orchestration stays out. See the "GOVERNANCE-BY-DEFAULT"
+//! section below.
 //!
 //! ## Secret storage
 //! `secure_store_{get,set,clear}` persist the bearer + refresh tokens to a
@@ -22,13 +27,15 @@
 //! documented HUMAN GATE in the README, deliberately not wired here to keep the
 //! crate's dependency surface (and `cargo check` time) minimal.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, State};
 
 /// Token bundle mirrored to the CLI's config field names ({token, refreshToken})
 /// so the two clients share one mental model. Serialized as camelCase so the
@@ -298,9 +305,518 @@ fn spawn_probe(app: AppHandle, vendor: String) -> Result<VendorProbe, String> {
     }
 }
 
+// ── GOVERNANCE-BY-DEFAULT — the host-side enforcement point ───────────────────
+//
+// This is the security MOAT: every side-effecting action passes a FAIL-CLOSED
+// policy gate before it can run, and a command can ONLY run through one governed
+// choke point. The webview cannot forge a token — tokens live here, behind a
+// Mutex, and are spent exactly once. `classify` mirrors src/governance.ts (the
+// single source of truth); if the two ever diverge, the TS tests + these Rust
+// tests are the tripwire.
+//
+// HONEST BOUNDARY: this layer is "governed + choke-point". It is NOT OS-level
+// sandbox isolation (container / seatbelt / AppContainer) — that is a documented
+// roadmap/human-gate (see README "Governance & sandbox"). What IS enforced here:
+// fail-closed policy, one-time approval tokens, an append-only 0600 audit log,
+// and a command choke point with a working-dir allowlist, argv arrays (no shell
+// string), optional env-clean, and a timeout.
+
+/// Policy decision, mirroring the TS `Decision` union. `&'static str` values are
+/// serialized to the webview verbatim.
+fn classify(kind: &str, argv: &[String], path: Option<&str>) -> (&'static str, &'static str) {
+    // 1. Hard denies first (a denied action is never approvable).
+    if kind == "command.run" && is_destructive(&argv.join(" ")) {
+        return ("deny", "destructive command pattern");
+    }
+    if kind == "file.write" {
+        if let Some(p) = path {
+            if is_traversal(p) {
+                return ("deny", "path traversal blocked");
+            }
+        }
+    }
+    // 2. Explicit auto-allow set (read-only / local-keyless only).
+    if kind == "probe.detect" || kind == "local.dispatch" {
+        return ("auto-allow", "read-only / local-keyless");
+    }
+    // 3. FAIL-CLOSED default — unknown kinds land here too.
+    let known = matches!(
+        kind,
+        "direct.dispatch" | "spawn.launch" | "command.run" | "mcp.tool" | "file.write"
+    );
+    if known {
+        ("require-approval", "side-effecting action")
+    } else {
+        ("require-approval", "unknown action (fail-closed)")
+    }
+}
+
+/// True when a joined command line matches an obviously destructive pattern.
+/// Substring/keyword checks kept simple + dependency-free (no regex crate).
+fn is_destructive(joined: &str) -> bool {
+    let s = joined.to_lowercase();
+    s.contains("rm -rf")
+        || s.contains("rm -r ")
+        || s.contains("mkfs")
+        || s.contains("dd if=")
+        || s.contains("> /dev/sd")
+        || s.contains("> /dev/nvme")
+        || s.contains("> /dev/disk")
+        || s.replace(' ', "").contains(":(){:|:&};:") // fork bomb
+}
+
+/// True when a path tries to escape its base via a `..` segment.
+fn is_traversal(path: &str) -> bool {
+    path.split(['/', '\\']).any(|seg| seg == "..")
+}
+
+/// Strip anything credential-shaped from free text before it enters the ledger.
+fn redact(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for word in s.split_inclusive(char::is_whitespace) {
+        let trimmed = word.trim_end();
+        let looks_secret = trimmed.starts_with("sk-") && trimmed.len() > 8
+            || (trimmed.len() >= 32 && trimmed.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+        if looks_secret {
+            out.push_str("«redacted»");
+            // preserve trailing whitespace if any
+            if word.len() > trimmed.len() {
+                out.push_str(&word[trimmed.len()..]);
+            }
+        } else {
+            out.push_str(word);
+        }
+    }
+    out
+}
+
+/// True iff `cwd` canonicalizes inside one of the allowlisted roots.
+fn workdir_allowed(cwd: &Path, allow: &[PathBuf]) -> bool {
+    let real = match cwd.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return false, // non-existent / unreadable dir → refuse
+    };
+    allow.iter().any(|root| {
+        root.canonicalize()
+            .map(|r| real.starts_with(r))
+            .unwrap_or(false)
+    })
+}
+
+/// Detail meta crossing from the webview — NEVER a secret (only action meta).
+#[derive(Deserialize, Default, Clone)]
+#[serde(default, rename_all = "camelCase")]
+struct ActionDetail {
+    summary: Option<String>,
+    argv: Option<Vec<String>>,
+    cwd: Option<String>,
+    path: Option<String>,
+    tool: Option<String>,
+    server: Option<String>,
+    vendor: Option<String>,
+    provider: Option<String>,
+}
+
+impl ActionDetail {
+    /// Stable binding key so a token issued for action A can't authorize B.
+    fn binding(&self, kind: &str) -> String {
+        format!(
+            "{kind}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            self.argv, self.cwd, self.path, self.tool, self.server, self.vendor, self.provider
+        )
+    }
+    fn summary_or(&self, kind: &str) -> String {
+        redact(self.summary.as_deref().unwrap_or(kind))
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GateResult {
+    action_id: String,
+    decision: String,
+    reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct AuditEntry {
+    seq: u64,
+    ts: u64,
+    kind: String,
+    decision: String,
+    outcome: String,
+    summary: String,
+}
+
+#[derive(Clone)]
+struct Bound {
+    /// Kept for audit correlation / future use; not read on the hot path.
+    #[allow(dead_code)]
+    action_id: String,
+    kind: String,
+    binding: String,
+}
+
+/// The host-owned gate state. Behind a Mutex; the webview never sees it.
+#[derive(Default)]
+struct GateState {
+    pending: HashMap<String, Bound>, // actionId → awaiting approval
+    tokens: HashMap<String, Bound>,  // token → bound action (spent on consume)
+    seq: u64,
+}
+
+struct Governance(Mutex<GateState>);
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn audit_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join("audit.log"))
+}
+
+/// Append one JSON line to the 0600 audit log. Best-effort — an audit failure
+/// must never crash a decision, but a secret must never be written: `summary`
+/// is redacted by the caller and no token/secret field exists on the entry.
+fn audit_append(app: &AppHandle, gate: &mut GateState, kind: &str, decision: &str, outcome: &str, summary: &str, ts: u64) -> AuditEntry {
+    gate.seq += 1;
+    let entry = AuditEntry {
+        seq: gate.seq,
+        ts: if ts == 0 { now_ms() } else { ts },
+        kind: kind.to_string(),
+        decision: decision.to_string(),
+        outcome: outcome.to_string(),
+        summary: redact(summary),
+    };
+    if let Ok(path) = audit_path(app) {
+        if let Ok(mut line) = serde_json::to_vec(&entry) {
+            line.push(b'\n');
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).mode(0o600).open(&path) {
+                    let _ = f.write_all(&line);
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+                    let _ = f.write_all(&line);
+                }
+            }
+        }
+    }
+    entry
+}
+
+fn mint_id(prefix: &str, seq: u64) -> String {
+    // Counter + nanos nonce. One-time-use is enforced by removal from the map
+    // (the tested property); this is a replay nonce, NOT a cryptographic secret.
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    format!("{prefix}_{seq}_{nanos}")
+}
+
+#[tauri::command]
+fn request_action(app: AppHandle, gov: State<'_, Governance>, kind: String, detail: Option<ActionDetail>, ts: Option<u64>) -> Result<GateResult, String> {
+    let detail = detail.unwrap_or_default();
+    let ts = ts.unwrap_or(0);
+    let (decision, reason) = classify(&kind, detail.argv.as_deref().unwrap_or(&[]), detail.path.as_deref());
+    let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+    let action_id = mint_id("act", gate.seq + 1);
+    let binding = detail.binding(&kind);
+    let summary = detail.summary_or(&kind);
+
+    match decision {
+        "deny" => {
+            audit_append(&app, &mut gate, &kind, decision, "denied", &summary, ts);
+            Ok(GateResult { action_id, decision: decision.into(), reason: reason.into(), token: None })
+        }
+        "auto-allow" => {
+            let token = mint_id("tok", gate.seq + 1);
+            gate.tokens.insert(token.clone(), Bound { action_id: action_id.clone(), kind: kind.clone(), binding });
+            audit_append(&app, &mut gate, &kind, decision, "granted", &summary, ts);
+            Ok(GateResult { action_id, decision: decision.into(), reason: reason.into(), token: Some(token) })
+        }
+        _ => {
+            gate.pending.insert(action_id.clone(), Bound { action_id: action_id.clone(), kind: kind.clone(), binding });
+            audit_append(&app, &mut gate, &kind, decision, "pending", &summary, ts);
+            Ok(GateResult { action_id, decision: "require-approval".into(), reason: reason.into(), token: None })
+        }
+    }
+}
+
+#[tauri::command]
+fn approve_action(app: AppHandle, gov: State<'_, Governance>, action_id: String, ts: Option<u64>) -> Result<serde_json::Value, String> {
+    let ts = ts.unwrap_or(0);
+    let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+    let rec = gate.pending.remove(&action_id).ok_or("no pending action for that id")?;
+    let token = mint_id("tok", gate.seq + 1);
+    gate.tokens.insert(token.clone(), rec.clone());
+    audit_append(&app, &mut gate, &rec.kind, "require-approval", "approved", &rec.kind, ts);
+    Ok(serde_json::json!({ "token": token }))
+}
+
+#[tauri::command]
+fn reject_action(app: AppHandle, gov: State<'_, Governance>, action_id: String, ts: Option<u64>) -> Result<(), String> {
+    let ts = ts.unwrap_or(0);
+    let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+    if let Some(rec) = gate.pending.remove(&action_id) {
+        audit_append(&app, &mut gate, &rec.kind, "require-approval", "rejected", &rec.kind, ts);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn consume_action(app: AppHandle, gov: State<'_, Governance>, token: String, kind: String, detail: Option<ActionDetail>, ts: Option<u64>) -> Result<bool, String> {
+    let detail = detail.unwrap_or_default();
+    let ts = ts.unwrap_or(0);
+    let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+    match gate.tokens.get(&token).cloned() {
+        // Missing = replay (already spent) or forgery (never issued).
+        None => {
+            audit_append(&app, &mut gate, &kind, "-", "replay-rejected", &kind, ts);
+            Ok(false)
+        }
+        Some(rec) if rec.kind != kind || rec.binding != detail.binding(&kind) => {
+            audit_append(&app, &mut gate, &kind, "-", "replay-rejected", &kind, ts);
+            Ok(false)
+        }
+        Some(_) => {
+            gate.tokens.remove(&token); // one-time
+            let summary = detail.summary_or(&kind);
+            audit_append(&app, &mut gate, &kind, "-", "consumed", &summary, ts);
+            Ok(true)
+        }
+    }
+}
+
+#[tauri::command]
+fn settle_action(app: AppHandle, gov: State<'_, Governance>, kind: String, outcome: String, detail: Option<ActionDetail>, ts: Option<u64>) -> Result<(), String> {
+    let detail = detail.unwrap_or_default();
+    let ts = ts.unwrap_or(0);
+    // Only terminal outcomes may be settled — never fabricate a decision here.
+    let outcome = if outcome == "success" || outcome == "error" { outcome } else { "error".to_string() };
+    let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+    let summary = detail.summary_or(&kind);
+    audit_append(&app, &mut gate, &kind, "-", &outcome, &summary, ts);
+    Ok(())
+}
+
+/// Read the last `n` audit lines. Parses the append-only log; malformed lines
+/// are skipped rather than failing the read. Never returns a secret (the log
+/// itself never contains one).
+#[tauri::command]
+fn audit_recent(app: AppHandle, n: Option<usize>) -> Result<Vec<AuditEntry>, String> {
+    let n = n.unwrap_or(50);
+    let path = audit_path(&app)?;
+    let text = match fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return Ok(vec![]), // no log yet ⇒ empty
+    };
+    let mut entries: Vec<AuditEntry> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<AuditEntry>(l).ok())
+        .collect();
+    let from = entries.len().saturating_sub(n);
+    Ok(entries.split_off(from))
+}
+
+/// Outcome of a governed command run.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CommandResult {
+    code: Option<i32>,
+    timed_out: bool,
+    /// stdout is returned to the caller but NEVER written to the audit log.
+    stdout: String,
+    stderr: String,
+}
+
+/// THE COMMAND CHOKE POINT. The single path through which a command may ever run.
+/// It requires a valid one-time token (from an approved request), enforces a
+/// working-dir allowlist (canonicalized — no `..` escape), builds an argv ARRAY
+/// (never a shell string), optionally clears the environment, and applies a
+/// timeout. This is the enforcement surface; a real OS sandbox around it is a
+/// documented human-gate.
+#[tauri::command]
+fn governed_command(
+    app: AppHandle,
+    gov: State<'_, Governance>,
+    token: String,
+    argv: Vec<String>,
+    cwd: String,
+    clean_env: Option<bool>,
+    timeout_ms: Option<u64>,
+    ts: Option<u64>,
+) -> Result<CommandResult, String> {
+    use std::process::{Command, Stdio};
+    let ts = ts.unwrap_or(0);
+
+    // 1. Spend the token — a command CANNOT run without passing the gate.
+    let detail = ActionDetail { argv: Some(argv.clone()), cwd: Some(cwd.clone()), ..Default::default() };
+    {
+        let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+        let ok = match gate.tokens.get(&token).cloned() {
+            Some(rec) if rec.kind == "command.run" && rec.binding == detail.binding("command.run") => true,
+            _ => false,
+        };
+        if !ok {
+            audit_append(&app, &mut gate, "command.run", "-", "replay-rejected", "command.run", ts);
+            return Err("invalid or already-spent token".into());
+        }
+        gate.tokens.remove(&token);
+        audit_append(&app, &mut gate, "command.run", "-", "consumed", &redact(&argv.join(" ")), ts);
+    }
+
+    // 2. Re-validate at the choke point (defense-in-depth, independent of policy).
+    if argv.is_empty() {
+        return Err("empty argv".into());
+    }
+    if is_destructive(&argv.join(" ")) {
+        return Err("destructive command refused at choke point".into());
+    }
+    let allow = command_allowlist(&app);
+    let cwd_path = PathBuf::from(&cwd);
+    if !workdir_allowed(&cwd_path, &allow) {
+        return Err("working directory is not in the allowlist".into());
+    }
+
+    // 3. Build the child from an argv ARRAY — never a shell string.
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..]).current_dir(&cwd_path).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if clean_env.unwrap_or(false) {
+        cmd.env_clear();
+        // Keep a minimal PATH so the binary resolves; nothing else leaks in.
+        if let Some(p) = std::env::var_os("PATH") {
+            cmd.env("PATH", p);
+        }
+    }
+
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+
+    // 4. Timeout: poll try_wait to a deadline, then kill.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000));
+    let mut timed_out = false;
+    loop {
+        match child.try_wait().map_err(|e| e.to_string())? {
+            Some(_) => break,
+            None => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    timed_out = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    }
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    let result = CommandResult {
+        code: output.status.code(),
+        timed_out,
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    };
+    {
+        let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+        let outcome = if timed_out || result.code != Some(0) { "error" } else { "success" };
+        audit_append(&app, &mut gate, "command.run", "-", outcome, "command.run", ts);
+    }
+    Ok(result)
+}
+
+/// Allowlisted roots a governed command may run inside. Conservative by default:
+/// the app-config dir + the user's home. Widening this is a deliberate change.
+fn command_allowlist(app: &AppHandle) -> Vec<PathBuf> {
+    let mut roots = vec![];
+    if let Ok(dir) = app.path().app_config_dir() {
+        roots.push(dir);
+    }
+    if let Ok(home) = app.path().home_dir() {
+        roots.push(home);
+    }
+    roots
+}
+
+#[cfg(test)]
+mod governance_tests {
+    use super::*;
+
+    #[test]
+    fn fails_closed_on_unknown_kind() {
+        let (d, r) = classify("totally.unknown", &[], None);
+        assert_eq!(d, "require-approval");
+        assert!(r.contains("unknown"));
+    }
+
+    #[test]
+    fn auto_allows_only_the_explicit_set() {
+        assert_eq!(classify("probe.detect", &[], None).0, "auto-allow");
+        assert_eq!(classify("local.dispatch", &[], None).0, "auto-allow");
+        assert_eq!(classify("direct.dispatch", &[], None).0, "require-approval");
+        assert_eq!(classify("spawn.launch", &[], None).0, "require-approval");
+        assert_eq!(classify("mcp.tool", &[], None).0, "require-approval");
+    }
+
+    #[test]
+    fn hard_denies_destructive_and_traversal() {
+        let argv = vec!["rm".to_string(), "-rf".to_string(), "/".to_string()];
+        assert_eq!(classify("command.run", &argv, None).0, "deny");
+        assert_eq!(classify("file.write", &[], Some("../../etc/passwd")).0, "deny");
+        assert_eq!(classify("file.write", &[], Some("notes/x.md")).0, "require-approval");
+    }
+
+    #[test]
+    fn destructive_and_traversal_helpers() {
+        assert!(is_destructive("sudo rm -rf /var"));
+        assert!(!is_destructive("ls -la"));
+        assert!(is_traversal("a/../b"));
+        assert!(!is_traversal("a/b/c"));
+    }
+
+    #[test]
+    fn redact_scrubs_secrets_keeps_plain_text() {
+        assert!(!redact("key sk-ant-ABCDEF0123456789ABCDEF").contains("sk-ant"));
+        assert_eq!(redact("plain human summary"), "plain human summary");
+        assert!(redact("tok abcdefghijklmnopqrstuvwxyz012345").contains("«redacted»"));
+    }
+
+    #[test]
+    fn workdir_allowlist_rejects_outside_and_missing() {
+        let tmp = std::env::temp_dir();
+        let allow = vec![tmp.clone()];
+        assert!(workdir_allowed(&tmp, &allow));
+        assert!(!workdir_allowed(&PathBuf::from("/definitely/not/a/real/dir/xyz"), &allow));
+        // A sibling outside the allowlist root is refused.
+        assert!(!workdir_allowed(&PathBuf::from("/"), &allow));
+    }
+
+    #[test]
+    fn binding_differs_by_detail() {
+        let a = ActionDetail { argv: Some(vec!["echo".into(), "a".into()]), ..Default::default() };
+        let b = ActionDetail { argv: Some(vec!["echo".into(), "b".into()]), ..Default::default() };
+        assert_ne!(a.binding("command.run"), b.binding("command.run"));
+        assert_eq!(a.binding("command.run"), a.binding("command.run"));
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(Governance(Mutex::new(GateState::default())))
         .invoke_handler(tauri::generate_handler![
             secure_store_get,
             secure_store_set,
@@ -309,7 +825,14 @@ pub fn run() {
             key_list,
             key_remove,
             key_get,
-            spawn_probe
+            spawn_probe,
+            request_action,
+            approve_action,
+            reject_action,
+            consume_action,
+            settle_action,
+            audit_recent,
+            governed_command
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Forge desktop application");

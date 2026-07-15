@@ -37,12 +37,16 @@ packages/desktop/
 │   ├── spawn.ts            Lane-B SAFE-SPAWN: vendor CLI detection + launch
 │   │                       command. Port of CLI spawn.ts contract; Rust
 │   │                       spawn_probe backing / memory fallback. Tested.
+│   ├── governance.ts       GOVERNANCE-BY-DEFAULT: fail-closed policy + one-time
+│   │                       approval gate + append-only audit ledger. Rust-host
+│   │                       backed / memory fallback. The moat. Tested (18).
 │   ├── i18n.ts             single messages object, en + tr (i18n-ready).
-│   ├── ui.ts               thin DOM shell (3-pane + keys + Lane-B) — not unit-tested.
+│   ├── ui.ts               thin DOM shell (3-pane + keys + Lane-B + approval
+│   │                       modal + Activity/audit tab) — not unit-tested.
 │   ├── main.ts             entry: hydrate → login or workspace.
 │   ├── styles.css          obsidian palette (arc-blue / ember / molten; NO green).
-│   └── __tests__/          76 tests (client / render / store / i18n /
-│                           keyvault / local / direct / identity / spawn).
+│   └── __tests__/          94 tests (client / render / store / i18n / keyvault /
+│                           local / direct / identity / spawn / governance).
 └── src-tauri/              Rust host (STANDALONE cargo package)
     ├── Cargo.toml          tauri = "2"; not part of any cargo workspace.
     ├── tauri.conf.json      window + CSP (self + braavolabs.com + Ollama
@@ -50,7 +54,10 @@ packages/desktop/
     ├── capabilities/default.json  core webview permissions for "main".
     ├── icons/              app icons (ember mark).
     └── src/{main,lib}.rs   window + token + BYOK-key OS-scoped commands +
-                            Lane-B spawn_probe (detect only). THIN.
+                            Lane-B spawn_probe + the GOVERNANCE gate (policy
+                            mirror, one-time tokens, 0600 audit log, command
+                            choke point) + 7 Rust unit tests. THIN on AI, but
+                            legitimately owns permission/sandbox enforcement.
 ```
 
 ### Panes (obsidian identity, §5)
@@ -64,9 +71,12 @@ packages/desktop/
   card, final synthesis card, ember `≈ saved $X` footer shown **only when the
   server reports a real positive figure** (never fabricated). Lane-A (server
   bypass): **Local** (Ollama) and **Direct** (BYOK provider) — see below.
-- **Right inspector** — last call's tier / model / provider / confidence /
-  escalated / cost breakdown (cascade), or per-model / synthesis / cost
-  (compare).
+- **Right inspector** — two tabs. **Inspector**: last call's tier / model /
+  provider / confidence / escalated / cost breakdown (cascade), or per-model /
+  synthesis / cost (compare). **Activity**: the governance **Policy** table
+  (which kinds auto-run vs. ask) + the append-only **audit** ledger (newest
+  first). Side-effecting lanes (Direct, Lane-B launch) carry a `governed` badge
+  and pop the **approval modal** before running.
 
 Palette: obsidian `#0A0B0F`, arc-blue `#3B82F6`/`#60A5FA`, ember `#F97316`
 (running), molten `#FF4D4D` (error), steel greys; JetBrains-Mono for metrics.
@@ -177,16 +187,91 @@ inside the window is a future **human gate** (needs a PTY plugin + a GUI session
 
 ---
 
+## Governance & sandbox — governed by default (the moat)
+
+Where "allow-all" agent hosts (Hermes, OpenClaw, …) run whatever an action asks,
+Forge Desktop is **governed by default**: every side-effecting action passes a
+**fail-closed** policy gate *before* it can run, each grant is a **one-time
+token**, and every decision lands in an **append-only audit log**. The security
+enforcement lives in the **Rust host** — legitimately, because a compromised
+webview must not be able to forge a grant. (AI/orchestration still never touches
+the host; permission/sandbox logic is a different concern and belongs there.)
+
+### 1. Fail-closed policy (`governance.ts` · mirrored in `lib.rs::classify`)
+
+`classifyAction(kind, detail)` → `auto-allow` | `require-approval` | `deny`.
+
+| Bucket | Kinds | Rule |
+|---|---|---|
+| **auto-allow** (explicit, tiny) | `probe.detect`, `local.dispatch` | read-only detection + local keyless dispatch only |
+| **require-approval** | `direct.dispatch`, `spawn.launch`, `command.run`, `mcp.tool`, `file.write`, **and every unknown kind** | a human taps before it runs |
+| **deny** (hard) | `command.run` matching a destructive pattern (`rm -rf`, `mkfs`, `dd if=`, fork bomb…); `file.write` with `..` path traversal | never even offered for approval |
+
+The default is the third row's **and every unknown kind**: an action Forge has
+not explicitly reasoned about is **never auto-allowed** — it falls through to
+require-approval. Widening the auto-allow set is a deliberate, reviewable change
+(one `Set` in `governance.ts`, one `matches!` arm in `lib.rs` — the two are kept
+in lock-step, and the TS + Rust test suites are the tripwire if they drift).
+
+The Settings → **Activity → Policy** panel renders this table live, straight
+from the compile-time constant — so a compromised host can't misrepresent which
+actions auto-run.
+
+### 2. One-time approval tokens (nothing runs without passing the gate)
+
+`request → (approve|reject) → consume`. `request()` classifies + audits;
+`approve()` mints a token bound to *that* action; `consume()` spends it **exactly
+once** and refuses a replayed, forged, or mis-bound token. An executor that
+requires a consumed token therefore **cannot run without passing the gate** —
+verified by tests (replay-after-consume → refused; a token for action A → refused
+for action B; a never-issued token → refused). The Lane-A Direct, Lane-B launch,
+and Local lanes in the UI are all funnelled through this gate; the approval modal
+is the "coin-flip" moment (arc-rim card, ember/molten accent).
+
+### 3. Append-only audit ledger (0600, secret-free)
+
+Every transition appends one JSON line to `audit.log` in the app-config dir
+(`0600` on unix): `{seq, ts, kind, decision, outcome, summary}`. **Ordering is by
+the monotonic `seq`**, never the wall-clock `ts`. A **secret/token is never
+written** — only the action type and a **redacted** meta summary (`sk-…`, Bearer
+tokens, and long opaque strings are scrubbed by `redactSummary` / `redact`
+before storage; a test asserts a canary secret never appears). The right
+inspector's **Activity** tab renders the last N entries, newest first.
+
+### 4. Command choke point (`lib.rs::governed_command`)
+
+The single path through which a command may ever execute. It (1) spends a valid
+one-time `command.run` token, (2) re-validates the destructive-pattern denylist,
+(3) enforces a **working-dir allowlist** (canonicalized — no `..` escape;
+non-existent dir refused), (4) builds the child from an **argv array** (never a
+shell string — no injection seam), (5) optionally **clears the environment**
+(keeping only `PATH` so the binary resolves), and (6) applies a **timeout**
+(kill on deadline). The allowlist roots default to the app-config dir + home.
+
+### Honest boundary — "governed + choke-point", NOT "sandboxed"
+
+This layer is **governance + a choke point**, and the README calls it exactly
+that. It is **not** OS-level process isolation — there is no container, macOS
+seatbelt/`sandbox-exec`, or Windows AppContainer wrapping the child here. The
+enforcement *points* (policy gate, one-time tokens, audit, workdir allowlist,
+argv arrays, env-clean, timeout) are in place and unit-tested; wrapping the
+choke point in a **real OS sandbox** is a documented **roadmap / human gate**
+(needs a platform sandboxing layer + a GUI session to drive). No code here is
+labelled "sandboxed" — the moat we ship today is *governed by default*.
+
+---
+
 ## Develop & verify (headless)
 
 ```bash
-pnpm --filter @ai-company-os/desktop test    # vitest — 76 tests
+pnpm --filter @ai-company-os/desktop test    # vitest — 94 tests
 pnpm --filter @ai-company-os/desktop build   # tsc --noEmit && vite build → dist/
 pnpm --filter @ai-company-os/desktop lint    # tsc --noEmit
 
 # Rust host (cargo/rustc live in ~/.cargo/bin — not on PATH by default):
 export PATH="$HOME/.cargo/bin:$PATH"
 cd packages/desktop/src-tauri && cargo check   # requires dist/ to exist first
+cargo test --lib                               # 7 governance unit tests
 ```
 
 `cargo check` compiles `tauri::generate_context!`, which reads
@@ -223,3 +308,8 @@ Not wired here to keep the crate's dependency surface and `cargo check` time sma
 - **Signed build** — Apple Developer ID / Windows code-signing cert.
 - **Notarization** — Apple notary submission + stapling.
 - **OS-keychain secret storage** — see above.
+- **Real OS sandbox** — wrapping the `governed_command` choke point in a
+  platform sandbox (container / macOS seatbelt / Windows AppContainer). The
+  governance enforcement points (policy, one-time tokens, audit, workdir
+  allowlist, argv arrays, env-clean, timeout) are in place today; OS-level
+  isolation around them is the remaining hardening — see "Governance & sandbox".
