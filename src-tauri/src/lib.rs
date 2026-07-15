@@ -187,6 +187,117 @@ fn key_get(app: AppHandle, provider: String) -> Result<Option<String>, String> {
     Ok(map.get(provider.trim()).cloned())
 }
 
+// ── Lane-B SAFE-SPAWN — vendor CLI detection ─────────────────────────────────
+//
+// The ONLY host-side Lane-B surface. It answers exactly one question about the
+// user's OWN official vendor CLI (claude / codex): "installed? which path? what
+// version?" — and NOTHING else. It NEVER spawns an interactive session, never
+// captures a vendor session's stdout/stderr, and never reads a token/credential
+// file: discovery looks only at PATH + neutral, tool-agnostic bin prefixes
+// (mirroring the TS `knownPaths` contract in src/spawn.ts). The actual
+// interactive session is delegated to the proven `forge spawn` CLI (see the
+// desktop README "Lane-B safety contract"); no AI/orchestration logic lives here.
+
+/// One vendor's detection result. camelCase so the webview (spawn.ts) reads
+/// `installed` / `path` / `version` directly.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VendorProbe {
+    installed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+}
+
+/// Map a vendor name to its bare executable name. Unknown vendors are rejected
+/// (the webview only ever sends "claude" / "codex", but the host does not trust
+/// input) — this bounds the set of binaries the host will ever probe.
+fn vendor_bin(vendor: &str) -> Option<&'static str> {
+    match vendor {
+        "claude" => Some("claude"),
+        "codex" => Some("codex"),
+        _ => None,
+    }
+}
+
+/// Resolve a bare binary via PATH (the equivalent of `which`), platform-aware.
+/// Returns the first PATH entry that holds an existing file. Never a config dir.
+fn find_on_path(bin: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let cand = dir.join(bin);
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+    None
+}
+
+/// Neutral install prefixes to probe when a binary is not on PATH. Deliberately
+/// NOT vendor config/token dirs (rule d) — the exact mirror of TS `knownPaths`.
+fn neutral_prefixes(app: &AppHandle, vendor: &str, bin: &str) -> Vec<PathBuf> {
+    let mut paths = vec![
+        PathBuf::from(format!("/opt/homebrew/bin/{bin}")),
+        PathBuf::from(format!("/usr/local/bin/{bin}")),
+    ];
+    if let Ok(home) = app.path().home_dir() {
+        paths.push(home.join(".local/bin").join(bin));
+        paths.push(home.join(".bun/bin").join(bin));
+        if vendor == "codex" {
+            paths.push(home.join(".cargo/bin").join(bin));
+        }
+    }
+    paths
+}
+
+/// Read a version line from the resolved binary (`<bin> --version`). This reads
+/// ONLY the binary itself — never a token/login file (rule d). A binary present
+/// but without a working `--version` still counts as installed (version None).
+fn read_version(path: &std::path::Path) -> Option<String> {
+    let out = std::process::Command::new(path)
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.is_empty() {
+        None
+    } else {
+        Some(line.to_string())
+    }
+}
+
+/// Detect whether the user's official vendor CLI is installed, and its version.
+/// Reports installed-or-not ONLY — it never probes login state (that would mean
+/// reading a token/cookie file, rule d). An unknown vendor yields not-installed.
+#[tauri::command]
+fn spawn_probe(app: AppHandle, vendor: String) -> Result<VendorProbe, String> {
+    let bin = match vendor_bin(vendor.trim()) {
+        Some(b) => b,
+        None => return Ok(VendorProbe { installed: false, path: None, version: None }),
+    };
+    let resolved = find_on_path(bin).or_else(|| {
+        neutral_prefixes(&app, vendor.trim(), bin)
+            .into_iter()
+            .find(|p| p.is_file())
+    });
+    match resolved {
+        None => Ok(VendorProbe { installed: false, path: None, version: None }),
+        Some(path) => {
+            let version = read_version(&path);
+            Ok(VendorProbe {
+                installed: true,
+                path: Some(path.to_string_lossy().into_owned()),
+                version,
+            })
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -197,7 +308,8 @@ pub fn run() {
             key_add,
             key_list,
             key_remove,
-            key_get
+            key_get,
+            spawn_probe
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Forge desktop application");

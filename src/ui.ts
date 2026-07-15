@@ -39,6 +39,14 @@ import {
   DirectApiError,
 } from "./direct";
 import type { KeyVault } from "./keyvault";
+import {
+  SPAWN_VENDORS,
+  buildLaunchCommand,
+  spawnFallbackMessage,
+  spawnRiskNote,
+  type SpawnProbe,
+  type VendorStatus,
+} from "./spawn";
 import type { Translator } from "./i18n";
 
 export interface UiDeps {
@@ -47,6 +55,8 @@ export interface UiDeps {
   t: Translator;
   /** Local BYOK key vault (Tauri-backed at runtime, memory in dev/test). */
   vault: KeyVault;
+  /** Lane-B vendor CLI detection (Tauri-backed at runtime, memory in dev/test). */
+  spawn: SpawnProbe;
   /** Persist secrets after login/refresh/logout. */
   persist: (c: Config) => Promise<void> | void;
   onSignedOut: () => void;
@@ -191,6 +201,7 @@ export function renderWorkspace(deps: UiDeps): void {
   const memoryBtn = el("button", "rail-btn", t("rail.memory"));
 
   const keysSec = renderKeysSection(deps);
+  const laneBSec = renderLaneBSection(deps);
 
   const spacer = el("div", "rail-spacer");
 
@@ -202,7 +213,7 @@ export function renderWorkspace(deps: UiDeps): void {
 
   const signOutBtn = el("button", "rail-btn", t("rail.signOut"));
 
-  rail.append(brand, connSec, newChatBtn, memoryBtn, keysSec, spacer, savingsCard, signOutBtn);
+  rail.append(brand, connSec, newChatBtn, memoryBtn, keysSec, laneBSec, spacer, savingsCard, signOutBtn);
 
   // --- center chat ---
   const chat = el("div", "chat");
@@ -588,6 +599,86 @@ function renderKeysSection(deps: UiDeps): HTMLElement {
 
   sec.append(listEl, addRow, note);
   void refresh();
+  return sec;
+}
+
+/**
+ * Left-rail Lane-B section: per-vendor "your own CLI" detection. For each vendor
+ * it shows installed/version + the steel ToS-risk note. When installed, a "Copy
+ * launch command" action reveals the argv (never a shell string) and copies the
+ * proven `forge spawn <vendor>` delegation — the interactive session runs in the
+ * user's terminal, never captured here. When absent, it degrades to the honest
+ * API-key path (→ Direct). No vendor token/output ever crosses into this UI.
+ */
+function renderLaneBSection(deps: UiDeps): HTMLElement {
+  const { t, spawn } = deps;
+  const sec = el("div", "laneb-sec");
+  sec.append(el("div", "rail-section-label", t("laneB.title")));
+  sec.append(el("div", "laneb-subtitle", t("laneB.subtitle")));
+
+  const listEl = el("div", "laneb-list");
+  sec.append(listEl);
+
+  const renderVendor = (status: VendorStatus): HTMLElement => {
+    const row = el("div", "laneb-vendor");
+    const head = el("div", "laneb-head");
+    head.append(el("span", "laneb-name mono", status.vendor));
+    const badge = el(
+      "span",
+      status.installed ? "laneb-badge on" : "laneb-badge off",
+      status.installed ? t("laneB.installed") : t("laneB.notInstalled"),
+    );
+    head.append(badge);
+    row.append(head);
+
+    if (status.version) row.append(el("div", "laneb-version mono", status.version));
+    // ToS-risk note — plain text, painted steel (rule f).
+    row.append(el("div", "laneb-risk", status.risk));
+
+    if (status.installed) {
+      const plan = buildLaunchCommand(status.vendor);
+      const cmdText = plan.cliDelegation.join(" ");
+      const copyBtn = el("button", "laneb-btn", t("laneB.copy"));
+      const cmdBox = el("div", "laneb-cmd mono");
+      cmdBox.style.display = "none";
+      cmdBox.append(el("div", "laneb-cmd-hint", t("laneB.launchHint")));
+      cmdBox.append(el("code", undefined, cmdText));
+      copyBtn.addEventListener("click", () => {
+        cmdBox.style.display = "block";
+        // Best-effort clipboard; the visible command is the reliable fallback.
+        void navigator.clipboard?.writeText(cmdText).then(
+          () => {
+            copyBtn.textContent = t("laneB.copied");
+            setTimeout(() => (copyBtn.textContent = t("laneB.copy")), 1600);
+          },
+          () => {},
+        );
+      });
+      row.append(copyBtn, cmdBox);
+    } else {
+      const fb = spawnFallbackMessage(status.vendor);
+      const fbBox = el("div", "laneb-fallback");
+      fbBox.append(el("div", "laneb-notfound", t("laneB.notFound", { bin: status.vendor })));
+      fbBox.append(el("div", "laneb-usekey mono", fb.useApiKey));
+      row.append(fbBox);
+    }
+    return row;
+  };
+
+  void (async () => {
+    try {
+      const statuses = await spawn.probeAll();
+      listEl.innerHTML = "";
+      for (const s of statuses) listEl.append(renderVendor(s));
+    } catch {
+      // Detection is best-effort; a probe failure must never break the rail.
+      listEl.innerHTML = "";
+      for (const vendor of SPAWN_VENDORS) {
+        listEl.append(renderVendor({ vendor, installed: false, risk: spawnRiskNote(vendor) }));
+      }
+    }
+  })();
+
   return sec;
 }
 

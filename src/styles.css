@@ -229,6 +229,116 @@ textarea {
   line-height: 1.4;
 }
 
+/* ── Lane-B · your CLIs (left rail) ──────────────────────────────────── */
+.laneb-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.laneb-subtitle {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.4;
+  margin-top: -2px;
+}
+.laneb-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.laneb-vendor {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  background: var(--steel-900);
+  border: 1px solid var(--steel-800);
+  border-radius: var(--radius-sm);
+  padding: 8px 9px;
+}
+.laneb-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.laneb-name {
+  font-size: 12px;
+  color: var(--text);
+  flex: 1;
+}
+.laneb-badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--steel-700);
+}
+.laneb-badge.on {
+  color: var(--arc-blue-lit);
+  border-color: rgba(96, 165, 250, 0.35);
+}
+.laneb-badge.off {
+  color: var(--text-dim);
+}
+.laneb-version {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+/* ToS-risk note — steel, never green (rule f + palette). */
+.laneb-risk {
+  font-size: 11px;
+  color: var(--steel-400);
+  line-height: 1.4;
+}
+.laneb-btn {
+  background: var(--steel-800);
+  border: 1px solid var(--steel-700);
+  color: var(--text);
+  padding: 6px 9px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 12px;
+  text-align: left;
+}
+.laneb-btn:hover {
+  background: var(--steel-700);
+  border-color: var(--steel-600);
+}
+.laneb-cmd {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--obsidian-inset);
+  border: 1px solid var(--steel-800);
+  border-radius: var(--radius-sm);
+  padding: 7px 8px;
+}
+.laneb-cmd-hint {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+.laneb-cmd code {
+  font-size: 11px;
+  color: var(--ember);
+  user-select: text;
+  word-break: break-all;
+}
+.laneb-fallback {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.laneb-notfound {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.laneb-usekey {
+  font-size: 11px;
+  color: var(--arc-blue-lit);
+  user-select: text;
+  word-break: break-all;
+}
+
 .savings-card {
   background: var(--steel-900);
   border: 1px solid var(--steel-800);

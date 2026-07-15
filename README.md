@@ -34,25 +34,30 @@ packages/desktop/
 │   │                       openai / groq. Port of CLI direct.ts.
 │   ├── render.ts           pure view-model mappers (savings honesty gate,
 │   │                       cascade / compare / login-error mapping). Tested.
+│   ├── spawn.ts            Lane-B SAFE-SPAWN: vendor CLI detection + launch
+│   │                       command. Port of CLI spawn.ts contract; Rust
+│   │                       spawn_probe backing / memory fallback. Tested.
 │   ├── i18n.ts             single messages object, en + tr (i18n-ready).
-│   ├── ui.ts               thin DOM shell (3-pane + keys section) — not unit-tested.
+│   ├── ui.ts               thin DOM shell (3-pane + keys + Lane-B) — not unit-tested.
 │   ├── main.ts             entry: hydrate → login or workspace.
 │   ├── styles.css          obsidian palette (arc-blue / ember / molten; NO green).
-│   └── __tests__/          62 tests (client / render / store / i18n /
-│                           keyvault / local / direct / identity).
+│   └── __tests__/          76 tests (client / render / store / i18n /
+│                           keyvault / local / direct / identity / spawn).
 └── src-tauri/              Rust host (STANDALONE cargo package)
     ├── Cargo.toml          tauri = "2"; not part of any cargo workspace.
     ├── tauri.conf.json      window + CSP (self + braavolabs.com + Ollama
     │                        localhost + 3 BYOK provider API hosts).
     ├── capabilities/default.json  core webview permissions for "main".
     ├── icons/              app icons (ember mark).
-    └── src/{main,lib}.rs   window + token + BYOK-key OS-scoped commands. THIN.
+    └── src/{main,lib}.rs   window + token + BYOK-key OS-scoped commands +
+                            Lane-B spawn_probe (detect only). THIN.
 ```
 
 ### Panes (obsidian identity, §5)
 
 - **Left rail** — connection status, New chat, memory-vault link, **BYOK keys**
-  (masked list + add/remove), savings summary.
+  (masked list + add/remove), **Lane-B · your CLIs** (claude/codex detection +
+  ToS-risk + launch command), savings summary.
 - **Center** — multi-model chat, four source lanes. Server: **Cascade** (sync
   `/research/cascade`) and **Compare** (async `/research/compare` → poll
   `/research/:id`, ember "N faces thinking" spinner) — each candidate an arc-rim
@@ -134,10 +139,48 @@ gate as the auth token (below).
 
 ---
 
+## Lane-B · your own CLIs (SAFE-SPAWN)
+
+Lane-B lets Forge run **your OWN, already-signed-in vendor CLI** (`claude` /
+`codex`) instead of a key or the Forge server. It is a thin, opaque passthrough —
+NOT a re-implementation of the vendor and NOT an OAuth client. The contract
+(ported from the CLI's adversarially-verified `forge/spawn.ts`; enforced by
+construction in `src/spawn.ts` + `src-tauri/src/lib.rs`):
+
+| # | Rule | How it's enforced |
+|---|---|---|
+| a | **No vendor OAuth.** You must have logged in with the official binary yourself. | Lane-B never initiates/brokers a vendor sign-in — there is no auth code path. |
+| b | **Only the official binary is a target; launch is an argv ARRAY.** | `buildLaunchCommand` returns `{argv, cliDelegation}` arrays — never a shell string, so `"hi; rm -rf /"` stays one inert element (no injection seam). |
+| c | **A vendor session's stdout/stderr is OPAQUE.** | The desktop never opens a vendor session in-process; the real interactive run is delegated to `forge spawn`, which uses `stdio:"inherit"` and captures/parses nothing. |
+| d | **Token/cookie files are NEVER touched.** | Detection (`spawn_probe`) probes ONLY `PATH` + neutral bin prefixes (`knownPaths` — homebrew, `/usr/local/bin`, `~/.local/bin`, `~/.bun/bin`, `~/.cargo/bin` for codex). It never reads `~/.claude*`, `~/.codex*`, `auth.json`, or any config dir. Version comes from `<bin> --version` only. |
+| f | **Per-vendor ToS-risk is surfaced.** | `VENDOR_SPECS.risk` — claude = *SAFE, volatile*; codex = *SAFE, lowest risk* — shown steel in the rail. |
+| g | **Absent binary degrades to the API-key path.** | `spawnFallbackMessage` → "use API key → Direct" (`forge direct anthropic\|openai …`); never a fabricated result. |
+
+### Why detection + launch-command (not an in-process PTY)
+
+A webview cannot spawn a child process — only the Rust host can — and a FULL
+interactive PTY bridged into a webview (raw-mode stdio, terminal emulation,
+resize/signal handling) is a large, security-sensitive surface. So this desktop
+version does the two meaningful, safe things and **delegates the actual
+interactive session to the proven CLI**:
+
+1. **Detect** — the Rust `spawn_probe` command answers *installed? which path?
+   what version?* and NOTHING else. Its discovery mirrors the TS `knownPaths`
+   contract (neutral paths only) and it never streams a vendor session.
+2. **Launch** — the rail's **Copy launch command** reveals the argv and copies
+   `forge spawn <vendor>`, which you paste into your terminal. That CLI path
+   already implements the opaque `stdio:"inherit"` passthrough (rules b, c).
+
+This keeps the Rust host thin (no AI/orchestration, no captured vendor output)
+and reuses the CLI's already-verified spawn path. A full native-terminal Lane-B
+inside the window is a future **human gate** (needs a PTY plugin + a GUI session).
+
+---
+
 ## Develop & verify (headless)
 
 ```bash
-pnpm --filter @ai-company-os/desktop test    # vitest — 62 tests
+pnpm --filter @ai-company-os/desktop test    # vitest — 76 tests
 pnpm --filter @ai-company-os/desktop build   # tsc --noEmit && vite build → dist/
 pnpm --filter @ai-company-os/desktop lint    # tsc --noEmit
 
