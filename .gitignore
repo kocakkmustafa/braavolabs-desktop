@@ -5,5 +5,7 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 
-# Tauri writes a schema cache here on first build
-src-tauri/Cargo.lock
+# NOTE: src-tauri/Cargo.lock IS committed (S-011) — this app ships as a
+# binary, so the Rust dependency lockfile must be pinned for reproducible
+# builds (the earlier "schema cache" comment here was wrong; Cargo.lock is
+# the dependency lockfile, not a cache).
