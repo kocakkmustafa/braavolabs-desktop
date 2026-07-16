@@ -920,19 +920,24 @@ fn mcp_remove_server(app: AppHandle, name: String) -> Result<(), String> {
     write_mcp(&app, &map)
 }
 
-/// Accumulates stdout bytes and yields complete '\n'-terminated lines, retaining
-/// any trailing PARTIAL line across chunks. Pure — unit-tested without a process.
+/// Accumulates raw stdout BYTES and yields complete '\n'-terminated lines,
+/// retaining any trailing PARTIAL line across chunks. Buffering bytes (not a
+/// per-chunk String) is load-bearing: a multibyte UTF-8 scalar split across two
+/// read() boundaries must NOT be lossy-decoded twice into U+FFFD — each line is
+/// decoded exactly once, only after all of its bytes have arrived. Pure —
+/// unit-tested without a process.
 #[derive(Default)]
 struct LineBuffer {
-    buf: String,
+    buf: Vec<u8>,
 }
 impl LineBuffer {
-    fn push(&mut self, chunk: &str) -> Vec<String> {
-        self.buf.push_str(chunk);
+    fn push(&mut self, chunk: &[u8]) -> Vec<String> {
+        self.buf.extend_from_slice(chunk);
         let mut out = vec![];
-        while let Some(idx) = self.buf.find('\n') {
-            let line = self.buf[..idx].trim().to_string();
-            self.buf = self.buf[idx + 1..].to_string();
+        while let Some(idx) = self.buf.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = self.buf.drain(..=idx).collect();
+            // idx bytes precede the '\n'; decode the complete line as UTF-8.
+            let line = String::from_utf8_lossy(&line_bytes[..idx]).trim().to_string();
             if !line.is_empty() {
                 out.push(line);
             }
@@ -1032,8 +1037,7 @@ fn run_mcp_session(
             match r.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    let chunk = String::from_utf8_lossy(&buf[..n]);
-                    for line in lb.push(&chunk) {
+                    for line in lb.push(&buf[..n]) {
                         if tx.send(line).is_err() {
                             return;
                         }
@@ -1168,17 +1172,30 @@ mod mcp_tests {
     fn linebuffer_retains_partial_line_across_chunks() {
         let mut lb = LineBuffer::default();
         // First chunk: one full line + the start of a second.
-        let out = lb.push("{\"a\":1}\n{\"b\"");
+        let out = lb.push(b"{\"a\":1}\n{\"b\"");
         assert_eq!(out, vec!["{\"a\":1}".to_string()]);
         // Second chunk completes the partial line.
-        let out2 = lb.push(":2}\n");
+        let out2 = lb.push(b":2}\n");
         assert_eq!(out2, vec!["{\"b\":2}".to_string()]);
+    }
+
+    #[test]
+    fn linebuffer_reassembles_multibyte_scalar_split_across_reads() {
+        // "é" is 0xC3 0xA9 in UTF-8. Split it across two read() boundaries — the
+        // byte buffer must reassemble it, never lossy-decode each half into U+FFFD.
+        let mut lb = LineBuffer::default();
+        let s = "café";
+        let bytes = s.as_bytes();
+        let out = lb.push(&bytes[..bytes.len() - 1]); // first byte of 'é' only
+        assert!(out.is_empty()); // no newline yet, and no corruption
+        let out2 = lb.push(&[bytes[bytes.len() - 1], b'\n']); // second byte + newline
+        assert_eq!(out2, vec!["café".to_string()]);
     }
 
     #[test]
     fn linebuffer_splits_multiple_lines_in_one_chunk_and_skips_blanks() {
         let mut lb = LineBuffer::default();
-        let out = lb.push("one\n\ntwo\n");
+        let out = lb.push(b"one\n\ntwo\n");
         assert_eq!(out, vec!["one".to_string(), "two".to_string()]);
     }
 
