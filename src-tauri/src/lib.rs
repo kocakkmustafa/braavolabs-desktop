@@ -371,21 +371,82 @@ fn is_traversal(path: &str) -> bool {
 }
 
 /// Strip anything credential-shaped from free text before it enters the ledger.
+///
+/// SUBSTRING-based, not word-based. `governed_command` redacts `argv.join(" ")`
+/// into the audit log, and command arguments routinely glue a secret to
+/// punctuation — `--api-key=sk-…`, `token:…`, a dotted JWT after `Bearer`. A
+/// whitespace-word scan misses every one of those (the token is not its own
+/// word). This mirrors the TS `redactSummary` regex semantics (governance.ts)
+/// so the two enforcement paths scrub identically, dependency-free (no regex crate).
 fn redact(s: &str) -> String {
+    // Pass 1: `Bearer <token>` — the token class includes '.' (JWTs), so it must
+    // run before the key-char scan (which stops at a dot).
+    let s = redact_bearer(s);
+    // Pass 2: maximal runs of key-chars [A-Za-z0-9_-]; redact a long opaque token
+    // (>=32) or an `sk-` prefixed key (sk- + >=6). Scanning runs — not words —
+    // means a secret bounded by `=`, `:`, `"`, etc. is still caught.
+    redact_key_runs(&s)
+}
+
+fn is_key_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
+/// Emit one accumulated key-char run, redacting it iff it looks like a secret.
+fn push_redacted_run(run: &str, out: &mut String) {
+    if run.is_empty() {
+        return;
+    }
+    // run is all-ASCII key chars, so byte len == char len.
+    let secret = run.len() >= 32 || (run.starts_with("sk-") && run.len() >= 9);
+    out.push_str(if secret { "«redacted»" } else { run });
+}
+
+fn redact_key_runs(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for word in s.split_inclusive(char::is_whitespace) {
-        let trimmed = word.trim_end();
-        let looks_secret = trimmed.starts_with("sk-") && trimmed.len() > 8
-            || (trimmed.len() >= 32 && trimmed.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
-        if looks_secret {
-            out.push_str("«redacted»");
-            // preserve trailing whitespace if any
-            if word.len() > trimmed.len() {
-                out.push_str(&word[trimmed.len()..]);
-            }
+    let mut run = String::new();
+    for c in s.chars() {
+        if is_key_char(c) {
+            run.push(c);
         } else {
-            out.push_str(word);
+            push_redacted_run(&run, &mut out);
+            run.clear();
+            out.push(c);
         }
+    }
+    push_redacted_run(&run, &mut out);
+    out
+}
+
+/// Replace the token after a `Bearer ` label (case-insensitive) with a marker.
+/// Char-indexed (never byte-indexed) so multibyte input can never split a scalar.
+fn redact_bearer(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    const WORD: [char; 6] = ['b', 'e', 'a', 'r', 'e', 'r'];
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < n {
+        let is_bearer = i + 6 <= n && (0..6).all(|k| chars[i + k].to_ascii_lowercase() == WORD[k]);
+        if is_bearer {
+            let mut j = i + 6;
+            let mut saw_ws = false;
+            while j < n && chars[j].is_ascii_whitespace() {
+                j += 1;
+                saw_ws = true;
+            }
+            let tok_start = j;
+            while j < n && (chars[j].is_ascii_alphanumeric() || matches!(chars[j], '.' | '_' | '-')) {
+                j += 1;
+            }
+            if saw_ws && j - tok_start >= 6 {
+                out.push_str("Bearer «redacted»");
+                i = j;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
     }
     out
 }
@@ -483,10 +544,31 @@ fn audit_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("audit.log"))
 }
 
+/// Highest `seq` already persisted in the append-only log. Pure over the file
+/// text so it is unit-testable without a real AppHandle/disk.
+fn max_seq_in_log(text: &str) -> u64 {
+    text.lines()
+        .filter_map(|l| serde_json::from_str::<AuditEntry>(l).ok())
+        .map(|e| e.seq)
+        .max()
+        .unwrap_or(0)
+}
+
 /// Append one JSON line to the 0600 audit log. Best-effort — an audit failure
 /// must never crash a decision, but a secret must never be written: `summary`
 /// is redacted by the caller and no token/secret field exists on the entry.
 fn audit_append(app: &AppHandle, gate: &mut GateState, kind: &str, decision: &str, outcome: &str, summary: &str, ts: u64) -> AuditEntry {
+    // GateState is in-memory and resets to seq=0 on every launch, but audit.log
+    // PERSISTS. Seed the counter from the existing log on the first append of a
+    // run so `seq` stays strictly monotonic across restarts (the documented
+    // "reliable order key") instead of restarting at 1 and colliding.
+    if gate.seq == 0 {
+        if let Ok(path) = audit_path(app) {
+            if let Ok(text) = fs::read_to_string(&path) {
+                gate.seq = max_seq_in_log(&text);
+            }
+        }
+    }
     gate.seq += 1;
     let entry = AuditEntry {
         seq: gate.seq,
@@ -792,6 +874,26 @@ mod governance_tests {
         assert!(!redact("key sk-ant-ABCDEF0123456789ABCDEF").contains("sk-ant"));
         assert_eq!(redact("plain human summary"), "plain human summary");
         assert!(redact("tok abcdefghijklmnopqrstuvwxyz012345").contains("«redacted»"));
+    }
+
+    #[test]
+    fn redact_scrubs_secrets_glued_to_punctuation() {
+        // The audit log stores `argv.join(" ")`; secrets in command args are
+        // routinely glued to `=` / `:` / no-space and MUST still be scrubbed
+        // (a whitespace-word scan would leak every one of these).
+        assert!(!redact("tool --api-key=sk-ant-ABCDEF0123456789ABCDEF").contains("sk-ant"));
+        assert!(!redact("run --token=abcdefghijklmnopqrstuvwxyzABCDEF012").contains("abcdefghij"));
+        // Dotted JWT after Bearer (the '.' would end a key-char run early).
+        assert!(!redact("hdr Bearer eyJhbGci.eyJzdWIi.sigABCDEF012345").contains("eyJ"));
+    }
+
+    #[test]
+    fn max_seq_in_log_reads_highest_persisted_seq() {
+        let log = "{\"seq\":1,\"ts\":0,\"kind\":\"probe.detect\",\"decision\":\"auto-allow\",\"outcome\":\"granted\",\"summary\":\"x\"}\n\
+                   {\"seq\":7,\"ts\":0,\"kind\":\"command.run\",\"decision\":\"-\",\"outcome\":\"consumed\",\"summary\":\"y\"}\n\
+                   garbage-line\n";
+        assert_eq!(max_seq_in_log(log), 7);
+        assert_eq!(max_seq_in_log(""), 0);
     }
 
     #[test]
