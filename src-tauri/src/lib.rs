@@ -108,12 +108,17 @@ impl SecretBackend for KeychainBackend {
 }
 
 /// 0600 fallback: a single JSON `{ account: secret }` map so the token and BYOK
-/// keys share one owner-only artifact. Used on non-mac/win platforms and when
-/// the keychain is unreachable.
+/// keys share one owner-only artifact. The active backend on non-mac/win
+/// platforms (Linux/other — not a shipping target); on macOS/Windows it exists
+/// only as a test fixture (those platforms are keychain-only, fail-closed), so
+/// it reads as dead code in a non-test mac/win `cargo check` — hence the scoped
+/// allow rather than deleting a genuinely-used-elsewhere type.
+#[cfg_attr(any(target_os = "macos", target_os = "windows"), allow(dead_code))]
 struct FileBackend {
     path: PathBuf,
 }
 
+#[cfg_attr(any(target_os = "macos", target_os = "windows"), allow(dead_code))]
 impl FileBackend {
     fn read_map(&self) -> Result<BTreeMap<String, String>, String> {
         match fs::read(&self.path) {
@@ -152,19 +157,18 @@ impl SecretBackend for FileBackend {
     }
 }
 
-/// Resolve the live backend for this platform. On macOS/Windows probe the
-/// keychain once (a sentinel read: `NoEntry` = reachable-and-empty, `Ok` =
-/// reachable); if it's unreachable, fall back to the 0600 file rather than
-/// failing hard. On other platforms it's always the file.
+/// Resolve the live backend for this platform. On macOS/Windows it is ALWAYS
+/// the OS keychain — FAIL-CLOSED: if the keychain is momentarily unreachable a
+/// secret operation returns an error, it does NOT silently downgrade to a
+/// plaintext file. That silent-downgrade path (an earlier design) caused a
+/// split-brain: a transient keychain hiccup would write some secrets to the
+/// keychain and others to plaintext `vault.json`, and a later delete on the
+/// keychain backend would leave the plaintext copy orphaned. On platforms with
+/// no keychain (Linux/other — not a shipping target) it is the 0600 file, and
+/// `secure()` reports that honestly.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn make_backend(config_dir: &Path) -> Box<dyn SecretBackend> {
-    match keyring::Entry::new(VAULT_SERVICE, "__reachability_probe__").and_then(|e| e.get_password())
-    {
-        Ok(_) | Err(keyring::Error::NoEntry) => Box::new(KeychainBackend),
-        Err(_) => Box::new(FileBackend {
-            path: config_dir.join("vault.json"),
-        }),
-    }
+fn make_backend(_config_dir: &Path) -> Box<dyn SecretBackend> {
+    Box::new(KeychainBackend)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -176,15 +180,20 @@ fn make_backend(config_dir: &Path) -> Box<dyn SecretBackend> {
 
 #[cfg(unix)]
 fn write_private(path: &Path, data: &[u8]) -> Result<(), String> {
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let mut f = fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .mode(0o600) // owner read/write only
+        .mode(0o600) // owner read/write only — applied on CREATE
         .open(path)
         .map_err(|e| e.to_string())?;
-    f.write_all(data).map_err(|e| e.to_string())
+    f.write_all(data).map_err(|e| e.to_string())?;
+    // .mode() only takes effect when the file is created; a pre-existing file
+    // (e.g. one written by an older build with looser perms) keeps its mode.
+    // Re-assert 0600 idempotently so an existing file is tightened too.
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -196,36 +205,61 @@ fn write_private(path: &Path, data: &[u8]) -> Result<(), String> {
 // ── One-time legacy migration (0600 files → backend) ─────────────────────────
 
 /// Move any pre-S-010 `secrets.json` / `keys.json` into the backend + masked
-/// index, then delete them. Idempotent (missing files are a no-op) and
-/// crash-safe (backend write precedes file removal). Runs on every secret
-/// command; once the legacy files are gone it's two cheap `fs::read` misses.
+/// index, then delete them. Idempotent (missing files are a no-op). Runs on
+/// every secret command; once the legacy files are gone it's two cheap
+/// `fs::read` misses.
+///
+/// Data-safety invariants (each legacy file is handled independently):
+///   - The backend write happens BEFORE the file is removed, so a crash between
+///     them can only leave the old file behind (safe to retry), never lose a
+///     secret. If `backend.set` errors, we `?`-return with the file INTACT.
+///   - A file that fails to PARSE is NOT deleted — it is renamed to
+///     `<name>.corrupt` and left in place. A truncated write from an earlier
+///     crash is exactly this case; deleting it (the earlier behaviour) would be
+///     permanent secret loss. Renaming keeps it recoverable without letting it
+///     re-trigger migration on every call.
 fn migrate_legacy(backend: &dyn SecretBackend, config_dir: &Path) -> Result<(), String> {
     let secrets_file = config_dir.join("secrets.json");
     if let Ok(bytes) = fs::read(&secrets_file) {
-        if let Ok(s) = serde_json::from_slice::<Secrets>(&bytes) {
-            if let Some(t) = s.token {
-                backend.set(ACCT_TOKEN, &t)?;
+        match serde_json::from_slice::<Secrets>(&bytes) {
+            Ok(s) => {
+                if let Some(t) = s.token {
+                    backend.set(ACCT_TOKEN, &t)?; // file intact if this errors
+                }
+                if let Some(r) = s.refresh_token {
+                    backend.set(ACCT_REFRESH, &r)?;
+                }
+                let _ = fs::remove_file(&secrets_file); // only after successful set(s)
             }
-            if let Some(r) = s.refresh_token {
-                backend.set(ACCT_REFRESH, &r)?;
-            }
+            Err(_) => quarantine_corrupt(&secrets_file),
         }
-        let _ = fs::remove_file(&secrets_file);
     }
 
     let keys_file = config_dir.join("keys.json");
     if let Ok(bytes) = fs::read(&keys_file) {
-        if let Ok(map) = serde_json::from_slice::<BTreeMap<String, String>>(&bytes) {
-            let mut index = read_index(config_dir);
-            for (provider, secret) in map {
-                backend.set(&byok_account(&provider), &secret)?;
-                index.insert(provider, mask_key(&secret));
+        match serde_json::from_slice::<BTreeMap<String, String>>(&bytes) {
+            Ok(map) => {
+                let mut index = read_index(config_dir);
+                for (provider, secret) in map {
+                    backend.set(&byok_account(&provider), &secret)?; // file intact if this errors
+                    index.insert(provider, mask_key(&secret));
+                }
+                write_index(config_dir, &index)?;
+                let _ = fs::remove_file(&keys_file); // only after every set + index write
             }
-            write_index(config_dir, &index)?;
+            Err(_) => quarantine_corrupt(&keys_file),
         }
-        let _ = fs::remove_file(&keys_file);
     }
     Ok(())
+}
+
+/// A legacy file we couldn't parse is renamed aside (never deleted) so its
+/// bytes stay recoverable, and it stops re-triggering migration every call.
+fn quarantine_corrupt(path: &Path) {
+    let quarantined = path.with_extension("corrupt");
+    // If the rename fails, leave the original untouched — losing nothing is the
+    // whole point; the file simply gets retried next time.
+    let _ = fs::rename(path, quarantined);
 }
 
 // ── Auth token store (secure_store_*) ────────────────────────────────────────
@@ -302,12 +336,14 @@ struct KeyEntry {
     masked: String,
 }
 
-/// Reveal nothing meaningful: first4…last4 for long keys, just "…" for short.
+/// Reveal nothing meaningful: first4…last4 only when there's a real hidden
+/// middle (≥5 chars hidden ⇒ len ≥ 13), otherwise just "…". A shorter key would
+/// leak most of its entropy through first4…last4, so it shows nothing at all.
 /// Char-based so multibyte keys never panic on a byte-boundary slice.
 fn mask_key(secret: &str) -> String {
     let s = secret.trim();
     let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= 8 {
+    if chars.len() < 13 {
         return "…".to_string();
     }
     let first: String = chars[..4].iter().collect();
@@ -1574,6 +1610,72 @@ mod secret_store_tests {
         assert!(be.snapshot().is_empty());
         migrate_legacy(&be, &dir).unwrap(); // still fine on a second pass
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Backend that fails every write — models a keychain hiccup mid-migration.
+    struct FailingBackend;
+    impl SecretBackend for FailingBackend {
+        fn set(&self, _a: &str, _s: &str) -> Result<(), String> {
+            Err("keychain unavailable".into())
+        }
+        fn get(&self, _a: &str) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+        fn delete(&self, _a: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn secure(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn migration_keeps_legacy_file_when_backend_write_fails() {
+        // Crash-safety: if the backend can't persist the secret, the legacy
+        // plaintext file MUST survive so the secret isn't lost (retry next run).
+        let dir = tmpdir();
+        fs::write(
+            dir.join("keys.json"),
+            serde_json::to_vec(&{
+                let mut m = BTreeMap::new();
+                m.insert("openai".to_string(), "sk-openai-secret-12345".to_string());
+                m
+            }).unwrap(),
+        ).unwrap();
+
+        let err = migrate_legacy(&FailingBackend, &dir);
+        assert!(err.is_err(), "a failed backend write must propagate, not swallow");
+        // File intact — nothing lost.
+        assert!(dir.join("keys.json").exists(), "legacy file must survive a failed migration");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migration_quarantines_a_corrupt_legacy_file_instead_of_deleting_it() {
+        // A truncated write from an older crash produces unparseable JSON. It
+        // must NOT be silently deleted (permanent secret loss) — it is renamed
+        // aside, recoverable, and no longer re-triggers migration.
+        let dir = tmpdir();
+        fs::write(dir.join("keys.json"), b"{\"anthropic\":\"sk-ant-REAL-999").unwrap(); // truncated
+        let be = MockBackend::new(true);
+        migrate_legacy(&be, &dir).unwrap();
+
+        assert!(!dir.join("keys.json").exists(), "corrupt file is moved aside");
+        assert!(dir.join("keys.corrupt").exists(), "corrupt file is preserved, not lost");
+        // Its bytes are intact for recovery.
+        let recovered = fs::read_to_string(dir.join("keys.corrupt")).unwrap();
+        assert!(recovered.contains("sk-ant-REAL-999"));
+        // Backend stayed empty (nothing parseable to migrate).
+        assert!(be.snapshot().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mask_key_hides_short_secrets_entirely() {
+        // A short secret would leak most of its entropy through first4…last4,
+        // so anything under 13 chars shows nothing.
+        assert_eq!(mask_key("abcdefghi"), "…"); // 9 chars → fully hidden
+        assert_eq!(mask_key("hunter1234567"), "hunt…4567"); // 13 chars → revealed
     }
 
     #[test]

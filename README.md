@@ -27,7 +27,7 @@ packages/desktop/
 │   │                       app, in-memory fallback in dev/test. NEVER
 │   │                       localStorage / plaintext for the token.
 │   ├── keyvault.ts         BYOK provider-key vault — masked list, one-time raw
-│   │                       get at dispatch. Tauri keys.json (0600) / memory.
+│   │                       get at dispatch. Tauri OS keychain / memory (dev).
 │   ├── local.ts            Lane-A local: Ollama /api/tags + /api/chat
 │   │                       (stream:false). Keyless, offline. Port of CLI local.ts.
 │   ├── direct.ts           Lane-A direct: BYOK single-shot to anthropic /
@@ -338,23 +338,34 @@ cargo test --lib                               # 16 governance + MCP unit tests
 `build.frontendDist = "../dist"` — run the frontend `build` first so `dist/`
 exists.
 
-## Secret storage
+## Secret storage (OS keychain, S-010 — DONE)
 
-Two kinds of secret, same host-side pattern:
+Two kinds of secret, same host-side backend:
 
-- **Auth token + refresh** → `secure_store_{get,set,clear}` → `secrets.json`.
-- **BYOK provider keys** → `key_{add,list,remove,get}` → `keys.json`.
+- **Auth token + refresh** → `secure_store_{get,set,clear}` (accounts `auth.token` / `auth.refreshToken`).
+- **BYOK provider keys** → `key_{add,list,remove,get}` (accounts `byok.<provider>`).
 
-Both are written to the OS app-config dir with `0600` perms (unix) — an
-**interim** measure that keeps secrets out of localStorage and the webview.
-`key_list` returns masked fingerprints only; `key_get` returns a raw value and
-is called only at direct-dispatch. Outside Tauri (vitest / `vite` browser
-preview) storage falls back to an in-memory map, so a secret never lands on disk
-in dev/test.
+Both live in the **OS keychain** on the shipping platforms — **macOS Keychain**
+and **Windows Credential Manager** (via the `keyring` crate) — encrypted at rest
+and OS-gated. This is **fail-closed**: on macOS/Windows a keychain hiccup returns
+an error, it never silently writes plaintext. On non-shipping platforms
+(Linux/other) it falls back to a single `0600` `vault.json`; `secret_backend_secure`
+reports which backend is live so the UI never over-claims. `key_list` reads only
+the masked `keys-index.json` (provider → `first4…last4`, never a secret); the raw
+value leaves the host solely via `key_get`, one-time at direct-dispatch. Legacy
+`secrets.json` / `keys.json` are migrated in and deleted on first access
+(backend-write before file-removal; an unparseable file is quarantined to
+`.corrupt`, never deleted). Outside Tauri (vitest / `vite` browser preview) the TS
+store uses an in-memory map, so a secret never lands on disk in dev/test.
 
-**Production hardening (human gate):** move both stores to the real OS keychain
-(macOS Keychain / Windows Credential Manager) via a keyring/stronghold plugin.
-Not wired here to keep the crate's dependency surface and `cargo check` time small.
+**Threat-model scope (honest).** The keychain protects secrets **at rest** — from
+disk theft, other local processes, Time Machine/backups, and forensic recovery —
+which the old plaintext files did not. It is **not** a runtime barrier against a
+compromised webview: `key_get` is deliberately un-gated so BYOK direct-dispatch
+stays one-click, so an attacker who defeats the strict CSP (`default-src 'self'`)
+and runs script inside the window could still call it. Closing that runtime gap is
+the **native per-action approval dialog** follow-up (defter **S-012**), not part of
+S-010.
 
 ## Human gates (NOT done here — require a GUI session / signing identity / live services)
 
@@ -367,7 +378,10 @@ Not wired here to keep the crate's dependency surface and `cargo check` time sma
   GUI/live-service gate.
 - **Signed build** — Apple Developer ID / Windows code-signing cert.
 - **Notarization** — Apple notary submission + stapling.
-- **OS-keychain secret storage** — see above.
+- **OS-keychain on Windows** — the storage is DONE and unit-tested; the macOS
+  Keychain round-trip is verified locally (`cargo test --ignored keychain_roundtrip`).
+  The Windows Credential Manager path shares the same `keyring` API but its live
+  round-trip needs a Windows session to confirm.
 - **Real OS sandbox** — wrapping the `governed_command` choke point in a
   platform sandbox (container / macOS seatbelt / Windows AppContainer). The
   governance enforcement points (policy, one-time tokens, audit, workdir
