@@ -52,6 +52,15 @@ import {
   type ActionDetail,
   type AuditEntry,
 } from "./governance";
+import {
+  type McpBridge,
+  type McpTool,
+  parseArgsInput,
+  parseToolArgs,
+  summarizeCallResult,
+  resultBorderColor,
+  McpGateError,
+} from "./mcp";
 import type { Translator } from "./i18n";
 
 export interface UiDeps {
@@ -64,6 +73,8 @@ export interface UiDeps {
   spawn: SpawnProbe;
   /** Governance gate — every side-effecting action passes through it (fail-closed). */
   gov: Governance;
+  /** MCP bridge — register servers, list tools, and (gated) call a tool. */
+  mcp: McpBridge;
   /** Persist secrets after login/refresh/logout. */
   persist: (c: Config) => Promise<void> | void;
   onSignedOut: () => void;
@@ -209,6 +220,7 @@ export function renderWorkspace(deps: UiDeps): void {
 
   const keysSec = renderKeysSection(deps);
   const laneBSec = renderLaneBSection(deps);
+  const mcpSec = renderMcpSection(deps);
 
   const spacer = el("div", "rail-spacer");
 
@@ -220,7 +232,7 @@ export function renderWorkspace(deps: UiDeps): void {
 
   const signOutBtn = el("button", "rail-btn", t("rail.signOut"));
 
-  rail.append(brand, connSec, newChatBtn, memoryBtn, keysSec, laneBSec, spacer, savingsCard, signOutBtn);
+  rail.append(brand, connSec, newChatBtn, memoryBtn, keysSec, laneBSec, mcpSec, spacer, savingsCard, signOutBtn);
 
   // --- center chat ---
   const chat = el("div", "chat");
@@ -638,6 +650,34 @@ async function gateAction(
 }
 
 /**
+ * Drive an action through the gate for a HOST-EXECUTED effect (MCP tool call,
+ * governed command). Identical to gateAction up to approval, but returns the
+ * one-time token UNCONSUMED — the host (Rust) spends it at execution time, so a
+ * compromised webview can never run the effect without a real host-side consume.
+ * (Contrast gateAction, which consumes here for webview-executed lanes.)
+ */
+async function gateForToken(
+  deps: UiDeps,
+  kind: string,
+  detail: ActionDetail,
+): Promise<{ ok: true; token: string } | { ok: false; reason: string }> {
+  const { gov, t } = deps;
+  const res = await gov.request(kind, detail);
+  if (res.decision === "deny") return { ok: false, reason: t("gov.denied", { reason: res.reason }) };
+  let token = res.token;
+  if (res.decision === "require-approval") {
+    const approved = await showApprovalModal(deps, detail, res.reason);
+    if (!approved) {
+      await gov.reject(res.actionId);
+      return { ok: false, reason: t("gov.rejectedByUser") };
+    }
+    token = (await gov.approve(res.actionId)).token;
+  }
+  if (!token) return { ok: false, reason: t("gov.rejectedByUser") };
+  return { ok: true, token };
+}
+
+/**
  * Arc-rim approval modal with a molten accent — the "coin-flip" moment where the
  * user decides. Blocks on a promise until Approve or Reject. The action summary
  * is the only thing shown; no secret ever reaches this surface.
@@ -873,6 +913,185 @@ function renderLaneBSection(deps: UiDeps): HTMLElement {
     }
   })();
 
+  return sec;
+}
+
+/**
+ * Left-rail MCP section: register stdio MCP servers (add/list/remove), load a
+ * selected server's tools, and call a tool. A tool call is a side effect, so it
+ * is funnelled through the governance gate (the moat applied to MCP too): the
+ * approval modal must be accepted before Forge will spawn the server and run the
+ * tool. The one-time token is NOT consumed in the webview — the host spends it at
+ * spawn time (createTauriMcpBridge), so a compromised webview can't run a tool
+ * without a real host-side consume. Errors are honest, molten-rimmed — never a
+ * green success, never a fabricated result.
+ */
+function renderMcpSection(deps: UiDeps): HTMLElement {
+  const { t, mcp } = deps;
+  const sec = el("div", "mcp-sec");
+  sec.append(el("div", "rail-section-label", t("mcp.title")));
+
+  const listEl = el("div", "mcp-list");
+  const emptyEl = el("div", "mcp-empty", t("mcp.empty"));
+  const toolsPanel = el("div", "mcp-tools");
+  toolsPanel.style.display = "none";
+
+  let selected: string | null = null;
+
+  // --- tool-call form for the currently selected server ---
+  const showTools = async (server: string, tools: McpTool[]) => {
+    toolsPanel.innerHTML = "";
+    toolsPanel.style.display = "block";
+    toolsPanel.append(el("div", "mcp-tools-head mono", `${server} · ${t("mcp.tools")} (${tools.length})`));
+    if (!tools.length) {
+      toolsPanel.append(el("div", "mcp-empty", t("mcp.noTools")));
+      return;
+    }
+    for (const tool of tools) {
+      const row = el("div", "mcp-tool-row");
+      const head = el("div", "mcp-tool-head");
+      head.append(el("span", "mcp-tool-name mono", tool.name));
+      row.append(head);
+      if (typeof tool.description === "string" && tool.description) {
+        row.append(el("div", "mcp-tool-desc", tool.description.split("\n")[0]));
+      }
+      // Per-tool call form: JSON args → gate → call → molten-aware result card.
+      const argsTa = el("textarea", "mcp-args") as HTMLTextAreaElement;
+      argsTa.placeholder = t("mcp.argsJson");
+      const callBtn = el("button", "mcp-call-btn", t("mcp.call"));
+      callBtn.append(el("span", "laneb-gov-badge", t("gov.governedBadge")));
+      const resultBox = el("div", "mcp-result");
+      resultBox.style.display = "none";
+
+      const doCall = async () => {
+        const parsed = parseToolArgs(argsTa.value);
+        resultBox.style.display = "block";
+        resultBox.style.borderLeftColor = "var(--molten)";
+        if (!parsed.ok) {
+          resultBox.innerHTML = "";
+          resultBox.append(el("div", "msg-label", t("mcp.errorResult")), document.createTextNode(parsed.error));
+          return;
+        }
+        // GATE: a tool call is a side effect — a human approves first.
+        const detail: ActionDetail = {
+          server,
+          tool: tool.name,
+          summary: t("gov.kindMcpTool", { tool: tool.name, server }),
+        };
+        const gate = await gateForToken(deps, "mcp.tool", detail);
+        if (!gate.ok) {
+          resultBox.innerHTML = "";
+          resultBox.append(el("div", "msg-label", t("mcp.errorResult")), document.createTextNode(gate.reason));
+          return;
+        }
+        callBtn.disabled = true;
+        try {
+          const res = await mcp.callTool(server, tool.name, parsed.value, gate.token);
+          const view = summarizeCallResult(res);
+          resultBox.innerHTML = "";
+          resultBox.style.borderLeftColor = resultBorderColor(view.isError);
+          resultBox.append(el("div", "msg-label", view.isError ? t("mcp.errorResult") : t("mcp.result")));
+          resultBox.append(document.createTextNode(view.text || t("mcp.empty2")));
+          await deps.gov.settle("mcp.tool", view.isError ? "error" : "success", detail);
+        } catch (e) {
+          resultBox.innerHTML = "";
+          resultBox.style.borderLeftColor = "var(--molten)";
+          const msg = e instanceof McpGateError ? t("gov.rejectedByUser") : String(e instanceof Error ? e.message : e);
+          resultBox.append(el("div", "msg-label", t("mcp.errorResult")), document.createTextNode(msg));
+          await deps.gov.settle("mcp.tool", "error", detail);
+        } finally {
+          callBtn.disabled = false;
+        }
+      };
+      callBtn.addEventListener("click", () => void doCall());
+      row.append(argsTa, callBtn, resultBox);
+      toolsPanel.append(row);
+    }
+  };
+
+  const loadTools = async (server: string) => {
+    selected = server;
+    toolsPanel.innerHTML = "";
+    toolsPanel.style.display = "block";
+    toolsPanel.append(el("div", "mcp-tools-head mono", `${server} · ${t("mcp.loading")}`));
+    try {
+      const tools = await mcp.listTools(server);
+      await showTools(server, tools);
+    } catch (e) {
+      toolsPanel.innerHTML = "";
+      const err = el("div", "mcp-result");
+      err.style.borderLeftColor = "var(--molten)";
+      err.append(el("div", "msg-label", t("mcp.errorResult")), document.createTextNode(String(e instanceof Error ? e.message : e)));
+      toolsPanel.append(err);
+    }
+  };
+
+  const refresh = async () => {
+    listEl.innerHTML = "";
+    const cfg = await mcp.listServers();
+    const names = Object.keys(cfg);
+    if (!names.length) {
+      listEl.append(emptyEl);
+      toolsPanel.style.display = "none";
+      return;
+    }
+    for (const name of names) {
+      const def = cfg[name];
+      const row = el("div", "mcp-row");
+      const info = el("div", "mcp-row-info");
+      info.append(el("span", "mcp-name mono", name));
+      info.append(el("span", "mcp-cmd mono", [def.command, ...def.args].join(" ")));
+      info.addEventListener("click", () => void loadTools(name));
+      const rm = el("button", "key-remove", "×");
+      rm.title = t("mcp.remove");
+      rm.addEventListener("click", () => {
+        void (async () => {
+          await mcp.removeServer(name);
+          if (selected === name) {
+            selected = null;
+            toolsPanel.style.display = "none";
+          }
+          await refresh();
+        })();
+      });
+      row.append(info, rm);
+      listEl.append(row);
+    }
+  };
+
+  // --- add-server form ---
+  const nameInput = el("input", "key-input") as HTMLInputElement;
+  nameInput.placeholder = t("mcp.name");
+  const cmdInput = el("input", "key-input") as HTMLInputElement;
+  cmdInput.placeholder = t("mcp.command");
+  const argsInput = el("input", "key-input") as HTMLInputElement;
+  argsInput.placeholder = t("mcp.args");
+  const addBtn = el("button", "key-add-btn", t("mcp.add"));
+  const doAdd = async () => {
+    const name = nameInput.value.trim();
+    const command = cmdInput.value.trim();
+    if (!name || !command) return;
+    addBtn.disabled = true;
+    try {
+      await mcp.addServer(name, command, parseArgsInput(argsInput.value));
+      nameInput.value = "";
+      cmdInput.value = "";
+      argsInput.value = "";
+      await refresh();
+    } finally {
+      addBtn.disabled = false;
+    }
+  };
+  addBtn.addEventListener("click", () => void doAdd());
+  argsInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") void doAdd();
+  });
+
+  const addRow = el("div", "mcp-add-row");
+  addRow.append(nameInput, cmdInput, argsInput, addBtn);
+
+  sec.append(listEl, toolsPanel, addRow);
+  void refresh();
   return sec;
 }
 

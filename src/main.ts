@@ -9,6 +9,7 @@ import { resolveStore, loadApiUrl, hydrateConfig } from "./store";
 import { resolveKeyVault } from "./keyvault";
 import { resolveSpawnProbe } from "./spawn";
 import { resolveGovernance } from "./governance";
+import { resolveMcpBridge } from "./mcp";
 import { detectLocale, makeT } from "./i18n";
 import { renderLogin, renderWorkspace, type UiDeps } from "./ui";
 
@@ -28,13 +29,15 @@ async function boot(): Promise<void> {
   setPersist((c) => void persist(c));
 
   const t = makeT(detectLocale());
+  const gov = resolveGovernance();
   const deps: UiDeps = {
     root,
     cfg,
     t,
     vault: resolveKeyVault(),
     spawn: resolveSpawnProbe(),
-    gov: resolveGovernance(),
+    gov,
+    mcp: resolveMcpBridge(gov),
     persist,
     onSignedOut: () => {
       void store.clear();

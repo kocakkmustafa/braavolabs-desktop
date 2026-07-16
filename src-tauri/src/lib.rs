@@ -833,6 +833,396 @@ fn command_allowlist(app: &AppHandle) -> Vec<PathBuf> {
     roots
 }
 
+// ── MCP client — stdio JSON-RPC 2.0, spawned + framed HERE in the host ─────────
+//
+// A webview cannot spawn a child process; only the host can. So the desktop's
+// MCP client lives here: it registers servers (mcp.json, 0600), and runs the
+// line-delimited JSON-RPC 2.0 stdio session (initialize handshake →
+// notifications/initialized → tools/list | tools/call) with partial-line
+// buffering and a timeout→kill (no zombie). stderr is DRAINED AND DISCARDED —
+// it is opaque debug output, NEVER parsed as JSON-RPC (only stdout carries the
+// protocol). This mirrors the CLI's forge/mcp.ts and the desktop's src/mcp.ts
+// dev/test analogue.
+//
+// THE MOAT APPLIES TO MCP TOO: `mcp_call_tool` is a side effect, so it spends a
+// one-time `mcp.tool` governance token (bound to {server, tool}) BEFORE it will
+// spawn the server — exactly like `governed_command`. `mcp_list_tools` is
+// read-only discovery and is not gated.
+
+const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+const MCP_TIMEOUT_MS: u64 = 10_000;
+
+/// A registered MCP server: launch command + discrete argument ARRAY (never a
+/// joined string — so there is no shell and no injection seam at spawn time).
+#[derive(Serialize, Deserialize, Clone)]
+struct McpServerDef {
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+}
+
+/// One row for the webview's server list (camelCase → JS reads it directly).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McpServerEntry {
+    name: String,
+    command: String,
+    args: Vec<String>,
+}
+
+fn mcp_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join("mcp.json"))
+}
+
+fn read_mcp(app: &AppHandle) -> Result<BTreeMap<String, McpServerDef>, String> {
+    let path = mcp_path(app)?;
+    match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
+        Err(_) => Ok(BTreeMap::new()), // no file yet ⇒ empty registry
+    }
+}
+
+fn write_mcp(app: &AppHandle, map: &BTreeMap<String, McpServerDef>) -> Result<(), String> {
+    let path = mcp_path(app)?;
+    let data = serde_json::to_vec_pretty(map).map_err(|e| e.to_string())?;
+    write_private(&path, &data)
+}
+
+#[tauri::command]
+fn mcp_list_servers(app: AppHandle) -> Result<Vec<McpServerEntry>, String> {
+    let map = read_mcp(&app)?;
+    Ok(map
+        .into_iter()
+        .map(|(name, d)| McpServerEntry { name, command: d.command, args: d.args })
+        .collect())
+}
+
+#[tauri::command]
+fn mcp_add_server(app: AppHandle, name: String, command: String, args: Option<Vec<String>>) -> Result<(), String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("name is required".into());
+    }
+    if command.trim().is_empty() {
+        return Err("command is required".into());
+    }
+    let mut map = read_mcp(&app)?;
+    map.insert(name, McpServerDef { command: command.trim().to_string(), args: args.unwrap_or_default() });
+    write_mcp(&app, &map)
+}
+
+#[tauri::command]
+fn mcp_remove_server(app: AppHandle, name: String) -> Result<(), String> {
+    let mut map = read_mcp(&app)?;
+    map.remove(name.trim());
+    write_mcp(&app, &map)
+}
+
+/// Accumulates stdout bytes and yields complete '\n'-terminated lines, retaining
+/// any trailing PARTIAL line across chunks. Pure — unit-tested without a process.
+#[derive(Default)]
+struct LineBuffer {
+    buf: String,
+}
+impl LineBuffer {
+    fn push(&mut self, chunk: &str) -> Vec<String> {
+        self.buf.push_str(chunk);
+        let mut out = vec![];
+        while let Some(idx) = self.buf.find('\n') {
+            let line = self.buf[..idx].trim().to_string();
+            self.buf = self.buf[idx + 1..].to_string();
+            if !line.is_empty() {
+                out.push(line);
+            }
+        }
+        out
+    }
+}
+
+/// Match one JSON-RPC line against an expected request id. Returns None when the
+/// line is not a response to `id` (a notification, a different id, or non-JSON) —
+/// the caller keeps reading. Some(Ok/Err) is the matched success/error result.
+fn parse_rpc_response(line: &str, id: u64) -> Option<Result<serde_json::Value, String>> {
+    let msg: serde_json::Value = serde_json::from_str(line).ok()?;
+    let msg_id = msg.get("id")?.as_u64()?; // notifications have no id → None
+    if msg_id != id {
+        return None;
+    }
+    if let Some(err) = msg.get("error") {
+        let m = err.get("message").and_then(|v| v.as_str()).unwrap_or("JSON-RPC error");
+        return Some(Err(m.to_string()));
+    }
+    Some(Ok(msg.get("result").cloned().unwrap_or(serde_json::Value::Null)))
+}
+
+fn send_line(stdin: &mut impl std::io::Write, msg: &serde_json::Value) -> Result<(), String> {
+    let line = format!("{}\n", serde_json::to_string(msg).map_err(|e| e.to_string())?);
+    stdin.write_all(line.as_bytes()).map_err(|e| e.to_string())
+}
+
+/// Block until a response for `id` arrives on `rx` or the deadline passes.
+/// Notifications / other-id lines are skipped (kept reading), never mis-matched.
+fn await_response(
+    rx: &std::sync::mpsc::Receiver<String>,
+    id: u64,
+    deadline: std::time::Instant,
+) -> Result<serde_json::Value, String> {
+    use std::sync::mpsc::RecvTimeoutError;
+    loop {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Err(format!("MCP request timed out (id {id})"));
+        }
+        match rx.recv_timeout(deadline - now) {
+            Ok(line) => {
+                if let Some(res) = parse_rpc_response(&line, id) {
+                    return res;
+                }
+                // not our id / a notification — keep reading until deadline
+            }
+            Err(RecvTimeoutError::Timeout) => return Err(format!("MCP request timed out (id {id})")),
+            Err(RecvTimeoutError::Disconnected) => return Err("MCP server closed the stream".into()),
+        }
+    }
+}
+
+/// Spawn the server, run initialize → notifications/initialized → `method`, and
+/// return the method's result. ALWAYS kills + reaps the child before returning
+/// (timeout or not) — a wedged server never becomes a zombie. stderr is drained
+/// on a thread and discarded; only stdout is parsed as JSON-RPC.
+fn run_mcp_session(
+    def: &McpServerDef,
+    method: &str,
+    params: serde_json::Value,
+    timeout_ms: u64,
+) -> Result<serde_json::Value, String> {
+    use std::io::{BufReader, Read};
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    let mut child = Command::new(&def.command)
+        .args(&def.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to spawn MCP server: {e}"))?;
+
+    let mut stdin = child.stdin.take().ok_or("no stdin on MCP child")?;
+    let stdout = child.stdout.take().ok_or("no stdout on MCP child")?;
+    let stderr = child.stderr.take().ok_or("no stderr on MCP child")?;
+
+    // stderr is OPAQUE — drain and DISCARD it, never parse it as JSON-RPC.
+    let stderr_handle = std::thread::spawn(move || {
+        let mut r = BufReader::new(stderr);
+        let mut sink = Vec::new();
+        let _ = r.read_to_end(&mut sink);
+    });
+
+    // Reader thread: byte chunks → LineBuffer → complete lines over a channel.
+    let (tx, rx) = mpsc::channel::<String>();
+    let reader_handle = std::thread::spawn(move || {
+        let mut r = BufReader::new(stdout);
+        let mut lb = LineBuffer::default();
+        let mut buf = [0u8; 4096];
+        loop {
+            match r.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let chunk = String::from_utf8_lossy(&buf[..n]);
+                    for line in lb.push(&chunk) {
+                        if tx.send(line).is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let outcome = (|| -> Result<serde_json::Value, String> {
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        // 1. initialize (id 1)
+        send_line(
+            &mut stdin,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": { "protocolVersion": MCP_PROTOCOL_VERSION, "capabilities": {},
+                            "clientInfo": { "name": "forge", "version": "0.1.0" } }
+            }),
+        )?;
+        await_response(&rx, 1, deadline)?;
+        // 2. notifications/initialized (NOTIFICATION — no id)
+        send_line(&mut stdin, &serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))?;
+        // 3. the method (id 2)
+        send_line(
+            &mut stdin,
+            &serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": method, "params": params }),
+        )?;
+        await_response(&rx, 2, deadline)
+    })();
+
+    // Teardown — ALWAYS. Kill first so the reader thread's stdout closes.
+    let _ = child.kill();
+    let _ = child.wait();
+    drop(rx);
+    let _ = reader_handle.join();
+    let _ = stderr_handle.join();
+    outcome
+}
+
+/// Discovery — spawn, handshake, tools/list. Read-only; NOT gated. Returns the
+/// tools array (or [] if the server reports none).
+#[tauri::command]
+fn mcp_list_tools(app: AppHandle, server: String) -> Result<serde_json::Value, String> {
+    let map = read_mcp(&app)?;
+    let def = map
+        .get(server.trim())
+        .ok_or_else(|| format!("no MCP server named \"{}\"", server.trim()))?;
+    let result = run_mcp_session(def, "tools/list", serde_json::json!({}), MCP_TIMEOUT_MS)?;
+    Ok(result.get("tools").cloned().unwrap_or(serde_json::json!([])))
+}
+
+/// One tool-call result crossing back to the webview (camelCase → `isError`).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McpCallResult {
+    content: serde_json::Value,
+    is_error: bool,
+}
+
+/// THE GATED MCP CALL. Spends a one-time `mcp.tool` token (bound to {server,
+/// tool}) BEFORE spawning the server — a webview cannot forge a host token, so a
+/// tools/call can never run without passing the governance gate. Mirrors
+/// `governed_command`'s consume-then-run choke-point shape.
+#[tauri::command]
+fn mcp_call_tool(
+    app: AppHandle,
+    gov: State<'_, Governance>,
+    token: String,
+    server: String,
+    tool: String,
+    args: Option<serde_json::Value>,
+    ts: Option<u64>,
+) -> Result<McpCallResult, String> {
+    let ts = ts.unwrap_or(0);
+    // 1. Spend the token. Binding is {tool, server} for kind mcp.tool.
+    let detail = ActionDetail {
+        tool: Some(tool.clone()),
+        server: Some(server.clone()),
+        ..Default::default()
+    };
+    {
+        let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+        let ok = matches!(
+            gate.tokens.get(&token).cloned(),
+            Some(rec) if rec.kind == "mcp.tool" && rec.binding == detail.binding("mcp.tool")
+        );
+        if !ok {
+            audit_append(&app, &mut gate, "mcp.tool", "-", "replay-rejected", "mcp.tool", ts);
+            return Err("invalid or already-spent token".into());
+        }
+        gate.tokens.remove(&token); // one-time
+        let summary = format!("mcp {} · {}", server.trim(), tool.trim());
+        audit_append(&app, &mut gate, "mcp.tool", "-", "consumed", &summary, ts);
+    }
+
+    // 2. Resolve the server + run the tools/call session.
+    let map = read_mcp(&app)?;
+    let def = match map.get(server.trim()) {
+        Some(d) => d.clone(),
+        None => {
+            let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+            audit_append(&app, &mut gate, "mcp.tool", "-", "error", "mcp.tool", ts);
+            return Err(format!("no MCP server named \"{}\"", server.trim()));
+        }
+    };
+    let params = serde_json::json!({ "name": tool, "arguments": args.unwrap_or(serde_json::json!({})) });
+    let run = run_mcp_session(&def, "tools/call", params, MCP_TIMEOUT_MS);
+
+    let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+    match run {
+        Ok(result) => {
+            let is_error = result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
+            let content = result.get("content").cloned().unwrap_or(serde_json::json!([]));
+            let outcome = if is_error { "error" } else { "success" };
+            audit_append(&app, &mut gate, "mcp.tool", "-", outcome, "mcp.tool", ts);
+            Ok(McpCallResult { content, is_error })
+        }
+        Err(e) => {
+            audit_append(&app, &mut gate, "mcp.tool", "-", "error", "mcp.tool", ts);
+            Err(e)
+        }
+    }
+}
+
+#[cfg(test)]
+mod mcp_tests {
+    use super::*;
+
+    #[test]
+    fn linebuffer_retains_partial_line_across_chunks() {
+        let mut lb = LineBuffer::default();
+        // First chunk: one full line + the start of a second.
+        let out = lb.push("{\"a\":1}\n{\"b\"");
+        assert_eq!(out, vec!["{\"a\":1}".to_string()]);
+        // Second chunk completes the partial line.
+        let out2 = lb.push(":2}\n");
+        assert_eq!(out2, vec!["{\"b\":2}".to_string()]);
+    }
+
+    #[test]
+    fn linebuffer_splits_multiple_lines_in_one_chunk_and_skips_blanks() {
+        let mut lb = LineBuffer::default();
+        let out = lb.push("one\n\ntwo\n");
+        assert_eq!(out, vec!["one".to_string(), "two".to_string()]);
+    }
+
+    #[test]
+    fn parse_rpc_response_matches_id_and_reads_result() {
+        let line = "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[]}}";
+        let r = parse_rpc_response(line, 2).expect("should match id 2");
+        assert!(r.is_ok());
+        assert!(r.unwrap().get("tools").is_some());
+    }
+
+    #[test]
+    fn parse_rpc_response_ignores_other_ids_and_notifications() {
+        let other = "{\"jsonrpc\":\"2.0\",\"id\":9,\"result\":{}}";
+        assert!(parse_rpc_response(other, 2).is_none());
+        let notif = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{}}";
+        assert!(parse_rpc_response(notif, 2).is_none());
+        let junk = "not json at all }{";
+        assert!(parse_rpc_response(junk, 2).is_none());
+    }
+
+    #[test]
+    fn parse_rpc_response_surfaces_an_error_object() {
+        let line = "{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-32601,\"message\":\"no such tool\"}}";
+        let r = parse_rpc_response(line, 2).expect("matches id 2");
+        assert_eq!(r.unwrap_err(), "no such tool");
+    }
+
+    #[test]
+    fn mcp_tool_token_binding_differs_by_tool_and_server() {
+        let a = ActionDetail { tool: Some("read".into()), server: Some("fs".into()), ..Default::default() };
+        let b = ActionDetail { tool: Some("write".into()), server: Some("fs".into()), ..Default::default() };
+        let c = ActionDetail { tool: Some("read".into()), server: Some("git".into()), ..Default::default() };
+        assert_ne!(a.binding("mcp.tool"), b.binding("mcp.tool"));
+        assert_ne!(a.binding("mcp.tool"), c.binding("mcp.tool"));
+        assert_eq!(a.binding("mcp.tool"), a.binding("mcp.tool"));
+    }
+
+    #[test]
+    fn mcp_tool_classifies_as_require_approval() {
+        assert_eq!(classify("mcp.tool", &[], None).0, "require-approval");
+    }
+}
+
 #[cfg(test)]
 mod governance_tests {
     use super::*;
@@ -934,7 +1324,12 @@ pub fn run() {
             consume_action,
             settle_action,
             audit_recent,
-            governed_command
+            governed_command,
+            mcp_list_servers,
+            mcp_add_server,
+            mcp_remove_server,
+            mcp_list_tools,
+            mcp_call_tool
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Forge desktop application");

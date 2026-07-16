@@ -40,13 +40,16 @@ packages/desktop/
 │   ├── governance.ts       GOVERNANCE-BY-DEFAULT: fail-closed policy + one-time
 │   │                       approval gate + append-only audit ledger. Rust-host
 │   │                       backed / memory fallback. The moat. Tested (18).
+│   ├── mcp.ts              MCP stdio client: register servers, tools/list, gated
+│   │                       tools/call (JSON-RPC 2.0, partial-line, timeout→kill).
+│   │                       Rust-host session / memory-mirror fallback. Tested (21).
 │   ├── i18n.ts             single messages object, en + tr (i18n-ready).
 │   ├── ui.ts               thin DOM shell (3-pane + keys + Lane-B + approval
 │   │                       modal + Activity/audit tab) — not unit-tested.
 │   ├── main.ts             entry: hydrate → login or workspace.
 │   ├── styles.css          obsidian palette (arc-blue / ember / molten; NO green).
-│   └── __tests__/          94 tests (client / render / store / i18n / keyvault /
-│                           local / direct / identity / spawn / governance).
+│   └── __tests__/          115 tests (client / render / store / i18n / keyvault /
+│                           local / direct / identity / spawn / governance / mcp).
 └── src-tauri/              Rust host (STANDALONE cargo package)
     ├── Cargo.toml          tauri = "2"; not part of any cargo workspace.
     ├── tauri.conf.json      window + CSP (self + braavolabs.com + Ollama
@@ -56,8 +59,10 @@ packages/desktop/
     └── src/{main,lib}.rs   window + token + BYOK-key OS-scoped commands +
                             Lane-B spawn_probe + the GOVERNANCE gate (policy
                             mirror, one-time tokens, 0600 audit log, command
-                            choke point) + 7 Rust unit tests. THIN on AI, but
-                            legitimately owns permission/sandbox enforcement.
+                            choke point) + the MCP stdio client (mcp.json,
+                            spawn + JSON-RPC session, gated tools/call) + 16 Rust
+                            unit tests. THIN on AI, but legitimately owns
+                            permission/sandbox + host-side process enforcement.
 ```
 
 ### Panes (obsidian identity, §5)
@@ -261,17 +266,65 @@ labelled "sandboxed" — the moat we ship today is *governed by default*.
 
 ---
 
+## MCP — registered servers, gated tool calls (`mcp.ts` + `lib.rs`)
+
+Forge Desktop is itself an **MCP client**: register a stdio Model Context
+Protocol server, browse its tools, and call one. The rail's **MCP servers**
+section adds/lists/removes servers; clicking a server loads its tools; a per-tool
+form takes JSON arguments and runs the call.
+
+**Where the work happens.** A webview cannot spawn a child process — only the
+Rust host can — so the JSON-RPC session lives in `lib.rs`, not the webview:
+
+- **Config** — `mcp.json` in the app-config dir (`0600` on unix, same pattern as
+  `keys.json`), a `{ name: { command, args[] } }` map. `args` is a **discrete
+  array**, never a joined string, so there is no shell and no injection seam when
+  the server is spawned.
+- **Session** — line-delimited **JSON-RPC 2.0** over the child's stdio:
+  `initialize` → `notifications/initialized` → `tools/list` | `tools/call`, with
+  **partial-line buffering** (a response split across read chunks is reassembled)
+  and a **timeout → kill** (a wedged server is always reaped — no zombie).
+- **stderr is opaque** — drained on a thread and **discarded**, never parsed as
+  JSON-RPC. Only stdout carries the protocol.
+
+`src/mcp.ts` is the dev/test **mirror**: the same JSON-RPC framing in pure
+TypeScript over an *injected* spawn, so the handshake ordering, partial-line
+buffering, timeout→kill and "stderr never parsed" contract are unit-tested
+headlessly with a mock stdio server (21 vitest cases; the framing/partial-line/
+id-matching helpers have 7 Rust cases).
+
+### The moat applies to MCP too
+
+A `tools/call` is a **side effect**, so it passes the same governance gate as
+every other lane (§ Governance). `tools/list` is read-only discovery and is
+**not** gated; `tools/call` is `mcp.tool` → **require-approval**:
+
+```
+request('mcp.tool', {server, tool}) → approval modal → one-time token
+        → mcp_call_tool(token, …)  →  host consumes the token  →  spawn + call
+```
+
+Crucially, the token is **consumed host-side** (Rust), bound to `{server, tool}`,
+exactly like `governed_command`. The webview never spends it — so a compromised
+webview cannot run a tool without a real host-side consume, and a replayed,
+forged, or mis-bound token is refused *before the server is ever spawned* (tested:
+no-token → no-spawn; token-for-tool-A → refused for tool-B; replay-after-consume
+→ refused). Tool errors are honest and **molten**-rimmed; a success is neutral
+steel — there is no green anywhere.
+
+---
+
 ## Develop & verify (headless)
 
 ```bash
-pnpm --filter @ai-company-os/desktop test    # vitest — 94 tests
+pnpm --filter @ai-company-os/desktop test    # vitest — 115 tests
 pnpm --filter @ai-company-os/desktop build   # tsc --noEmit && vite build → dist/
 pnpm --filter @ai-company-os/desktop lint    # tsc --noEmit
 
 # Rust host (cargo/rustc live in ~/.cargo/bin — not on PATH by default):
 export PATH="$HOME/.cargo/bin:$PATH"
 cd packages/desktop/src-tauri && cargo check   # requires dist/ to exist first
-cargo test --lib                               # 7 governance unit tests
+cargo test --lib                               # 16 governance + MCP unit tests
 ```
 
 `cargo check` compiles `tauri::generate_context!`, which reads
