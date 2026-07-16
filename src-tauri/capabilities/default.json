@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Core webview permissions for the Forge main window. The three secure-store commands are application-defined (registered via generate_handler) and are NOT plugin/core commands, so they need no ACL entry here.",
+  "description": "Core webview permissions for the Forge main window. The application-defined secret-store + governance commands are registered via generate_handler (NOT plugin/core commands), so they need no ACL entry. dialog:default is required for the S-012 native approval dialog the host shows from approve_action.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:default"]
 }

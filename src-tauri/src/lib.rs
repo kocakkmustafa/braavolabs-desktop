@@ -752,6 +752,9 @@ struct Bound {
     action_id: String,
     kind: String,
     binding: String,
+    /// Human-readable action summary, shown verbatim in the native approval
+    /// dialog (S-012) so the person confirming sees WHAT they're allowing.
+    summary: String,
 }
 
 /// The host-owned gate state. Behind a Mutex; the webview never sees it.
@@ -859,27 +862,101 @@ fn request_action(app: AppHandle, gov: State<'_, Governance>, kind: String, deta
         }
         "auto-allow" => {
             let token = mint_id("tok", gate.seq + 1);
-            gate.tokens.insert(token.clone(), Bound { action_id: action_id.clone(), kind: kind.clone(), binding });
+            gate.tokens.insert(token.clone(), Bound { action_id: action_id.clone(), kind: kind.clone(), binding, summary: summary.clone() });
             audit_append(&app, &mut gate, &kind, decision, "granted", &summary, ts);
             Ok(GateResult { action_id, decision: decision.into(), reason: reason.into(), token: Some(token) })
         }
         _ => {
-            gate.pending.insert(action_id.clone(), Bound { action_id: action_id.clone(), kind: kind.clone(), binding });
+            gate.pending.insert(action_id.clone(), Bound { action_id: action_id.clone(), kind: kind.clone(), binding, summary: summary.clone() });
             audit_append(&app, &mut gate, &kind, decision, "pending", &summary, ts);
             Ok(GateResult { action_id, decision: "require-approval".into(), reason: reason.into(), token: None })
         }
     }
 }
 
+/// S-012 — approval requires a NATIVE OS dialog the webview cannot forge.
+///
+/// The old flow let the webview mint an approval token by calling this command
+/// after its own HTML modal — a compromised webview could skip the modal and
+/// self-approve. Now the HOST shows a native confirm dialog (macOS/Windows OS
+/// chrome, outside the webview's reach); a token is minted ONLY when a real
+/// human clicks "Allow" on that native dialog. Deny, dismiss, or timeout →
+/// FAIL-CLOSED (no token, audited "rejected"). The webview's own modal is now
+/// just an in-app preview; this native dialog is the trust anchor.
+///
+/// Async + a non-blocking `show()` callback + a oneshot channel: the command
+/// must NOT block the main thread (Tauri commands run there; a blocking dialog
+/// would deadlock the event loop that has to draw the dialog). A bounded wait
+/// (`APPROVAL_DIALOG_TIMEOUT`) guarantees the pending action can't hang forever
+/// — on timeout it resolves to deny (fail-closed), never allow.
 #[tauri::command]
-fn approve_action(app: AppHandle, gov: State<'_, Governance>, action_id: String, ts: Option<u64>) -> Result<serde_json::Value, String> {
+async fn approve_action(
+    app: AppHandle,
+    gov: State<'_, Governance>,
+    action_id: String,
+    ts: Option<u64>,
+) -> Result<serde_json::Value, String> {
     let ts = ts.unwrap_or(0);
+
+    // Take the pending record out first (also proves it exists). Hold the lock
+    // only for this quick lookup — NOT across the (slow, human-paced) dialog.
+    let rec = {
+        let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+        gate.pending
+            .remove(&action_id)
+            .ok_or("no pending action for that id")?
+    };
+
+    // Show the native dialog and await the human's choice off the main thread.
+    let approved = native_confirm(&app, &rec.summary).await;
+
     let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
-    let rec = gate.pending.remove(&action_id).ok_or("no pending action for that id")?;
+    if !approved {
+        // Deny / dismiss / timeout → fail-closed: no token, honest audit.
+        audit_append(&app, &mut gate, &rec.kind, "require-approval", "rejected", &rec.summary, ts);
+        return Ok(serde_json::json!({ "token": serde_json::Value::Null }));
+    }
     let token = mint_id("tok", gate.seq + 1);
     gate.tokens.insert(token.clone(), rec.clone());
-    audit_append(&app, &mut gate, &rec.kind, "require-approval", "approved", &rec.kind, ts);
+    audit_append(&app, &mut gate, &rec.kind, "require-approval", "approved", &rec.summary, ts);
     Ok(serde_json::json!({ "token": token }))
+}
+
+/// How long the native approval dialog may stay open before it resolves to a
+/// fail-closed deny. Long enough for a human to read + decide, bounded so a
+/// pending action can't wedge the gate indefinitely.
+const APPROVAL_DIALOG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Show a native OS confirm ("Allow" / "Deny") and resolve to the human's
+/// choice. Non-blocking `show()` + a oneshot channel so the main-thread event
+/// loop stays free to render the dialog (blocking here would deadlock). Any
+/// abnormal outcome — the sender dropped, or the timeout elapsing — resolves to
+/// `false` (deny): the gate is fail-closed by construction.
+async fn native_confirm(app: &AppHandle, summary: &str) -> bool {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+    app.dialog()
+        .message(format!(
+            "Forge is asking to run this action:\n\n{summary}\n\nAllow it to proceed?"
+        ))
+        .title("Forge — approval required")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Allow".to_string(),
+            "Deny".to_string(),
+        ))
+        .show(move |ok| {
+            // Dropped receiver (timed-out caller) just means the send fails —
+            // harmless; the timeout branch already denied.
+            let _ = tx.send(ok);
+        });
+
+    match tokio::time::timeout(APPROVAL_DIALOG_TIMEOUT, rx).await {
+        Ok(Ok(choice)) => choice,        // human clicked
+        Ok(Err(_)) => false,             // sender dropped → deny
+        Err(_) => false,                 // timed out → deny (fail-closed)
+    }
 }
 
 #[tauri::command]
@@ -887,7 +964,7 @@ fn reject_action(app: AppHandle, gov: State<'_, Governance>, action_id: String, 
     let ts = ts.unwrap_or(0);
     let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
     if let Some(rec) = gate.pending.remove(&action_id) {
-        audit_append(&app, &mut gate, &rec.kind, "require-approval", "rejected", &rec.kind, ts);
+        audit_append(&app, &mut gate, &rec.kind, "require-approval", "rejected", &rec.summary, ts);
     }
     Ok(())
 }
@@ -1814,6 +1891,7 @@ mod governance_tests {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init()) // S-012 native approval dialog
         .manage(Governance(Mutex::new(GateState::default())))
         .invoke_handler(tauri::generate_handler![
             secure_store_get,

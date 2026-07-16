@@ -19,8 +19,12 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2" # S-012: native OS approval dialog (webview-unforgeable)
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# oneshot channel + bounded timeout for the async, non-blocking native dialog
+# await (see native_confirm) — keep the command off the main thread, fail-closed.
+tokio = { version = "1", features = ["sync", "time"] }
 
 # OS keychain (S-010) — only on the platforms this app actually ships to
 # (macOS Keychain / Windows Credential Manager). Deliberately NOT pulled in on
