@@ -22,6 +22,14 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# OS keychain (S-010) — only on the platforms this app actually ships to
+# (macOS Keychain / Windows Credential Manager). Deliberately NOT pulled in on
+# Linux/other: those keep the 0600-file fallback, so no dbus/secret-service
+# system dependency is dragged into a Linux `cargo check` (CI never builds this
+# crate anyway; keeping the dep target-scoped avoids surprising a Linux dev).
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native"] }
+
 [profile.release]
 panic = "abort"
 codegen-units = 1

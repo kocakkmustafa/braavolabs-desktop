@@ -141,16 +141,23 @@ Pick a current model from each provider's own docs and paste it into the
 composer's optional model field — the defaults above are pinned so a build never
 silently changes behavior.
 
-**Key storage.** BYOK keys are stored by the Rust host in `keys.json` (0600 on
-unix) in the OS app-config dir — never localStorage, never a webview-readable
-file. The Settings → **BYOK keys** rail section lists only **masked**
-fingerprints (`first4…last4`); the raw value leaves the store solely via
-`key_get`, retrieved **one-time at dispatch** and passed straight into the
-provider's auth header — never rendered to the DOM, never logged. Only the three
-provider API hosts above are added to the CSP `connect-src`; the closed
-`default-src 'self'` / `object-src 'none'` / `frame-ancestors 'none'` policy is
-otherwise preserved. Production hardening to the OS keychain is the same human
-gate as the auth token (below).
+**Key storage (OS keychain, S-010).** The Rust host stores BYOK keys — and the
+auth token/refresh — in the **OS keychain** on the platforms this app ships to:
+the **macOS Keychain** and the **Windows Credential Manager** (via the `keyring`
+crate), encrypted at rest and OS-gated. On any other platform, or if the keychain
+is unreachable, it falls back to a single owner-only `vault.json` (`0600` on
+unix); the `secret_backend_secure` command reports which backend is live so the
+UI never over-claims protection. The keychain isn't enumerable, so a
+`keys-index.json` holds provider → **masked** fingerprint (`first4…last4`) ONLY —
+never a secret — which is all Settings → **BYOK keys** ever reads for its list.
+The raw value leaves the store solely via `key_get`, retrieved **one-time at
+dispatch** and passed straight into the provider's auth header — never rendered to
+the DOM, never logged. Any legacy `keys.json` / `secrets.json` (the earlier 0600
+plaintext files) are migrated into the keychain and deleted on first access
+(backend write precedes file removal, so a mid-migration crash can only leave the
+old file, never lose a secret). Only the three provider API hosts above are added
+to the CSP `connect-src`; the closed `default-src 'self'` / `object-src 'none'` /
+`frame-ancestors 'none'` policy is otherwise preserved.
 
 ---
 
