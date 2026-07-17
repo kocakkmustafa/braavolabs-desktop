@@ -445,12 +445,17 @@ export function renderWorkspace(deps: UiDeps): void {
         } else {
           const provider: DirectProvider = providerRaw;
           const directDetail: ActionDetail = { provider, summary: t("gov.kindDirectDispatch", { provider }) };
-          const gate = await gateAction(deps, "direct.dispatch", directDetail);
+          // gateForToken (not gateAction): keep the one-time token UNCONSUMED so
+          // the HOST spends it at key_get — the raw key is only released when the
+          // host verifies this exact governance grant (R4). A webview that skips
+          // the gate has no token, so key_get rejects it.
+          const gate = await gateForToken(deps, "direct.dispatch", directDetail);
           if (!gate.ok) {
             renderErrorCard(scroll, gate.reason);
           } else {
             // One-time raw key retrieval at dispatch — never rendered to the DOM.
-            const apiKey = await deps.vault.get(provider);
+            // The host consumes gate.token inside key_get before returning it.
+            const apiKey = await deps.vault.get(provider, gate.token);
             if (!apiKey) {
               renderErrorCard(scroll, t("chat.noKey", { provider }));
               await deps.gov.settle("direct.dispatch", "error", directDetail);

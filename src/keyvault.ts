@@ -43,8 +43,11 @@ export interface KeyVault {
   /** Masked list only — safe to render. */
   list(): Promise<KeyEntry[]>;
   remove(provider: string): Promise<void>;
-  /** Raw secret for one provider — call ONLY at direct-dispatch; never render. */
-  get(provider: string): Promise<string | undefined>;
+  /** Raw secret for one provider — call ONLY at direct-dispatch, and only with a
+   * one-time `direct.dispatch` governance token bound to this provider (R4). The
+   * host (key_get) consumes it before returning the key; without a valid token
+   * the call is rejected, so a compromised webview can't silently pull keys. */
+  get(provider: string, token: string): Promise<string | undefined>;
 }
 
 /** In-memory backend — the dev/test fallback. Masks locally on `list`. */
@@ -65,7 +68,9 @@ export function createMemoryKeyVault(): KeyVault {
     async remove(provider) {
       map.delete(provider.trim());
     },
-    async get(provider) {
+    // Dev/test backend has no host gate; the token param is accepted for
+    // interface parity and ignored (governance is enforced by the Rust host).
+    async get(provider, _token) {
       return map.get(provider.trim());
     },
   };
@@ -86,8 +91,10 @@ export function createTauriKeyVault(invoke: Invoke): KeyVault {
     async remove(provider) {
       await invoke("key_remove", { provider });
     },
-    async get(provider) {
-      const raw = (await invoke("key_get", { provider })) as string | null;
+    async get(provider, token) {
+      // The host consumes this one-time direct.dispatch token before returning
+      // the key; an invalid/absent token makes key_get throw (R4 gate).
+      const raw = (await invoke("key_get", { provider, token })) as string | null;
       return raw ?? undefined;
     },
   };
