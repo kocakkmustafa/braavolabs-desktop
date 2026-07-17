@@ -416,15 +416,42 @@ fn key_remove(app: AppHandle, provider: String) -> Result<(), String> {
     write_index(&dir, &index)
 }
 
-/// Raw secret for a single provider — call ONLY at direct-dispatch time.
-/// Returns `None` when the provider has no stored key (webview renders an
-/// honest "no key" error rather than dispatching).
+/// Raw secret for a single provider — call ONLY at direct-dispatch time, and
+/// ONLY with a valid one-time governance token (R4). The caller must first pass
+/// the `direct.dispatch` gate (native-dialog approval) for THIS provider and
+/// hand the resulting token here; key_get consumes it (one-time) before ever
+/// touching the vault. This closes the audit HIGH: previously key_get returned
+/// the raw key with no host-side token check, so a compromised webview could
+/// silently pull every stored key without passing the governance gate. Now a
+/// missing/forged/replayed/mis-bound token → hard error, no key. Returns `None`
+/// only when the (governed) provider genuinely has no stored key.
 #[tauri::command]
-fn key_get(app: AppHandle, provider: String) -> Result<Option<String>, String> {
+fn key_get(app: AppHandle, gov: State<'_, Governance>, provider: String, token: String) -> Result<Option<String>, String> {
+    let provider = provider.trim().to_string();
+    // The token must be a live direct.dispatch grant bound to THIS provider —
+    // same binding the webview's gateForToken minted for it.
+    let detail = ActionDetail { provider: Some(provider.clone()), ..Default::default() };
+    let binding = detail.binding("direct.dispatch");
+    {
+        let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+        let ok = try_consume_token(&mut gate, &token, "direct.dispatch", &binding);
+        audit_append(
+            &app,
+            &mut gate,
+            "direct.dispatch",
+            "-",
+            if ok { "key-access-granted" } else { "key-access-denied" },
+            &provider,
+            0,
+        );
+        if !ok {
+            return Err("key access denied: a one-time direct.dispatch approval token is required".into());
+        }
+    }
     let dir = config_dir(&app)?;
     let backend = make_backend(&dir);
     migrate_legacy(backend.as_ref(), &dir)?;
-    backend.get(&byok_account(provider.trim()))
+    backend.get(&byok_account(&provider))
 }
 
 // ── Lane-B SAFE-SPAWN — vendor CLI detection ─────────────────────────────────
@@ -1033,27 +1060,32 @@ fn reject_action(app: AppHandle, gov: State<'_, Governance>, action_id: String, 
     Ok(())
 }
 
+/// Verify + spend a one-time governance token. Returns true only when the token
+/// exists AND its bound kind + binding match; removes it (one-time). Shared by
+/// consume_action and the key_get gate so both enforce the exact same contract.
+fn try_consume_token(gate: &mut GateState, token: &str, kind: &str, binding: &str) -> bool {
+    match gate.tokens.get(token) {
+        Some(rec) if rec.kind == kind && rec.binding == binding => {
+            gate.tokens.remove(token); // one-time
+            true
+        }
+        _ => false, // missing (replay/forgery) or kind/binding mismatch
+    }
+}
+
 #[tauri::command]
 fn consume_action(app: AppHandle, gov: State<'_, Governance>, token: String, kind: String, detail: Option<ActionDetail>, ts: Option<u64>) -> Result<bool, String> {
     let detail = detail.unwrap_or_default();
     let ts = ts.unwrap_or(0);
     let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
-    match gate.tokens.get(&token).cloned() {
-        // Missing = replay (already spent) or forgery (never issued).
-        None => {
-            audit_append(&app, &mut gate, &kind, "-", "replay-rejected", &kind, ts);
-            Ok(false)
-        }
-        Some(rec) if rec.kind != kind || rec.binding != detail.binding(&kind) => {
-            audit_append(&app, &mut gate, &kind, "-", "replay-rejected", &kind, ts);
-            Ok(false)
-        }
-        Some(_) => {
-            gate.tokens.remove(&token); // one-time
-            let summary = detail.summary_or(&kind);
-            audit_append(&app, &mut gate, &kind, "-", "consumed", &summary, ts);
-            Ok(true)
-        }
+    let binding = detail.binding(&kind);
+    if try_consume_token(&mut gate, &token, &kind, &binding) {
+        let summary = detail.summary_or(&kind);
+        audit_append(&app, &mut gate, &kind, "-", "consumed", &summary, ts);
+        Ok(true)
+    } else {
+        audit_append(&app, &mut gate, &kind, "-", "replay-rejected", &kind, ts);
+        Ok(false)
     }
 }
 
@@ -1952,6 +1984,53 @@ mod governance_tests {
         let b = ActionDetail { argv: Some(vec!["echo".into(), "b".into()]), ..Default::default() };
         assert_ne!(a.binding("command.run"), b.binding("command.run"));
         assert_eq!(a.binding("command.run"), a.binding("command.run"));
+    }
+
+    // ── R4: key_get token gate — the shared one-time consumption contract ──
+
+    fn seed_token(gate: &mut GateState, token: &str, kind: &str, binding: &str) {
+        gate.tokens.insert(
+            token.to_string(),
+            Bound {
+                action_id: "act".into(),
+                kind: kind.into(),
+                binding: binding.into(),
+                summary: "s".into(),
+                dialog_text: "d".into(),
+            },
+        );
+    }
+
+    #[test]
+    fn key_get_token_consumes_once_then_rejects_replay() {
+        // A direct.dispatch grant bound to provider "openai" — exactly what
+        // key_get rebuilds and consumes.
+        let binding = ActionDetail { provider: Some("openai".into()), ..Default::default() }
+            .binding("direct.dispatch");
+        let mut gate = GateState::default();
+        seed_token(&mut gate, "tok-1", "direct.dispatch", &binding);
+        // First consume succeeds; the token is spent (one-time).
+        assert!(try_consume_token(&mut gate, "tok-1", "direct.dispatch", &binding));
+        // Replay of the same token is rejected → a webview can't reuse a grant.
+        assert!(!try_consume_token(&mut gate, "tok-1", "direct.dispatch", &binding));
+    }
+
+    #[test]
+    fn key_get_token_rejects_forged_wrong_kind_and_wrong_provider() {
+        let binding_openai = ActionDetail { provider: Some("openai".into()), ..Default::default() }
+            .binding("direct.dispatch");
+        let binding_anthropic = ActionDetail { provider: Some("anthropic".into()), ..Default::default() }
+            .binding("direct.dispatch");
+        let mut gate = GateState::default();
+        seed_token(&mut gate, "tok-openai", "direct.dispatch", &binding_openai);
+        // Forged/never-issued token → rejected.
+        assert!(!try_consume_token(&mut gate, "does-not-exist", "direct.dispatch", &binding_openai));
+        // Right token, WRONG kind (e.g. reusing a spawn.launch grant) → rejected.
+        assert!(!try_consume_token(&mut gate, "tok-openai", "spawn.launch", &binding_openai));
+        // Right token, WRONG provider binding (openai grant used for anthropic) → rejected.
+        assert!(!try_consume_token(&mut gate, "tok-openai", "direct.dispatch", &binding_anthropic));
+        // The valid grant is still intact (none of the above spent it).
+        assert!(try_consume_token(&mut gate, "tok-openai", "direct.dispatch", &binding_openai));
     }
 
     // ── S-012: native dialog shows the ENFORCED action, not free-text summary ──

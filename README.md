@@ -383,12 +383,18 @@ store uses an in-memory map, so a secret never lands on disk in dev/test.
 
 **Threat-model scope (honest).** The keychain protects secrets **at rest** — from
 disk theft, other local processes, Time Machine/backups, and forensic recovery —
-which the old plaintext files did not. It is **not** a runtime barrier against a
-compromised webview: `key_get` is deliberately un-gated so BYOK direct-dispatch
-stays one-click, so an attacker who defeats the strict CSP (`default-src 'self'`)
-and runs script inside the window could still call it. Closing that runtime gap is
-the **native per-action approval dialog** follow-up (defter **S-012**), not part of
-S-010.
+which the old plaintext files did not.
+
+**Runtime gate (R4 — closed).** `key_get` is **no longer un-gated**: it now consumes
+a one-time `direct.dispatch` governance token **bound to the requested provider**
+before it will touch the vault (`try_consume_token`). The webview obtains that token
+by passing the `direct.dispatch` gate — the **native approval dialog** (S-012) — via
+`gateForToken`, and the HOST spends it inside `key_get`. So a compromised webview that
+defeats the CSP and calls `key_get` directly has no valid token → the call is rejected
+(missing/forged/replayed/mis-bound all fail; verified by cargo tests). The residual
+hardening — moving the provider HTTP dispatch fully host-side so the raw key never
+enters the webview heap at all — is the documented next layer (still webview-executed
+today, but only after a real, provider-bound, human-approved grant).
 
 ## Human gates (NOT done here — require a GUI session / signing identity / live services)
 

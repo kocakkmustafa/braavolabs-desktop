@@ -36,11 +36,11 @@ describe("createMemoryKeyVault (dev/test fallback — never touches disk)", () =
       { provider: "openai", masked: "sk-o…0000" },
     ]);
     // raw secret retrievable only via get()
-    expect(await v.get("openai")).toBe("sk-openai-ABCDWXYZ0000");
+    expect(await v.get("openai", "tok")).toBe("sk-openai-ABCDWXYZ0000");
 
     await v.remove("openai");
     expect((await v.list()).map((e) => e.provider)).toEqual(["anthropic"]);
-    expect(await v.get("openai")).toBeUndefined();
+    expect(await v.get("openai", "tok")).toBeUndefined();
   });
 
   it("list() output carries no raw secret anywhere (masked-only render guarantee)", async () => {
@@ -64,7 +64,7 @@ describe("createMemoryKeyVault (dev/test fallback — never touches disk)", () =
     await v.add("openai", "sk-new-CCCCDDDD2222");
     const list = await v.list();
     expect(list).toHaveLength(1);
-    expect(await v.get("openai")).toBe("sk-new-CCCCDDDD2222");
+    expect(await v.get("openai", "tok")).toBe("sk-new-CCCCDDDD2222");
   });
 });
 
@@ -81,11 +81,12 @@ describe("createTauriKeyVault (delegates to the Rust key commands)", () => {
 
     await v.add("openai", "sk-openai-RAWSECRET0000");
     expect(await v.list()).toEqual([{ provider: "openai", masked: "sk-o…0000" }]);
-    expect(await v.get("openai")).toBe("sk-openai-RAWSECRET0000");
+    expect(await v.get("openai", "tok")).toBe("sk-openai-RAWSECRET0000");
     await v.remove("openai");
 
     expect(calls.map((c) => c.cmd)).toEqual(["key_add", "key_list", "key_get", "key_remove"]);
     expect(calls[0].args).toEqual({ provider: "openai", secret: "sk-openai-RAWSECRET0000" });
+    expect(calls[2].args).toEqual({ provider: "openai", token: "tok" }); // R4: token forwarded to key_get
     expect(calls[3].args).toEqual({ provider: "openai" });
   });
 
@@ -93,6 +94,6 @@ describe("createTauriKeyVault (delegates to the Rust key commands)", () => {
     const invoke = vi.fn(async () => null);
     const v = createTauriKeyVault(invoke);
     expect(await v.list()).toEqual([]);
-    expect(await v.get("anthropic")).toBeUndefined();
+    expect(await v.get("anthropic", "tok")).toBeUndefined();
   });
 });
