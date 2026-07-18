@@ -47,6 +47,13 @@ describe("isSafeWriteRoot — allowlist-shaped (adversarial B)", () => {
     }
   });
 
+  it("REJECTS the Windows whole-home too (drive letter must not shift the depth) — same bug-class", () => {
+    for (const bad of ["C:/Users", "C:/Users/me", "C:\\Users\\me", "C:/Windows/System32"]) {
+      expect(isSafeWriteRoot(bad), bad).toBe(false);
+    }
+    expect(isSafeWriteRoot("C:/Users/me/project")).toBe(true); // a real Windows project dir is fine
+  });
+
   it("REJECTS system trees at any depth (PATH shadowing / LaunchAgents persistence)", () => {
     for (const bad of ["/usr/local/bin", "/Library/LaunchAgents", "/etc/cron.d", "/opt", "/var/root"]) {
       expect(isSafeWriteRoot(bad), bad).toBe(false);
@@ -80,11 +87,25 @@ describe("validateSandboxPolicy", () => {
   });
 
   it("rejects a read root that names a secrets dir (adversarial C — read is the exfil source)", () => {
-    expect(validateSandboxPolicy(policy({ readRoots: ["/Users/me/.ssh"] }))).toMatchObject({
-      ok: false,
-      reason: expect.stringContaining("secrets dir"),
-    });
-    expect(validateSandboxPolicy(policy({ readRoots: ["/home/x/.aws"] }))).toMatchObject({ ok: false });
+    // Expanded superset: keystores, cloud/CI creds, browser profiles, keychains.
+    for (const secret of [
+      "/Users/me/.ssh", "/home/x/.aws", "/Users/me/.config", "/Users/me/.netrc",
+      "/Users/me/.git-credentials", "/Users/me/.npmrc", "/Users/me/Library/Keychains",
+      "/Users/me/Library/Application Support/Google/Cookies",
+    ]) {
+      expect(validateSandboxPolicy(policy({ readRoots: ["/usr", secret] })), secret).toMatchObject({ ok: false });
+    }
+  });
+
+  it("rejects a whole-home / all-homes READ root (exposes every dotfile secret)", () => {
+    for (const home of ["/Users", "/home", "/Users/me", "C:/Users/me"]) {
+      expect(validateSandboxPolicy(policy({ readRoots: ["/usr", home] })), home).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("whole home"),
+      });
+    }
+    // A deeper home subdir (not the whole home, not under the write root) is fine.
+    expect(validateSandboxPolicy(policy({ readRoots: ["/usr", "/Users/me/shared-docs"] }))).toEqual({ ok: true });
   });
 
   it("rejects a non-absolute / traversal / control-char read root", () => {
@@ -136,8 +157,10 @@ describe("toSeatbeltProfile (macOS SBPL)", () => {
 describe("toBubblewrapArgs (Linux)", () => {
   it("unshares pid+ipc+net, clears env, ro-binds reads + binds writes", () => {
     const args = toBubblewrapArgs(policy());
-    expect(args).toContain("--unshare-pid"); // no sibling /proc/<pid>/environ snoop (adversarial D)
+    expect(args).toContain("--unshare-pid"); // no sibling proc-environ snoop (adversarial D)
     expect(args).toContain("--unshare-ipc");
+    expect(args).toContain("--unshare-uts");
+    expect(args).toEqual(expect.arrayContaining(["--cap-drop", "ALL"])); // no caps even if elevated
     expect(args).toContain("--unshare-net"); // network denied
     expect(args).toContain("--clearenv"); // host secret env does NOT leak in (adversarial D3)
     expect(args).toEqual(expect.arrayContaining(["--setenv", "HOME", CWD])); // HOME=project, not real $HOME

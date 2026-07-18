@@ -30,7 +30,10 @@
  *      read root spelled out (hiding reads behind a count conceals the exfil
  *      source a reviewer must see).
  *
- * Delegated to the Rust host (documented): real symlink resolution of roots +
+ * Delegated to the Rust host (documented, LOAD-BEARING): the host MUST realpath-
+ * resolve every root — symlinks AND mount aliases (/Volumes/*, firmlinks) — BEFORE
+ * it validates/generates, since these string checks cannot see through a symlinked
+ * write root to its target (on Linux bwrap binds the resolved target rw). Plus
  * final NUL rejection. Windows: no generator yet — host fails closed.
  */
 import {
@@ -103,20 +106,39 @@ export function isSafeWriteRoot(root: string): boolean {
   const lc = canon.toLowerCase();
   if (isSensitiveDir(canon)) return false; // /, /etc (+ /private/etc via canon), secrets
   const segs = lc.split("/").filter(Boolean);
-  if (segs.length <= 1) return false; // "/", "/Users", "/opt" — too broad
+  // Drop a leading Windows drive letter ("c:") so the depth/home/system-tree
+  // heuristics see the REAL segments — else "C:\Users\me" reads as depth-3 and
+  // the whole-home guard below misses it (the same bug-class as the POSIX P1).
+  if (segs.length > 0 && /^[a-z]:$/.test(segs[0])) segs.shift();
+  if (segs.length <= 1) return false; // "/", "/Users", "/opt", "C:\", "C:\Users" — too broad
   if (SYSTEM_WRITE_TREES.has(segs[0])) return false; // /usr/local/bin, /Library/LaunchAgents…
   if (segs.length === 2 && HOME_CONTAINERS.has(segs[0])) return false; // whole home "/Users/me"
   return true;
 }
 
-/** True when `anc` is a STRICT ancestor of `desc` (canonical). */
+/** A read root that is a whole home or all-homes container ("/Users", "/home",
+ * "/Users/<name>") exposes every dotfile-secret (.netrc, .git-credentials, browser
+ * profiles) — too broad to grant read to. System roots (/usr…) are depth-1 but
+ * legitimate, so this is home-specific, not a general depth rule. */
+function isBroadHomeReadRoot(root: string): boolean {
+  const segs = canonicalizePath(root).toLowerCase().split("/").filter(Boolean);
+  if (segs.length > 0 && /^[a-z]:$/.test(segs[0])) segs.shift();
+  return segs.length > 0 && segs.length <= 2 && HOME_CONTAINERS.has(segs[0]);
+}
+
+/** True when `anc` is a STRICT ancestor of `desc` (canonical, case-folded — a
+ * case-insensitive FS treats /Users/me/Proj and /users/me/proj as one tree). */
 function isStrictAncestor(anc: string, desc: string): boolean {
-  const a = canonicalizePath(anc);
-  const d = canonicalizePath(desc);
+  const a = canonicalizePath(anc).toLowerCase();
+  const d = canonicalizePath(desc).toLowerCase();
   return a !== d && (d + "/").startsWith(a + "/");
 }
 
-const SECRET_READ_SEGMENT = /\/\.(ssh|aws|gnupg|gpg|kube|docker)(\/|$)/i;
+/** Secret stores a READ root must not name — a SUPERSET of governance's write/pty
+ * secret set (a read grant + the always-writable cwd is an exfil path even with
+ * network off). Covers key stores, cloud/CI creds, browser profiles, keychains. */
+const SECRET_READ_SEGMENT =
+  /\/(\.(ssh|aws|gnupg|gpg|kube|docker|config|netrc|git-credentials|npmrc|password-store)|library\/keychains|library\/application support\/[^/]*\/(cookies|login data))(\/|$)/i;
 
 /**
  * A policy the host will ENFORCE must itself be safe. Write roots go through the
@@ -137,6 +159,9 @@ export function validateSandboxPolicy(p: SandboxPolicy): ValidationResult {
     }
     if (SECRET_READ_SEGMENT.test(canonicalizePath(r))) {
       return { ok: false, reason: `read root names a secrets dir: ${r}` };
+    }
+    if (isBroadHomeReadRoot(r)) {
+      return { ok: false, reason: `read root is a whole home / all-homes dir: ${r}` };
     }
   }
   for (const w of p.writeRoots) {
@@ -222,7 +247,8 @@ export function toBubblewrapArgs(p: SandboxPolicy): string[] {
   assertValid(p);
   const args: string[] = [
     "--die-with-parent", "--new-session",
-    "--unshare-pid", "--unshare-ipc",
+    "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+    "--cap-drop", "ALL", // child keeps no capabilities even if braavo runs elevated
     "--proc", "/proc", "--dev", "/dev",
     ...sandboxEnvArgs(p),
   ];
