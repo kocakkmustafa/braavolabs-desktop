@@ -49,6 +49,13 @@ describe("validateSandboxPolicy", () => {
     expect(validateSandboxPolicy(policy({ readRoots: ["/a/../etc"] }))).toMatchObject({ ok: false });
   });
 
+  it("rejects a control char in any root (newline/NUL/line-sep — profile-injection smuggle)", () => {
+    expect(validateSandboxPolicy(policy({ writeRoots: ["/w\n(allow default)"] }))).toMatchObject({ ok: false });
+    expect(validateSandboxPolicy(policy({ writeRoots: ["/w\x00"] }))).toMatchObject({ ok: false });
+    expect(validateSandboxPolicy(policy({ readRoots: ["/u\x1b"] }))).toMatchObject({ ok: false });
+    expect(validateSandboxPolicy(policy({ readRoots: ["/u\u2028x"] }))).toMatchObject({ ok: false });
+  });
+
   it("the default policy validates for an ordinary project dir", () => {
     expect(validateSandboxPolicy(defaultSandboxPolicy("/Users/me/project"))).toEqual({ ok: true });
   });

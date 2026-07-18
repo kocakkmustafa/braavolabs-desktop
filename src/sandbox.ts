@@ -62,14 +62,30 @@ export function defaultSandboxPolicy(cwd: string): SandboxPolicy {
 export type ValidationResult = { ok: true } | { ok: false; reason: string };
 
 /**
+ * A control char (NUL, newline, U+2028/2029 line separators) in a path is never
+ * legitimate and is exactly what a profile-injection attempt smuggles: even with
+ * `"` escaped, an embedded newline could let the tail of a path start a new
+ * top-level SBPL directive, and a NUL truncates in the C host. Reject at the
+ * validation boundary so neither the SBPL nor the bwrap generator ever sees one.
+ */
+function hasControlChars(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x20 || c === 0x7f || c === 0x2028 || c === 0x2029) return true;
+  }
+  return false;
+}
+
+/**
  * A policy the host will ENFORCE must itself be safe: a write root that is
- * relative, escapes via `..`, or lands in a system/secrets dir would let an
- * approved command scribble where it must not. Read roots must be absolute +
- * non-traversal (system reads are fine; `..` is not).
+ * relative, escapes via `..`, holds a control char, or lands in a system/secrets
+ * dir would let an approved command scribble where it must not. Read roots must
+ * be absolute + non-traversal + control-char-free (system reads are fine; `..`,
+ * a NUL, or a newline are not).
  */
 export function validateSandboxPolicy(p: SandboxPolicy): ValidationResult {
   for (const w of p.writeRoots) {
-    if (!isAbsolutePath(w) || isTraversal(w)) {
+    if (!isAbsolutePath(w) || isTraversal(w) || hasControlChars(w)) {
       return { ok: false, reason: `write root not absolute/clean: ${w}` };
     }
     if (isSensitiveDir(w)) {
@@ -77,7 +93,7 @@ export function validateSandboxPolicy(p: SandboxPolicy): ValidationResult {
     }
   }
   for (const r of p.readRoots) {
-    if (!isAbsolutePath(r) || isTraversal(r)) {
+    if (!isAbsolutePath(r) || isTraversal(r) || hasControlChars(r)) {
       return { ok: false, reason: `read root not absolute/clean: ${r}` };
     }
   }
