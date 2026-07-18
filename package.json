@@ -1,9 +1,9 @@
 {
-  "name": "@ai-company-os/desktop",
+  "name": "@braavolabs/desktop",
   "version": "0.1.0",
   "packageManager": "pnpm@10.33.0",
   "private": true,
-  "description": "Forge Desktop — native multi-model chat & cascade control (Tauri v2). BYOK, self-host, obsidian UI.",
+  "description": "Braavolabs Desktop — native multi-model chat & cascade control (Tauri v2). BYOK, self-host, obsidian UI.",
   "type": "module",
   "scripts": {
     "build": "tsc --noEmit && vite build",

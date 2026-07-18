@@ -1,5 +1,5 @@
 /**
- * Forge API client — a VERBATIM port of packages/cli/src/forge/client.ts:
+ * Braavolabs API client — a VERBATIM port of packages/cli/src/forge/client.ts:
  * dependency-free `fetch`, a single transparent refresh-on-401, `ApiError` on
  * non-2xx, and `raw` mode for callers (login) that render their own banner.
  * Keeping the CLI's exact contract means server-side changes only have to be

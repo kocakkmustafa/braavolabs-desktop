@@ -11,9 +11,9 @@ export type Locale = "en" | "tr";
 type Dict = Record<string, unknown>;
 
 const en: Dict = {
-  app: { name: "Forge", tagline: "Multi-model chat, one workspace." },
+  app: { name: "Braavolabs", tagline: "Multi-model chat, one workspace." },
   login: {
-    title: "Sign in to Forge",
+    title: "Sign in to Braavolabs",
     email: "Email",
     password: "Password",
     apiUrl: "API URL",
@@ -73,7 +73,7 @@ const en: Dict = {
     result: "Result",
     errorResult: "Tool error",
     empty2: "No content returned.",
-    unreachable: "MCP servers require the Forge desktop host (run the Tauri app).",
+    unreachable: "MCP servers require the Braavolabs desktop host (run the Tauri app).",
   },
   chat: {
     placeholder: "Ask across your models…",
@@ -130,7 +130,7 @@ const en: Dict = {
     decisionApproval: "asks you",
     decisionDeny: "blocked",
     approveTitle: "Approval needed",
-    approveBody: "Forge is asking before it runs this action. Nothing runs until you approve.",
+    approveBody: "Braavolabs is asking before it runs this action. Nothing runs until you approve.",
     approveAction: "Action",
     approveReason: "Why",
     approveBtn: "Approve & run",
@@ -146,9 +146,9 @@ const en: Dict = {
 };
 
 const tr: Dict = {
-  app: { name: "Forge", tagline: "Çok-model sohbet, tek çalışma alanı." },
+  app: { name: "Braavolabs", tagline: "Çok-model sohbet, tek çalışma alanı." },
   login: {
-    title: "Forge'a giriş yap",
+    title: "Braavolabs'a giriş yap",
     email: "E-posta",
     password: "Parola",
     apiUrl: "API adresi",
@@ -208,7 +208,7 @@ const tr: Dict = {
     result: "Sonuç",
     errorResult: "Araç hatası",
     empty2: "İçerik dönmedi.",
-    unreachable: "MCP sunucuları Forge masaüstü host'unu gerektirir (Tauri uygulamasını çalıştır).",
+    unreachable: "MCP sunucuları Braavolabs masaüstü host'unu gerektirir (Tauri uygulamasını çalıştır).",
   },
   chat: {
     placeholder: "Modellerine sor…",
@@ -265,7 +265,7 @@ const tr: Dict = {
     decisionApproval: "sana sorar",
     decisionDeny: "engelli",
     approveTitle: "Onay gerekli",
-    approveBody: "Forge bu eylemi çalıştırmadan önce soruyor. Sen onaylamadan hiçbir şey çalışmaz.",
+    approveBody: "Braavolabs bu eylemi çalıştırmadan önce soruyor. Sen onaylamadan hiçbir şey çalışmaz.",
     approveAction: "Eylem",
     approveReason: "Neden",
     approveBtn: "Onayla ve çalıştır",

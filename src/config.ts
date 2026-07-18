@@ -1,7 +1,7 @@
 /**
- * Forge Desktop config — the SAME shape the CLI persists ({apiUrl, token,
+ * Braavolabs Desktop config — the SAME shape the CLI persists ({apiUrl, token,
  * refreshToken}) so the two clients share one mental model. Unlike the CLI
- * (which writes ~/.forge/config.json on disk), the desktop must NOT drop a
+ * (which writes ~/.braavolabs/config.json on disk), the desktop must NOT drop a
  * bearer token into a plaintext file or localStorage: the token is held in
  * memory and persisted through an injectable secure backend (see store.ts,
  * wired in main.ts to the Tauri OS-scoped secret command). `apiUrl` is the
@@ -17,10 +17,10 @@ export interface Config {
   refreshToken?: string;
 }
 
-/** Compile-time default; overridable at runtime via VITE_FORGE_API_URL. */
+/** Compile-time default; overridable at runtime via VITE_BRAAVOLABS_API_URL. */
 export const DEFAULT_API =
   (typeof import.meta !== "undefined" &&
-    (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_FORGE_API_URL) ||
+    (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_BRAAVOLABS_API_URL) ||
   "https://braavolabs.com/api/v1";
 
 /**

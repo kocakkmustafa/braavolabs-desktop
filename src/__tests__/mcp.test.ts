@@ -144,7 +144,7 @@ describe("listServerTools — full JSON-RPC handshake", () => {
     // handshake ordering + client identity
     expect(server.sent.map((m) => m.method)).toEqual(["initialize", "notifications/initialized", "tools/list"]);
     expect(server.sent[0].params.protocolVersion).toBe(MCP_PROTOCOL_VERSION);
-    expect(server.sent[0].params.clientInfo.name).toBe("forge");
+    expect(server.sent[0].params.clientInfo.name).toBe("braavolabs");
     expect(server.sent[1].id).toBeUndefined(); // initialized is a NOTIFICATION
     expect(server.killed).toBe(true); // child torn down (no zombie)
   });

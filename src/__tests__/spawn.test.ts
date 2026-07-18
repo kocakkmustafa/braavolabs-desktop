@@ -38,8 +38,8 @@ describe("isSpawnVendor / VENDOR_SPECS", () => {
     // spawnRiskNote is the single accessor the UI paints steel.
     expect(spawnRiskNote("claude")).toBe(VENDOR_SPECS.claude.risk);
     // Fallback (rule g) points at the API-key path, never a vendor OAuth flow.
-    expect(VENDOR_SPECS.claude.fallback).toBe('forge direct anthropic "<question>"');
-    expect(VENDOR_SPECS.codex.fallback).toBe('forge direct openai "<question>"');
+    expect(VENDOR_SPECS.claude.fallback).toBe('braavo direct anthropic "<question>"');
+    expect(VENDOR_SPECS.codex.fallback).toBe('braavo direct openai "<question>"');
   });
 });
 
@@ -72,9 +72,9 @@ describe("buildLaunchCommand — argv array, no shell string (rule b)", () => {
     for (const a of plan.argv) expect(typeof a).toBe("string");
   });
 
-  it("delegates the interactive session to the proven `forge spawn` CLI path", () => {
+  it("delegates the interactive session to the proven `braavo spawn` CLI path", () => {
     const plan = buildLaunchCommand("codex", ["--dir", "/work"]);
-    expect(plan.cliDelegation).toEqual(["forge", "spawn", "codex", "--dir", "/work"]);
+    expect(plan.cliDelegation).toEqual(["braavo", "spawn", "codex", "--dir", "/work"]);
     expect(Array.isArray(plan.cliDelegation)).toBe(true);
   });
 });
@@ -83,10 +83,10 @@ describe("spawnFallbackMessage — graceful API-key degrade (rule g)", () => {
   it("names the missing CLI and the API-key command that bypasses it", () => {
     const fb = spawnFallbackMessage("codex");
     expect(fb.notFound).toBe("codex CLI not found");
-    expect(fb.useApiKey).toBe('forge direct openai "<question>"');
+    expect(fb.useApiKey).toBe('braavo direct openai "<question>"');
     const fbc = spawnFallbackMessage("claude");
     expect(fbc.notFound).toBe("claude CLI not found");
-    expect(fbc.useApiKey).toBe('forge direct anthropic "<question>"');
+    expect(fbc.useApiKey).toBe('braavo direct anthropic "<question>"');
   });
 });
 

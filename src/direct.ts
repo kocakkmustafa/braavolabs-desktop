@@ -1,6 +1,6 @@
 /**
  * Lane-A direct — single-shot BYOK completions straight to a provider's API,
- * bypassing the Braavolabs Forge server entirely. A VERBATIM port of the CLI's
+ * bypassing the Braavolabs server entirely. A VERBATIM port of the CLI's
  * forge/direct.ts: the per-provider request shape (auth header, endpoint,
  * response envelope) is kept explicit rather than papered over, so the
  * differences stay auditable and unit-testable with an injected fetch.

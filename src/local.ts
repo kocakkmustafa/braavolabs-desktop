@@ -1,6 +1,6 @@
 /**
  * Lane-A local — talk directly to a local Ollama server from the webview. No
- * keys, no Forge-server round-trip, works fully offline. A VERBATIM port of the
+ * keys, no Braavolabs-server round-trip, works fully offline. A VERBATIM port of the
  * CLI's forge/local.ts, adapted only where the runtime differs: the base URL
  * override comes from `import.meta.env.VITE_OLLAMA_HOST` (there is no
  * `process.env` in a Tauri webview) or an explicit argument.

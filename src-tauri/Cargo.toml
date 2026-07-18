@@ -4,14 +4,14 @@
 # secret commands. All orchestration (multi-model compare, cascade, savings)
 # is the SERVER's job — there is no AI logic in this binary.
 [package]
-name = "forge-desktop"
+name = "braavolabs-desktop"
 version = "0.1.0"
-description = "Forge Desktop — native multi-model chat & cascade control."
+description = "Braavolabs Desktop — native multi-model chat & cascade control."
 edition = "2021"
 rust-version = "1.77"
 
 [lib]
-name = "forge_desktop_lib"
+name = "braavolabs_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    forge_desktop_lib::run();
+    braavolabs_desktop_lib::run();
 }
