@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Forge",
+  "productName": "Braavolabs",
   "version": "0.1.0",
-  "identifier": "com.braavolabs.forge",
+  "identifier": "com.braavolabs.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5183",
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Forge",
+        "title": "Braavolabs",
         "width": 1200,
         "height": 800,
         "minWidth": 880,

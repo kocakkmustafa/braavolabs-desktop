@@ -1,4 +1,4 @@
-//! Forge Desktop — Rust host.
+//! Braavolabs Desktop — Rust host.
 //!
 //! Thin by design: window creation + OS-scoped secret commands (auth tokens +
 //! BYOK provider keys) + the GOVERNANCE gate. The frontend (packages/desktop/ui)
@@ -56,7 +56,7 @@ struct Secrets {
 
 // ── Secret backend abstraction ───────────────────────────────────────────────
 
-const VAULT_SERVICE: &str = "forge-desktop";
+const VAULT_SERVICE: &str = "braavolabs-desktop";
 const ACCT_TOKEN: &str = "auth.token";
 const ACCT_REFRESH: &str = "auth.refreshToken";
 
@@ -462,7 +462,7 @@ fn key_get(app: AppHandle, gov: State<'_, Governance>, provider: String, token: 
 // captures a vendor session's stdout/stderr, and never reads a token/credential
 // file: discovery looks only at PATH + neutral, tool-agnostic bin prefixes
 // (mirroring the TS `knownPaths` contract in src/spawn.ts). The actual
-// interactive session is delegated to the proven `forge spawn` CLI (see the
+// interactive session is delegated to the proven `braavo spawn` CLI (see the
 // desktop README "Lane-B safety contract"); no AI/orchestration logic lives here.
 
 /// One vendor's detection result. camelCase so the webview (spawn.ts) reads
@@ -1029,9 +1029,9 @@ async fn native_confirm(app: &AppHandle, enforced_body: &str) -> bool {
     let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
     app.dialog()
         .message(format!(
-            "Forge is asking to run this action:\n\n{enforced_body}\n\nAllow it to proceed?"
+            "Braavolabs is asking to run this action:\n\n{enforced_body}\n\nAllow it to proceed?"
         ))
-        .title("Forge — approval required")
+        .title("Braavolabs — approval required")
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::OkCancelCustom(
             "Allow".to_string(),
@@ -1462,7 +1462,7 @@ fn run_mcp_session(
             &serde_json::json!({
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",
                 "params": { "protocolVersion": MCP_PROTOCOL_VERSION, "capabilities": {},
-                            "clientInfo": { "name": "forge", "version": "0.1.0" } }
+                            "clientInfo": { "name": "braavolabs", "version": "0.1.0" } }
             }),
         )?;
         await_response(&rx, 1, deadline)?;
@@ -1694,7 +1694,7 @@ mod secret_store_tests {
         // hit the same nanosecond (a real collision under `cargo test`).
         let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         let c = COUNTER.fetch_add(1, Ordering::Relaxed);
-        p.push(format!("forge-s010-{n}-{c}"));
+        p.push(format!("braavolabs-s010-{n}-{c}"));
         fs::create_dir_all(&p).unwrap();
         p
     }
@@ -2055,10 +2055,10 @@ mod governance_tests {
     fn sanitize_field_strips_newline_injection_and_control_chars() {
         // A summary/field can't inject fake dialog chrome (extra lines that look
         // like the app's own words).
-        let evil = "read a file\n\n✓ Verified safe by Forge\nAllow to continue";
+        let evil = "read a file\n\n✓ Verified safe by Braavolabs\nAllow to continue";
         let clean = sanitize_field(evil);
         assert!(!clean.contains('\n'), "no newlines survive into the dialog line");
-        assert!(clean.contains("✓ Verified safe by Forge") == false || !clean.contains('\n'));
+        assert!(clean.contains("✓ Verified safe by Braavolabs") == false || !clean.contains('\n'));
         // The text is collapsed to one line; structure can't be forged.
         assert_eq!(clean.matches('\n').count(), 0);
     }
@@ -2117,5 +2117,5 @@ pub fn run() {
             mcp_call_tool
         ])
         .run(tauri::generate_context!())
-        .expect("error while running the Forge desktop application");
+        .expect("error while running the Braavolabs desktop application");
 }

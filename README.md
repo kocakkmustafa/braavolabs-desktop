@@ -1,9 +1,9 @@
-# @ai-company-os/desktop — Forge Desktop
+# @braavolabs/desktop — Braavolabs Desktop
 
 Native desktop app (Tauri v2) for multi-model chat, cascade, and savings —
-the same Forge server that powers the CLI, in an obsidian three-pane UI.
+the same Braavolabs server that powers the CLI, in an obsidian three-pane UI.
 
-> **Server = orchestration.** The Forge server owns multi-model routing,
+> **Server = orchestration.** The Braavolabs server owns multi-model routing,
 > cascade, and savings. The desktop adds two **Lane-A** side-channels that do
 > NOT touch the server — **Local (Ollama)** and **BYOK Direct** — but even these
 > carry no AI/orchestration logic in the Rust host: dispatch and provider request
@@ -100,7 +100,7 @@ Palette: obsidian `#0A0B0F`, arc-blue `#3B82F6`/`#60A5FA`, ember `#F97316`
 | `GET /billing/savings?days=N` | token | tenant-scoped tokens-saved report. |
 | `GET /memory?companyId=…` | token | company-scoped memory rows (needs an active company). |
 
-Base URL: `VITE_FORGE_API_URL` at build time, else `https://braavolabs.com/api/v1`
+Base URL: `VITE_BRAAVOLABS_API_URL` at build time, else `https://braavolabs.com/api/v1`
 (overridable on the login screen; remembered in localStorage — non-secret only).
 
 ---
@@ -108,7 +108,7 @@ Base URL: `VITE_FORGE_API_URL` at build time, else `https://braavolabs.com/api/v
 ## Lane-A — Local (Ollama) & BYOK Direct (server-bypassing)
 
 The chat composer has four source lanes: **Cascade** and **Compare** hit the
-Forge server (above); **Local** and **Direct** bypass it entirely.
+Braavolabs server (above); **Local** and **Direct** bypass it entirely.
 
 ### Local · Ollama (`local.ts`)
 
@@ -128,7 +128,7 @@ fabricated answer.
 ### Direct · BYOK (`direct.ts` + `keyvault.ts`)
 
 Single-shot straight to a provider with a locally stored key, bypassing the
-Forge server. Providers and their **dated, conservative default models** (NOT a
+Braavolabs server. Providers and their **dated, conservative default models** (NOT a
 claim of "latest" — override per-call in the composer):
 
 | Provider | Endpoint | Auth header | Default model (override-able) |
@@ -163,8 +163,8 @@ to the CSP `connect-src`; the closed `default-src 'self'` / `object-src 'none'` 
 
 ## Lane-B · your own CLIs (SAFE-SPAWN)
 
-Lane-B lets Forge run **your OWN, already-signed-in vendor CLI** (`claude` /
-`codex`) instead of a key or the Forge server. It is a thin, opaque passthrough —
+Lane-B lets Braavolabs run **your OWN, already-signed-in vendor CLI** (`claude` /
+`codex`) instead of a key or the Braavolabs server. It is a thin, opaque passthrough —
 NOT a re-implementation of the vendor and NOT an OAuth client. The contract
 (ported from the CLI's adversarially-verified `forge/spawn.ts`; enforced by
 construction in `src/spawn.ts` + `src-tauri/src/lib.rs`):
@@ -173,10 +173,10 @@ construction in `src/spawn.ts` + `src-tauri/src/lib.rs`):
 |---|---|---|
 | a | **No vendor OAuth.** You must have logged in with the official binary yourself. | Lane-B never initiates/brokers a vendor sign-in — there is no auth code path. |
 | b | **Only the official binary is a target; launch is an argv ARRAY.** | `buildLaunchCommand` returns `{argv, cliDelegation}` arrays — never a shell string, so `"hi; rm -rf /"` stays one inert element (no injection seam). |
-| c | **A vendor session's stdout/stderr is OPAQUE.** | The desktop never opens a vendor session in-process; the real interactive run is delegated to `forge spawn`, which uses `stdio:"inherit"` and captures/parses nothing. |
+| c | **A vendor session's stdout/stderr is OPAQUE.** | The desktop never opens a vendor session in-process; the real interactive run is delegated to `braavo spawn`, which uses `stdio:"inherit"` and captures/parses nothing. |
 | d | **Token/cookie files are NEVER touched.** | Detection (`spawn_probe`) probes ONLY `PATH` + neutral bin prefixes (`knownPaths` — homebrew, `/usr/local/bin`, `~/.local/bin`, `~/.bun/bin`, `~/.cargo/bin` for codex). It never reads `~/.claude*`, `~/.codex*`, `auth.json`, or any config dir. Version comes from `<bin> --version` only. |
 | f | **Per-vendor ToS-risk is surfaced.** | `VENDOR_SPECS.risk` — claude = *SAFE, volatile*; codex = *SAFE, lowest risk* — shown steel in the rail. |
-| g | **Absent binary degrades to the API-key path.** | `spawnFallbackMessage` → "use API key → Direct" (`forge direct anthropic\|openai …`); never a fabricated result. |
+| g | **Absent binary degrades to the API-key path.** | `spawnFallbackMessage` → "use API key → Direct" (`braavo direct anthropic\|openai …`); never a fabricated result. |
 
 ### Why detection + launch-command (not an in-process PTY)
 
@@ -190,7 +190,7 @@ interactive session to the proven CLI**:
    what version?* and NOTHING else. Its discovery mirrors the TS `knownPaths`
    contract (neutral paths only) and it never streams a vendor session.
 2. **Launch** — the rail's **Copy launch command** reveals the argv and copies
-   `forge spawn <vendor>`, which you paste into your terminal. That CLI path
+   `braavo spawn <vendor>`, which you paste into your terminal. That CLI path
    already implements the opaque `stdio:"inherit"` passthrough (rules b, c).
 
 This keeps the Rust host thin (no AI/orchestration, no captured vendor output)
@@ -202,7 +202,7 @@ inside the window is a future **human gate** (needs a PTY plugin + a GUI session
 ## Governance & sandbox — governed by default (the moat)
 
 Where "allow-all" agent hosts (Hermes, OpenClaw, …) run whatever an action asks,
-Forge Desktop is **governed by default**: every side-effecting action passes a
+Braavolabs Desktop is **governed by default**: every side-effecting action passes a
 **fail-closed** policy gate *before* it can run, each grant is a **one-time
 token**, and every decision lands in an **append-only audit log**. The security
 enforcement lives in the **Rust host** — legitimately, because a compromised
@@ -219,7 +219,7 @@ the host; permission/sandbox logic is a different concern and belongs there.)
 | **require-approval** | `direct.dispatch`, `spawn.launch`, `command.run`, `mcp.tool`, `file.write`, **and every unknown kind** | a human taps before it runs |
 | **deny** (hard) | `command.run` matching a destructive pattern (`rm -rf`, `mkfs`, `dd if=`, fork bomb…); `file.write` with `..` path traversal | never even offered for approval |
 
-The default is the third row's **and every unknown kind**: an action Forge has
+The default is the third row's **and every unknown kind**: an action Braavolabs has
 not explicitly reasoned about is **never auto-allowed** — it falls through to
 require-approval. Widening the auto-allow set is a deliberate, reviewable change
 (one `Set` in `governance.ts`, one `matches!` arm in `lib.rs` — the two are kept
@@ -298,7 +298,7 @@ labelled "sandboxed" — the moat we ship today is *governed by default*.
 
 ## MCP — registered servers, gated tool calls (`mcp.ts` + `lib.rs`)
 
-Forge Desktop is itself an **MCP client**: register a stdio Model Context
+Braavolabs Desktop is itself an **MCP client**: register a stdio Model Context
 Protocol server, browse its tools, and call one. The rail's **MCP servers**
 section adds/lists/removes servers; clicking a server loads its tools; a per-tool
 form takes JSON arguments and runs the call.
@@ -347,9 +347,9 @@ steel — there is no green anywhere.
 ## Develop & verify (headless)
 
 ```bash
-pnpm --filter @ai-company-os/desktop test    # vitest — 115 tests
-pnpm --filter @ai-company-os/desktop build   # tsc --noEmit && vite build → dist/
-pnpm --filter @ai-company-os/desktop lint    # tsc --noEmit
+pnpm --filter @braavolabs/desktop test    # vitest — 115 tests
+pnpm --filter @braavolabs/desktop build   # tsc --noEmit && vite build → dist/
+pnpm --filter @braavolabs/desktop lint    # tsc --noEmit
 
 # Rust host (cargo/rustc live in ~/.cargo/bin — not on PATH by default):
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -399,7 +399,7 @@ today, but only after a real, provider-bound, human-approved grant).
 ## Human gates (NOT done here — require a GUI session / signing identity / live services)
 
 - `cargo tauri dev` / `cargo tauri build` — launches the actual window; needs a
-  desktop session. (`pnpm --filter @ai-company-os/desktop dev:ui` serves just
+  desktop session. (`pnpm --filter @braavolabs/desktop dev:ui` serves just
   the frontend in a browser for UI iteration.)
 - **Live Lane-A dispatch** — driving a real Ollama daemon (Local) or a real BYOK
   key against a provider (Direct) needs those services present; the request

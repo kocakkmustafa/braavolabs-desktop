@@ -41,10 +41,10 @@ function tauriInvoke(): Invoke | null {
 }
 
 export const MCP_PROTOCOL_VERSION = "2024-11-05";
-export const FORGE_VERSION = "0.1.0";
+export const APP_VERSION = "0.1.0";
 export const DEFAULT_MCP_TIMEOUT_MS = 10_000;
 
-const CLIENT_INFO = { name: "forge", version: FORGE_VERSION };
+const CLIENT_INFO = { name: "braavolabs", version: APP_VERSION };
 
 // ── config (arg-array preserving) ────────────────────────────────────────────
 
@@ -325,7 +325,7 @@ export function summarizeCallResult(res: McpCallResult): { isError: boolean; tex
 
 /**
  * Border accent for a result card. Error → molten; success → neutral steel.
- * There is NO green anywhere in the Forge identity — a success is steel, never
+ * There is NO green anywhere in the Braavolabs identity — a success is steel, never
  * green (the obsidian palette has no green token to reach for).
  */
 export function resultBorderColor(isError: boolean): string {
@@ -463,7 +463,7 @@ export function resolveMcpBridge(gov: Governance): McpBridge {
   const inv = tauriInvoke();
   if (inv) return createTauriMcpBridge(inv);
   const spawnImpl: McpSpawn = () => {
-    throw new McpError("MCP servers require the Forge desktop host (run the Tauri app).");
+    throw new McpError("MCP servers require the Braavolabs desktop host (run the Tauri app).");
   };
   return createMemoryMcpBridge({ spawnImpl, gov });
 }

@@ -34,7 +34,7 @@
  *      via a thin Rust `spawn_probe` command whose discovery mirrors knownPaths
  *      (neutral paths only; never a token dir).
  *   2. SURFACES the exact launch command (an argv array) and delegates the real
- *      interactive session to the proven CLI (`forge spawn <vendor>`), which
+ *      interactive session to the proven CLI (`braavo spawn <vendor>`), which
  *      already implements the opaque stdio:"inherit" passthrough.
  * This keeps the Rust host thin (no AI/orchestration, no captured vendor output)
  * and reuses the adversarially-verified CLI spawn path. Discovery + probing +
@@ -73,13 +73,13 @@ export const VENDOR_SPECS: Record<SpawnVendor, VendorSpec> = {
   claude: {
     bin: "claude",
     risk: "ToS risk: SAFE — volatile (policy can shift; runs your own authenticated CLI)",
-    fallback: 'forge direct anthropic "<question>"',
+    fallback: 'braavo direct anthropic "<question>"',
     versionArgs: ["--version"],
   },
   codex: {
     bin: "codex",
     risk: "ToS risk: SAFE — lowest risk (runs your own authenticated CLI)",
-    fallback: 'forge direct openai "<question>"',
+    fallback: 'braavo direct openai "<question>"',
     versionArgs: ["--version"],
   },
 };
@@ -125,7 +125,7 @@ export interface LaunchPlan {
   bin: string;
   /** Direct argv: [bin, ...args]. */
   argv: string[];
-  /** The delegated, proven interactive path: `forge spawn <vendor> ...`. */
+  /** The delegated, proven interactive path: `braavo spawn <vendor> ...`. */
   cliDelegation: string[];
 }
 
@@ -135,7 +135,7 @@ export function buildLaunchCommand(vendor: SpawnVendor, args: string[] = []): La
   return {
     bin,
     argv: [bin, ...args],
-    cliDelegation: ["forge", "spawn", vendor, ...args],
+    cliDelegation: ["braavo", "spawn", vendor, ...args],
   };
 }
 

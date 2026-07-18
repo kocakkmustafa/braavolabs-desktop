@@ -70,7 +70,7 @@ export function resolveStore(): SecretStore {
   return inv ? createTauriStore(inv) : createMemoryStore();
 }
 
-const API_URL_KEY = "forge.apiUrl";
+const API_URL_KEY = "braavolabs.apiUrl";
 
 /** apiUrl is non-secret → safe to remember in localStorage (when available). */
 export function loadApiUrl(fallback: string): string {

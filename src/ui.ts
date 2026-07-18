@@ -824,7 +824,7 @@ function renderKeysSection(deps: UiDeps): HTMLElement {
  * Left-rail Lane-B section: per-vendor "your own CLI" detection. For each vendor
  * it shows installed/version + the steel ToS-risk note. When installed, a "Copy
  * launch command" action reveals the argv (never a shell string) and copies the
- * proven `forge spawn <vendor>` delegation — the interactive session runs in the
+ * proven `braavo spawn <vendor>` delegation — the interactive session runs in the
  * user's terminal, never captured here. When absent, it degrades to the honest
  * API-key path (→ Direct). No vendor token/output ever crosses into this UI.
  */
@@ -867,7 +867,7 @@ function renderLaneBSection(deps: UiDeps): HTMLElement {
       copyBtn.addEventListener("click", () => {
         void (async () => {
           // Revealing/copying a launch command is a GOVERNED action — a human
-          // approves before Forge surfaces a command it could run for you.
+          // approves before Braavolabs surfaces a command it could run for you.
           const detail: ActionDetail = {
             vendor: status.vendor,
             summary: t("gov.kindSpawnLaunch", { vendor: status.vendor }),
@@ -924,7 +924,7 @@ function renderLaneBSection(deps: UiDeps): HTMLElement {
  * Left-rail MCP section: register stdio MCP servers (add/list/remove), load a
  * selected server's tools, and call a tool. A tool call is a side effect, so it
  * is funnelled through the governance gate (the moat applied to MCP too): the
- * approval modal must be accepted before Forge will spawn the server and run the
+ * approval modal must be accepted before Braavolabs will spawn the server and run the
  * tool. The one-time token is NOT consumed in the webview — the host spends it at
  * spawn time (createTauriMcpBridge), so a compromised webview can't run a tool
  * without a real host-side consume. Errors are honest, molten-rimmed — never a

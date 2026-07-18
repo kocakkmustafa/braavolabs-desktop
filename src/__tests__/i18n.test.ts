@@ -23,7 +23,7 @@ describe("i18n (single messages object, en+tr)", () => {
   it("falls back to en for a key missing in tr, then to the key itself", () => {
     const t = makeT("tr");
     // present in both → tr value
-    expect(t("app.name")).toBe("Forge");
+    expect(t("app.name")).toBe("Braavolabs");
     // wholly unknown key → returns the key (visible-but-safe, never throws)
     expect(t("nope.missing")).toBe("nope.missing");
   });
