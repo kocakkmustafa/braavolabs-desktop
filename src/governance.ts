@@ -53,6 +53,14 @@ export const ACTION_KINDS = [
   "command.run", // execute a command through the Rust choke point
   "mcp.tool", // call an MCP tool
   "file.write", // write a file
+  // ── Lane-C: governed computer-control (CDP browser driving). Every action
+  // passes THIS gate before the driver touches a page — "governed computer use"
+  // vs the ungoverned agent hosts. All default to require-approval (none are
+  // auto-allowed): even a read observes a possibly-authenticated remote page.
+  "browser.navigate", // load a URL (http/https only — other schemes hard-denied)
+  "browser.read", // observe: screenshot / DOM / accessibility-tree read
+  "browser.interact", // mutate page: click / type / scroll / select
+  "browser.eval", // execute arbitrary JS in the page (highest risk)
 ] as const;
 export type ActionKind = (typeof ACTION_KINDS)[number];
 
@@ -96,6 +104,8 @@ export interface ActionDetail {
   vendor?: string;
   /** direct.dispatch: which provider. */
   provider?: string;
+  /** browser.navigate: the target URL (http/https only; other schemes hard-denied). */
+  url?: string;
 }
 
 /** True when a path tries to escape its base via a `..` segment (defense-in-depth). */
@@ -108,6 +118,25 @@ export function isTraversal(path: string): boolean {
 /** True when a joined command line matches an obviously destructive pattern. */
 export function isDestructive(joined: string): boolean {
   return DESTRUCTIVE.some((re) => re.test(joined));
+}
+
+/**
+ * Only http/https navigations are ever approvable. Everything else — file://
+ * (read local disk), javascript: (script injection), data: (inline payload),
+ * chrome://, chrome-extension://, about: (privileged/internal surfaces) — is
+ * hard-denied: a browser-control agent must not be able to pivot off the web
+ * into the local machine or the browser's own internals. An unparseable or
+ * scheme-less string is treated as dangerous (fail-closed).
+ */
+export function isSafeHttpUrl(url: string | undefined): boolean {
+  if (!url) return false;
+  let scheme: string;
+  try {
+    scheme = new URL(url).protocol.toLowerCase();
+  } catch {
+    return false; // not an absolute, parseable URL → fail-closed
+  }
+  return scheme === "http:" || scheme === "https:";
 }
 
 /**
@@ -125,6 +154,12 @@ export function classifyAction(
   }
   if (kind === "file.write" && detail.path && isTraversal(detail.path)) {
     return { decision: "deny", reason: "path traversal blocked" };
+  }
+  // A browser-control agent may only navigate the web — never file://,
+  // javascript:, data:, chrome:// etc. (would pivot off the web into the local
+  // machine / the browser's internals). Non-http(s) is denied, not approvable.
+  if (kind === "browser.navigate" && !isSafeHttpUrl(detail.url)) {
+    return { decision: "deny", reason: "non-http(s) navigation blocked" };
   }
   // 2. Explicit auto-allow (read-only / local-keyless only).
   if (AUTO_ALLOW.has(kind)) {
@@ -261,6 +296,11 @@ function bindingKey(kind: string, detail: ActionDetail): string {
     d.server ?? null,
     d.vendor ?? null,
     d.provider ?? null,
+    // browser.navigate: bind the token to its EXACT url so an approval for
+    // bank.com can't be swapped to evil.com before consume. (Rust-side
+    // ActionDetail::binding must add `url` in lockstep when the CDP host driver
+    // lands; until then browser actions run only through this TS governance.)
+    d.url ?? null,
   ]);
 }
 
