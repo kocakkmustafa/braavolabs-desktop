@@ -140,6 +140,18 @@ describe("gate enforcement — nothing runs without passing the gate", () => {
     const t2 = await gov.approve(b.actionId);
     expect(await gov.consume(t2.token, "command.run", { argv: ["echo", "b"] })).toBe(true);
   });
+
+  it("pty.spawn token binds args — approving `--continue` can't launch a different flag", async () => {
+    const gov = createMemoryGovernance();
+    const a = await gov.request("pty.spawn", { vendor: "claude", cwd: "/w", args: ["--continue"] });
+    const { token } = await gov.approve(a.actionId);
+    // Same vendor+cwd, DIFFERENT args → binding mismatch → refused.
+    expect(await gov.consume(token, "pty.spawn", { vendor: "claude", cwd: "/w", args: ["--dangerously-skip"] })).toBe(false);
+    // Exact match still consumes once.
+    const b = await gov.request("pty.spawn", { vendor: "claude", cwd: "/w", args: ["--continue"] });
+    const t2 = await gov.approve(b.actionId);
+    expect(await gov.consume(t2.token, "pty.spawn", { vendor: "claude", cwd: "/w", args: ["--continue"] })).toBe(true);
+  });
 });
 
 describe("audit ledger — append-only, ordered, secret-free", () => {

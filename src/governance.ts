@@ -29,6 +29,8 @@
  * choke-point", NOT a claim of OS sandboxing.
  */
 
+import { isSpawnVendor } from "./spawn";
+
 type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 
 /** Tauri v2 with `withGlobalTauri:true` exposes window.__TAURI__.core.invoke. */
@@ -61,6 +63,13 @@ export const ACTION_KINDS = [
   "browser.read", // observe: screenshot / DOM / accessibility-tree read
   "browser.interact", // mutate page: click / type / scroll / select
   "browser.eval", // execute arbitrary JS in the page (highest risk)
+  // Lane-B real-PTY: open an INTERACTIVE vendor-CLI session inside the app
+  // (portable-pty host-side). The approval covers the SESSION — input/resize/
+  // kill are lifecycle ops on the approved session, not separate side-effect
+  // surfaces. Only a known SPAWN_VENDORS binary is approvable (the PTY host is
+  // NOT a general shell launcher — arbitrary argv stays on command.run's choke
+  // point); unknown vendors and non-absolute/traversal cwds are hard-denied.
+  "pty.spawn",
 ] as const;
 export type ActionKind = (typeof ACTION_KINDS)[number];
 
@@ -106,6 +115,9 @@ export interface ActionDetail {
   provider?: string;
   /** browser.navigate: the target URL (http/https only; other schemes hard-denied). */
   url?: string;
+  /** pty.spawn: extra argv passed to the vendor bin. Bound into the token so an
+   * approval for one flag-set can't be spent to launch a different one. */
+  args?: string[];
 }
 
 /** True when a path tries to escape its base via a `..` segment (defense-in-depth). */
@@ -113,6 +125,61 @@ export function isTraversal(path: string): boolean {
   return path
     .split(/[\\/]+/)
     .some((seg) => seg === "..");
+}
+
+/** Absolute path on either platform (`/…` posix, `C:\…`/`C:/…` windows). Pure —
+ * no node:path in webview code; the Rust host re-checks with real fs semantics
+ * (incl. NUL-byte rejection + symlink resolution, which this string check cannot). */
+export function isAbsolutePath(path: string): boolean {
+  return /^(\/|[a-zA-Z]:[\\/])/.test(path);
+}
+
+/**
+ * pty.spawn defense-in-depth (C2): even a human-approved session must not open
+ * in a catastrophic system root or a secrets directory — a supervised agent
+ * that starts in ~/.ssh is one paste away from exfil. This is a DENYLIST (not an
+ * allowlist — that would break legitimate project dirs); the human approval of
+ * the exact cwd remains the primary gate, this is the second layer. The Rust
+ * host owns the authoritative check (real symlink resolution).
+ */
+const SENSITIVE_CWD_EXACT: ReadonlySet<string> = new Set([
+  "/", "/etc", "/var", "/usr", "/bin", "/sbin", "/lib", "/boot", "/dev", "/proc", "/sys", "/root",
+  "c:", "c:/windows", "c:/windows/system32",
+]);
+// Roots that are NEVER a legitimate project working dir — deny the whole subtree.
+// (/usr/local, /var/www etc. CAN be legit, so those are left to human approval.)
+const SENSITIVE_CWD_PREFIX = ["/etc/", "/root/", "/boot/", "/dev/", "/proc/", "/sys/", "/var/root/", "c:/windows/"];
+const SECRET_DIR_SEGMENT = /\/\.(ssh|aws|gnupg|gpg|kube|docker|config\/gcloud)(\/|$)/;
+
+export function isSensitiveDir(cwd: string): boolean {
+  const p = cwd.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase() || "/";
+  if (SENSITIVE_CWD_EXACT.has(p)) return true;
+  if (SENSITIVE_CWD_PREFIX.some((pre) => (p + "/").startsWith(pre))) return true;
+  return SECRET_DIR_SEGMENT.test(p);
+}
+
+/**
+ * pty.spawn args denylist (adversarial #2): flags that DISABLE the vendor CLI's
+ * own permission prompts or inject executable config turn a "governed session"
+ * into arbitrary code execution — `--mcp-config evil.json` can register an MCP
+ * stdio server whose command is `sh -c 'curl … | sh'`, escaping the "only
+ * claude/codex" containment entirely; `--dangerously-skip-permissions` removes
+ * the supervision the "human watches the terminal" design depends on. These are
+ * HARD-DENIED for the in-app governed PTY (the user can still run them in their
+ * OWN terminal via `braavo spawn`, outside the moat, deliberately). Mirrors
+ * browser.ts's non-http(s) scheme hard-deny.
+ */
+const DANGEROUS_PTY_FLAGS: readonly RegExp[] = [
+  /^--dangerously[\w-]*/i, // claude --dangerously-skip-permissions
+  /^--mcp-config\b/i, // inject arbitrary MCP stdio servers → RCE
+  /^--mcp-server\b/i,
+  /^--permission-mode\b/i, // could set bypassPermissions
+  /^--allowed-?tools\b/i, // pre-authorize tools without a prompt
+  /^--yolo\b/i,
+] as const;
+
+export function hasDangerousPtyFlag(args?: string[]): boolean {
+  return (args ?? []).some((a) => DANGEROUS_PTY_FLAGS.some((re) => re.test(a.trim())));
 }
 
 /** True when a joined command line matches an obviously destructive pattern. */
@@ -160,6 +227,24 @@ export function classifyAction(
   // machine / the browser's internals). Non-http(s) is denied, not approvable.
   if (kind === "browser.navigate" && !isSafeHttpUrl(detail.url)) {
     return { decision: "deny", reason: "non-http(s) navigation blocked" };
+  }
+  // pty.spawn may only open a KNOWN vendor CLI (claude/codex) in an absolute,
+  // non-traversal cwd. Arbitrary binaries are NOT approvable here — that keeps
+  // the PTY host from becoming a general shell launcher (command.run's choke
+  // point owns arbitrary argv, with its own destructive-pattern denies).
+  if (kind === "pty.spawn") {
+    if (!detail.vendor || !isSpawnVendor(detail.vendor)) {
+      return { decision: "deny", reason: "unknown PTY vendor blocked" };
+    }
+    if (!detail.cwd || !isAbsolutePath(detail.cwd) || isTraversal(detail.cwd)) {
+      return { decision: "deny", reason: "PTY cwd must be absolute (no traversal)" };
+    }
+    if (isSensitiveDir(detail.cwd)) {
+      return { decision: "deny", reason: "PTY cwd in a system/secrets directory blocked" };
+    }
+    if (hasDangerousPtyFlag(detail.args)) {
+      return { decision: "deny", reason: "dangerous PTY flag blocked (permission-skip / config-inject)" };
+    }
   }
   // 2. Explicit auto-allow (read-only / local-keyless only).
   if (AUTO_ALLOW.has(kind)) {
@@ -301,6 +386,12 @@ function bindingKey(kind: string, detail: ActionDetail): string {
     // ActionDetail::binding must add `url` in lockstep when the CDP host driver
     // lands; until then browser actions run only through this TS governance.)
     d.url ?? null,
+    // pty.spawn: bind the extra argv so approving `claude --continue` can't be
+    // spent to launch `claude <different-flag>` (confused-deputy on args). The
+    // Rust host MUST add `args` to its ActionDetail::binding in lockstep (same
+    // as `url`), else the host would recompute the binding without args and a
+    // no-args token would consume a different-args spawn.
+    d.args ?? null,
   ]);
 }
 
