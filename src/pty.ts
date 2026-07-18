@@ -94,21 +94,35 @@ export type SpawnOutcome =
   | { ok: false; reason: string };
 
 /**
- * The single chokepoint every real-PTY session funnels through. Classify +
- * approve via `gate`; ONLY on an approved one-time token does `driver` allocate
- * a PTY. A policy deny (unknown vendor, relative cwd) or a human reject returns
- * an honest reason and the driver is NEVER called.
+ * The single chokepoint every real-PTY session funnels through. Order:
+ *   1. cap check BEFORE gating — refuse past the running-session cap so we never
+ *      approve+spawn a PTY we'd immediately have to disown (adversarial E1: the
+ *      old code registered AFTER spawn, so a full registry couldn't retract an
+ *      already-allocated host process). Best-effort UI throttle; the AUTHORITATIVE
+ *      cap is host-side at token-issue (concurrent calls could still race here).
+ *   2. classify + approve via `gate`.
+ *   3. ONLY on an approved one-time token does `driver` allocate a PTY.
+ *   4. register the confirmed session so the count reflects it for the next call.
+ * A policy deny (unknown vendor, relative/sensitive cwd, dangerous flag) or a
+ * human reject returns an honest reason and the driver is NEVER called.
  */
 export async function governedPtySpawn(
   req: PtySpawnRequest,
   gate: GateFn,
   driver: PtyDriver,
+  sessions: PtySessions,
 ): Promise<SpawnOutcome> {
+  if (sessions.running().length >= MAX_RUNNING_SESSIONS) {
+    return { ok: false, reason: `session cap reached (${MAX_RUNNING_SESSIONS})` };
+  }
   const { kind, detail } = ptySpawnToGate(req);
   const g = await gate(kind, detail);
   if (!g.ok) return { ok: false, reason: g.reason };
   const r = await driver.spawn(req, g.token);
-  return r.ok ? { ok: true, sessionId: r.sessionId } : { ok: false, reason: r.error };
+  if (!r.ok) return { ok: false, reason: r.error };
+  const reg = sessions.register(r.sessionId, req.vendor, req.cwd);
+  if (!reg.ok) return { ok: false, reason: reg.reason };
+  return { ok: true, sessionId: r.sessionId };
 }
 
 // ── session registry / state machine ────────────────────────────────────────
@@ -125,7 +139,9 @@ export interface PtySessionInfo {
   exitCode: number | null;
 }
 
-/** Resource guard: a runaway UI can't fork-bomb the host with PTYs. */
+/** Running-session cap. Enforced BEFORE gating in governedPtySpawn (a best-effort
+ * UI throttle) and defensively in register(); the AUTHORITATIVE fork-bomb guard
+ * is host-side at PTY allocation — this TS registry does not own the processes. */
 export const MAX_RUNNING_SESSIONS = 4;
 
 /**
@@ -138,7 +154,8 @@ export const MAX_RUNNING_SESSIONS = 4;
 export class PtySessions {
   private sessions = new Map<string, PtySessionInfo>();
 
-  /** Register a driver-confirmed session. Fails (honestly) past the cap. */
+  /** Register a driver-confirmed session. Defensive cap re-check (governedPtySpawn
+   * already gates on it before spawn); fails honestly past the cap or on a dup. */
   register(sessionId: string, vendor: SpawnVendor, cwd: string): { ok: true } | { ok: false; reason: string } {
     if (this.running().length >= MAX_RUNNING_SESSIONS) {
       return { ok: false, reason: `session cap reached (${MAX_RUNNING_SESSIONS})` };
@@ -152,16 +169,19 @@ export class PtySessions {
     return { ok: true };
   }
 
-  /** Count OUTPUT bytes (host → terminal). Buffer content itself is never stored here. */
+  /** Count OUTPUT bytes (host → terminal). Buffer content itself is never stored
+   * here. A negative length is clamped to 0 (adversarial E2: a compromised relay
+   * could otherwise subtract to hide exfil volume — byte counts are the only
+   * quantitative audit signal a redacted session has). */
   noteOutput(sessionId: string, byteLength: number): void {
     const s = this.sessions.get(sessionId);
-    if (s && s.state === "running") s.bytesOut += byteLength;
+    if (s && s.state === "running") s.bytesOut += Math.max(0, byteLength);
   }
 
-  /** Count INPUT bytes (keystrokes → host). Content never stored. */
+  /** Count INPUT bytes (keystrokes → host). Content never stored; negative clamped. */
   noteInput(sessionId: string, byteLength: number): void {
     const s = this.sessions.get(sessionId);
-    if (s && s.state === "running") s.bytesIn += byteLength;
+    if (s && s.state === "running") s.bytesIn += Math.max(0, byteLength);
   }
 
   /** Driver reported process exit. Idempotent; a killed session stays "killed". */

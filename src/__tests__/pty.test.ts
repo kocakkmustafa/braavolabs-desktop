@@ -7,7 +7,7 @@ import {
   type PtyDriver,
   type PtySpawnRequest,
 } from "../pty";
-import { classifyAction, isAbsolutePath } from "../governance";
+import { classifyAction, isAbsolutePath, isSensitiveDir, hasDangerousPtyFlag } from "../governance";
 
 const req = (over: Partial<PtySpawnRequest> = {}): PtySpawnRequest => ({
   vendor: "claude",
@@ -73,6 +73,28 @@ describe("governance policy for pty.spawn", () => {
     expect(classifyAction("pty.spawn", { vendor: "claude" })).toMatchObject({ decision: "deny" });
   });
 
+  it("hard-denies a system/secrets cwd even for a known vendor (adversarial C2)", () => {
+    for (const cwd of ["/", "/etc", "/etc/cron.d", "/root/x", "/Users/me/.ssh", "/home/x/.aws/creds", "C:/Windows/System32"]) {
+      expect(classifyAction("pty.spawn", { vendor: "claude", cwd }), cwd).toMatchObject({
+        decision: "deny",
+        reason: "PTY cwd in a system/secrets directory blocked",
+      });
+    }
+    expect(isSensitiveDir("/Users/me/project")).toBe(false); // ordinary project dir is fine
+    expect(isSensitiveDir("/usr/local/src/app")).toBe(false); // /usr/local subtree is human-approvable
+  });
+
+  it("hard-denies a permission-skip / config-inject flag (adversarial #2)", () => {
+    for (const flag of ["--dangerously-skip-permissions", "--mcp-config", "--yolo", "--allowed-tools"]) {
+      expect(
+        classifyAction("pty.spawn", { vendor: "claude", cwd: "/w", args: [flag, "x"] }),
+        flag,
+      ).toMatchObject({ decision: "deny", reason: "dangerous PTY flag blocked (permission-skip / config-inject)" });
+    }
+    expect(hasDangerousPtyFlag(["--continue"])).toBe(false); // a benign flag is approvable
+    expect(hasDangerousPtyFlag(["--MCP-CONFIG"])).toBe(true); // case-insensitive
+  });
+
   it("isAbsolutePath accepts posix + windows roots, rejects relative", () => {
     expect(isAbsolutePath("/a/b")).toBe(true);
     expect(isAbsolutePath("C:\\work")).toBe(true);
@@ -83,19 +105,21 @@ describe("governance policy for pty.spawn", () => {
 });
 
 describe("governedPtySpawn (chokepoint)", () => {
-  it("gates first; the driver spawns ONLY with the approved one-time token", async () => {
+  it("gates first; the driver spawns ONLY with the approved one-time token, then registers", async () => {
     const driver = okDriver();
+    const sessions = new PtySessions();
     const gate = vi.fn(async () => ({ ok: true as const, token: "tok-1" }));
-    const out = await governedPtySpawn(req(), gate, driver);
+    const out = await governedPtySpawn(req(), gate, driver, sessions);
     expect(out).toEqual({ ok: true, sessionId: "s1" });
     expect(gate).toHaveBeenCalledWith("pty.spawn", expect.objectContaining({ vendor: "claude" }));
     expect(driver.spawn).toHaveBeenCalledWith(expect.objectContaining({ vendor: "claude" }), "tok-1");
+    expect(sessions.running().map((s) => s.sessionId)).toEqual(["s1"]); // registered in-flow
   });
 
   it("NEVER calls the driver on a gate deny/reject (fail-closed)", async () => {
     const driver = okDriver();
     const gate = vi.fn(async () => ({ ok: false as const, reason: "denied: unknown PTY vendor blocked" }));
-    const out = await governedPtySpawn(req(), gate, driver);
+    const out = await governedPtySpawn(req(), gate, driver, new PtySessions());
     expect(out).toEqual({ ok: false, reason: "denied: unknown PTY vendor blocked" });
     expect(driver.spawn).not.toHaveBeenCalled();
   });
@@ -104,8 +128,19 @@ describe("governedPtySpawn (chokepoint)", () => {
     const driver = okDriver();
     (driver.spawn as any).mockResolvedValue({ ok: false, error: "pty denied: invalid or replayed token" });
     const gate = vi.fn(async () => ({ ok: true as const, token: "stale" }));
-    const out = await governedPtySpawn(req(), gate, driver);
+    const out = await governedPtySpawn(req(), gate, driver, new PtySessions());
     expect(out).toEqual({ ok: false, reason: "pty denied: invalid or replayed token" });
+  });
+
+  it("refuses BEFORE gating when the session cap is full — never spawns (adversarial E1)", async () => {
+    const driver = okDriver();
+    const gate = vi.fn(async () => ({ ok: true as const, token: "t" }));
+    const sessions = new PtySessions();
+    for (let i = 0; i < MAX_RUNNING_SESSIONS; i++) sessions.register(`pre${i}`, "claude", "/w");
+    const out = await governedPtySpawn(req(), gate, driver, sessions);
+    expect(out).toEqual({ ok: false, reason: `session cap reached (${MAX_RUNNING_SESSIONS})` });
+    expect(gate).not.toHaveBeenCalled(); // cap checked before the human is even asked
+    expect(driver.spawn).not.toHaveBeenCalled(); // no host PTY allocated past the cap
   });
 });
 
@@ -158,5 +193,14 @@ describe("PtySessions (registry / redaction)", () => {
     const reg = new PtySessions();
     reg.register("s1", "claude", "/w");
     expect(reg.register("s1", "codex", "/x")).toMatchObject({ ok: false, reason: "duplicate session id" });
+  });
+
+  it("clamps a negative byteLength to 0 — audit volume can't be subtracted down (adversarial E2)", () => {
+    const reg = new PtySessions();
+    reg.register("s1", "claude", "/w");
+    reg.noteOutput("s1", 5000);
+    reg.noteOutput("s1", -4999); // malicious relay trying to hide exfil volume
+    reg.noteInput("s1", -100);
+    expect(reg.get("s1")).toMatchObject({ bytesOut: 5000, bytesIn: 0 }); // negatives ignored
   });
 });
