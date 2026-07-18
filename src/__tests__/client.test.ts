@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   apiFetch,
   login,
+  logout,
   startCompare,
   pollCompare,
   cascade,
@@ -170,6 +171,35 @@ describe("command wrappers", () => {
     const cfg = { ...baseCfg(), token: "t" };
     await savings(cfg, { days: 30 }, { fetchImpl });
     expect(capturedUrl).toBe("https://host/api/v1/billing/savings?days=30");
+  });
+
+  it("logout POSTs /auth/logout with the bearer AND the refresh token in the body (raw, no refresh loop)", async () => {
+    const calls: any[] = [];
+    const fetchImpl = vi.fn(async (url: string, init: any) => {
+      calls.push({ url, method: init?.method, auth: init?.headers?.Authorization, body: JSON.parse(init.body) });
+      return resp(200, { message: "Logged out successfully." }); // real server contract
+    });
+    const cfg = { ...baseCfg(), token: "tok", refreshToken: "r1" };
+    const r = await logout(cfg, { fetchImpl });
+    expect(r).toMatchObject({ status: 200 }); // raw result, not a throw
+    expect(calls).toHaveLength(1); // path is /auth/* → the 401-refresh loop is skipped
+    expect(calls[0].url).toBe("https://host/api/v1/auth/logout");
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].auth).toBe("Bearer tok"); // valid-access path
+    expect(calls[0].body).toEqual({ refreshToken: "r1" }); // #1: lets the server revoke even if the bearer is expired
+  });
+
+  it("logout still sends the refresh body so an EXPIRED bearer can revoke (audit #1)", async () => {
+    let captured: any;
+    const fetchImpl = vi.fn(async (_url: string, init: any) => {
+      captured = JSON.parse(init.body);
+      return resp(401, { error: "access expired" }); // bearer dead; server uses the body's refresh token
+    });
+    const cfg = { ...baseCfg(), token: "expired", refreshToken: "still-valid" };
+    const r = await logout(cfg, { fetchImpl });
+    expect(r).toMatchObject({ status: 401 }); // caller clears local creds regardless (raw)
+    expect(captured).toEqual({ refreshToken: "still-valid" }); // the token the server falls back to
+    expect(fetchImpl).toHaveBeenCalledTimes(1); // /auth/* → no client-side refresh attempt
   });
 
   it("listMemory GETs /memory with companyId + optional filters", async () => {

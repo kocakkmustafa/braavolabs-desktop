@@ -10,6 +10,8 @@
  * Load-bearing endpoint contracts (server routers, confirmed against source):
  *   POST /auth/login          → { token, refreshToken, user, tenant }  (public)
  *   POST /auth/refresh        → same shape; OLD refresh token is rotated/revoked
+ *   POST /auth/logout         → 200 { message }; auth-optional, revokes the server
+ *                               refresh token via bearer OR the refresh-token body
  *   POST /research/compare    → { id, status:"PENDING" }  (async; poll GET /research/:id)
  *   GET  /research/:id        → full session row (PENDING→RUNNING→COMPLETED|FAILED)
  *   POST /research/cascade    → synchronous TenantCascadeResult (NO companyId in body)
@@ -209,6 +211,20 @@ export async function cascade(
   if (p.secondOpinion !== undefined) body.secondOpinion = p.secondOpinion;
   if (p.budgetUsdCap !== undefined) body.budgetUsdCap = p.budgetUsdCap;
   return apiFetch("/research/cascade", { method: "POST", body, cfg, fetchImpl: o.fetchImpl, save: o.save });
+}
+
+/** POST /auth/logout — best-effort server-side refresh-token revocation. Sends
+ * the refresh token in the body so the server can revoke even when the ACCESS
+ * token has expired (the common idle-app sign-out): the endpoint is auth-optional
+ * and falls back to the refresh token when the bearer is dead (audit #1 — without
+ * the body the server 401s an expired bearer and the refresh token survives).
+ * Raw so a failure (offline / already-expired) is swallowed by the caller; local
+ * creds are cleared regardless. Server replies 200 { message }. */
+export async function logout(
+  cfg: Config,
+  o: { fetchImpl?: FetchLike; save?: (c: Config) => void } = {},
+): Promise<RawResult> {
+  return apiFetch("/auth/logout", { method: "POST", body: { refreshToken: cfg.refreshToken }, cfg, raw: true, fetchImpl: o.fetchImpl, save: o.save });
 }
 
 /** GET /billing/savings?days=N — tenant-scoped, no companyId. */
