@@ -16,6 +16,7 @@ import {
   cascade,
   savings as savingsCall,
 } from "./client";
+import { performSignOut } from "./session";
 import {
   toSavingsView,
   toCascadeView,
@@ -527,12 +528,10 @@ export function renderWorkspace(deps: UiDeps): void {
     inspectorBody.innerHTML = "";
     inspectorBody.append(el("div", "inspector-empty", t("inspector.empty")));
   });
-  signOutBtn.addEventListener("click", () => {
-    cfg.token = undefined;
-    cfg.refreshToken = undefined;
-    void deps.persist(cfg);
-    deps.onSignedOut();
-  });
+  // Thin wiring only — the revoke-then-clear logic + its ordering/gate
+  // invariants live in the unit-tested performSignOut (session.ts), which is
+  // where the C3/#1 regression is guarded.
+  signOutBtn.addEventListener("click", () => performSignOut(cfg, deps));
 
   void refreshSavings();
 }
