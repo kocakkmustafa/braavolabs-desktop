@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   defaultSandboxPolicy,
   validateSandboxPolicy,
+  isSafeWriteRoot,
   toSeatbeltProfile,
   toBubblewrapArgs,
   sbplQuote,
@@ -10,110 +11,167 @@ import {
   type SandboxPolicy,
 } from "../sandbox";
 
+const CWD = "/Users/me/project";
 const policy = (over: Partial<SandboxPolicy> = {}): SandboxPolicy => ({
-  readRoots: ["/usr", "/w"],
-  writeRoots: ["/w"],
+  readRoots: ["/usr", CWD],
+  writeRoots: [CWD],
   allowNetwork: false,
   ...over,
 });
 
 describe("defaultSandboxPolicy — least privilege", () => {
-  it("reads system + cwd, writes ONLY cwd, network OFF", () => {
-    const p = defaultSandboxPolicy("/Users/me/project");
-    expect(p.writeRoots).toEqual(["/Users/me/project"]); // write is cwd only
-    expect(p.allowNetwork).toBe(false); // no exfil by default
-    expect(p.readRoots).toContain("/Users/me/project");
+  it("reads TRIMMED system + cwd, writes ONLY cwd, network OFF", () => {
+    const p = defaultSandboxPolicy(CWD);
+    expect(p.writeRoots).toEqual([CWD]);
+    expect(p.allowNetwork).toBe(false);
+    expect(p.readRoots).toContain(CWD);
     expect(p.readRoots).toEqual(expect.arrayContaining([...SYSTEM_READ_ROOTS]));
-    expect(p.readRoots).not.toContain("/Users/me"); // NOT the whole home dir
+    // Trimmed: NOT the token-bearing / scratch dirs, NOT the whole home.
+    for (const leaky of ["/private", "/var", "/tmp", "/Users/me", "/Users"]) {
+      expect(p.readRoots).not.toContain(leaky);
+    }
+    expect(validateSandboxPolicy(p)).toEqual({ ok: true });
+  });
+});
+
+describe("isSafeWriteRoot — allowlist-shaped (adversarial B)", () => {
+  it("accepts a real project / scratch subtree", () => {
+    for (const ok of ["/Users/me/project", "/home/x/proj", "/tmp/scratch/build", "/Users/me/a/b"]) {
+      expect(isSafeWriteRoot(ok), ok).toBe(true);
+    }
+  });
+
+  it("REJECTS a home root, all-homes root, or whole home dir (secret dirs live inside)", () => {
+    for (const bad of ["/Users", "/home", "/Users/me", "/home/x"]) {
+      expect(isSafeWriteRoot(bad), bad).toBe(false);
+    }
+  });
+
+  it("REJECTS system trees at any depth (PATH shadowing / LaunchAgents persistence)", () => {
+    for (const bad of ["/usr/local/bin", "/Library/LaunchAgents", "/etc/cron.d", "/opt", "/var/root"]) {
+      expect(isSafeWriteRoot(bad), bad).toBe(false);
+    }
+  });
+
+  it("REJECTS the macOS /private alias of /etc and a // normalization bypass", () => {
+    expect(isSafeWriteRoot("/private/etc"), "/private/etc == /etc").toBe(false);
+    expect(isSafeWriteRoot("//etc"), "//etc").toBe(false);
+    expect(isSafeWriteRoot("/private/var"), "/private/var").toBe(false);
+  });
+
+  it("REJECTS shallow / relative / traversal / control-char roots", () => {
+    for (const bad of ["/", "/opt", "rel/dir", "/a/../b"]) {
+      expect(isSafeWriteRoot(bad), bad).toBe(false);
+    }
+    expect(isSafeWriteRoot("/Users/me/pr\x00oj")).toBe(false);
   });
 });
 
 describe("validateSandboxPolicy", () => {
-  it("accepts an absolute, clean, non-sensitive write root", () => {
+  it("accepts a clean project policy", () => {
     expect(validateSandboxPolicy(policy())).toEqual({ ok: true });
   });
 
-  it("rejects a write root that is relative, traversal, or sensitive", () => {
-    expect(validateSandboxPolicy(policy({ writeRoots: ["rel/dir"] }))).toMatchObject({ ok: false });
-    expect(validateSandboxPolicy(policy({ writeRoots: ["/a/../b"] }))).toMatchObject({ ok: false });
-    // The sandbox must never be told to grant WRITE to a secrets dir.
-    expect(validateSandboxPolicy(policy({ writeRoots: ["/Users/me/.ssh"] }))).toMatchObject({
+  it("rejects an unsafe write root with an honest reason", () => {
+    expect(validateSandboxPolicy(policy({ writeRoots: ["/Users/me"] }))).toMatchObject({
       ok: false,
-      reason: expect.stringContaining("system/secrets"),
+      reason: expect.stringContaining("unsafe write root"),
     });
-    expect(validateSandboxPolicy(policy({ writeRoots: ["/etc"] }))).toMatchObject({ ok: false });
   });
 
-  it("rejects a non-absolute or traversal read root", () => {
+  it("rejects a read root that names a secrets dir (adversarial C — read is the exfil source)", () => {
+    expect(validateSandboxPolicy(policy({ readRoots: ["/Users/me/.ssh"] }))).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("secrets dir"),
+    });
+    expect(validateSandboxPolicy(policy({ readRoots: ["/home/x/.aws"] }))).toMatchObject({ ok: false });
+  });
+
+  it("rejects a non-absolute / traversal / control-char read root", () => {
     expect(validateSandboxPolicy(policy({ readRoots: ["usr"] }))).toMatchObject({ ok: false });
     expect(validateSandboxPolicy(policy({ readRoots: ["/a/../etc"] }))).toMatchObject({ ok: false });
+    expect(validateSandboxPolicy(policy({ readRoots: ["/u\n(x)"] }))).toMatchObject({ ok: false });
   });
 
-  it("rejects a control char in any root (newline/NUL/line-sep — profile-injection smuggle)", () => {
-    expect(validateSandboxPolicy(policy({ writeRoots: ["/w\n(allow default)"] }))).toMatchObject({ ok: false });
-    expect(validateSandboxPolicy(policy({ writeRoots: ["/w\x00"] }))).toMatchObject({ ok: false });
-    expect(validateSandboxPolicy(policy({ readRoots: ["/u\x1b"] }))).toMatchObject({ ok: false });
-    expect(validateSandboxPolicy(policy({ readRoots: ["/u\u2028x"] }))).toMatchObject({ ok: false });
-  });
-
-  it("the default policy validates for an ordinary project dir", () => {
-    expect(validateSandboxPolicy(defaultSandboxPolicy("/Users/me/project"))).toEqual({ ok: true });
+  it("rejects a write root that is a strict ANCESTOR of a read root (rw would shadow ro)", () => {
+    expect(
+      validateSandboxPolicy({ writeRoots: ["/Users/me/proj"], readRoots: ["/Users/me/proj/vendor"], allowNetwork: false }),
+    ).toMatchObject({ ok: false, reason: expect.stringContaining("ancestor") });
+    // Equal write+read root (the default cwd case) is fine — not a STRICT ancestor.
+    expect(validateSandboxPolicy(policy())).toEqual({ ok: true });
   });
 });
 
 describe("toSeatbeltProfile (macOS SBPL)", () => {
-  it("denies by default, allows read+write subpaths, and OMITS network when off", () => {
+  it("validates first, denies by default, allows read+write subpaths, OMITS network when off", () => {
     const prof = toSeatbeltProfile(policy());
     expect(prof).toContain("(deny default)");
-    expect(prof).toContain('(allow file-read* (subpath "/usr") (subpath "/w"))');
-    expect(prof).toContain('(allow file-write* (subpath "/w"))');
-    expect(prof).not.toContain("(allow network*)"); // network off → not granted
+    expect(prof).toContain(`(allow file-read* (subpath "/usr") (subpath "${CWD}"))`);
+    expect(prof).toContain(`(allow file-write* (subpath "${CWD}"))`);
+    expect(prof).not.toContain("(allow network*)");
+    expect(prof).not.toContain("(allow system-socket)");
   });
 
-  it("grants network ONLY when the policy allows it", () => {
-    expect(toSeatbeltProfile(policy({ allowNetwork: true }))).toContain("(allow network*)");
+  it("grants network + socket ONLY when allowed", () => {
+    const prof = toSeatbeltProfile(policy({ allowNetwork: true }));
+    expect(prof).toContain("(allow network*)");
+    expect(prof).toContain("(allow system-socket)");
+  });
+
+  it("THROWS rather than emit a profile for an unsafe policy (adversarial G)", () => {
+    expect(() => toSeatbeltProfile(policy({ writeRoots: ["/etc"] }))).toThrow(/refusing to build/);
+    expect(() => toSeatbeltProfile(policy({ writeRoots: ["/Users/me"] }))).toThrow();
   });
 
   it("ESCAPES a path so it cannot inject SBPL and neuter the sandbox (injection guard)", () => {
-    // A crafted write root that, unescaped, would close the (subpath "…") form and
-    // append `(allow default)` — defeating the whole profile.
-    const evil = '/x")(allow default)(deny "';
+    // A validly-shaped project dir whose NAME contains quotes/parens.
+    const evil = '/Users/me/pr")(allow default)("';
     const prof = toSeatbeltProfile(policy({ writeRoots: [evil], readRoots: ["/usr"] }));
-    // The dangerous quote is escaped; no BARE `(allow default)` directive appears.
-    expect(prof).toContain('\\"'); // the embedded quote was escaped
-    expect(prof).not.toMatch(/\n\(allow default\)/); // injection did NOT become a directive
-    // sbplQuote is the unit: quotes + backslashes escaped, wrapped in quotes.
+    expect(prof).toContain('\\"'); // embedded quote escaped
+    expect(prof).not.toMatch(/\n\(allow default\)/); // did NOT become a top-level directive
     expect(sbplQuote('a"b\\c')).toBe('"a\\"b\\\\c"');
   });
 });
 
 describe("toBubblewrapArgs (Linux)", () => {
-  it("ro-binds read roots, binds write roots, unshares net when network off", () => {
+  it("unshares pid+ipc+net, clears env, ro-binds reads + binds writes", () => {
     const args = toBubblewrapArgs(policy());
-    expect(args).toEqual(expect.arrayContaining(["--ro-bind-try", "/usr", "/usr"]));
-    expect(args).toEqual(expect.arrayContaining(["--bind-try", "/w", "/w"]));
+    expect(args).toContain("--unshare-pid"); // no sibling /proc/<pid>/environ snoop (adversarial D)
+    expect(args).toContain("--unshare-ipc");
     expect(args).toContain("--unshare-net"); // network denied
+    expect(args).toContain("--clearenv"); // host secret env does NOT leak in (adversarial D3)
+    expect(args).toEqual(expect.arrayContaining(["--setenv", "HOME", CWD])); // HOME=project, not real $HOME
+    expect(args).toEqual(expect.arrayContaining(["--ro-bind-try", "/usr", "/usr"]));
+    expect(args).toEqual(expect.arrayContaining(["--bind-try", CWD, CWD]));
   });
 
   it("does NOT unshare-net when network is allowed", () => {
     expect(toBubblewrapArgs(policy({ allowNetwork: true }))).not.toContain("--unshare-net");
   });
 
-  it("is argv (array) form — each path is a discrete element, so shell injection is impossible", () => {
-    const evil = '/x; rm -rf ~';
+  it("THROWS on an unsafe policy (adversarial G)", () => {
+    expect(() => toBubblewrapArgs(policy({ writeRoots: ["/usr/local/bin"] }))).toThrow(/refusing to build/);
+  });
+
+  it("is argv (array) form — a malicious path stays ONE element, never shell-split", () => {
+    const evil = "/Users/me/x; rm -rf ~";
     const args = toBubblewrapArgs(policy({ writeRoots: [evil], readRoots: [] }));
-    // The whole malicious string survives verbatim as discrete argv elements (the
-    // src+dest of `--bind-try src dest`), never word-split into `/x;`,`rm`,`-rf`,`~`
-    // as a shell would. That it appears EXACTLY as-is (twice, the bind pair) proves
-    // no shell interpretation — bwrap is exec'd with this argv, no /bin/sh.
-    expect(args.filter((a) => a === evil)).toHaveLength(2);
-    expect(args).not.toContain("rm"); // never split into separate tokens
+    // Appears verbatim as discrete argv elements (setenv HOME + the bind pair),
+    // never word-split into `rm`,`-rf`,`~` as a shell would.
+    expect(args.filter((a) => a === evil)).toHaveLength(3);
+    expect(args).not.toContain("rm"); // never tokenized
   });
 });
 
-describe("describeSandbox", () => {
-  it("is an honest one-liner: write scope + network state, no secrets", () => {
-    expect(describeSandbox(policy())).toBe("sandbox: write→/w, network OFF, read 2 roots");
-    expect(describeSandbox(policy({ allowNetwork: true }))).toContain("network ON");
+describe("describeSandbox — honest (adversarial F)", () => {
+  it("spells out write roots + any NON-system read root + network state", () => {
+    expect(describeSandbox(policy())).toBe(`sandbox: write→${CWD}, read system + ${CWD}, network OFF`);
+    expect(describeSandbox({ readRoots: [...SYSTEM_READ_ROOTS], writeRoots: [CWD], allowNetwork: true }))
+      .toBe(`sandbox: write→${CWD}, read system only, network ON`);
+  });
+
+  it("does NOT hide a non-system read root behind a count", () => {
+    const d = describeSandbox({ readRoots: ["/usr", "/Users/me/secrets-cache"], writeRoots: [CWD], allowNetwork: false });
+    expect(d).toContain("/Users/me/secrets-cache"); // the exfil source is visible to the approver
   });
 });

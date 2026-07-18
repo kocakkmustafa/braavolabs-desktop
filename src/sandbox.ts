@@ -2,33 +2,43 @@
  * OS-sandbox — the layer governance.ts's own header flags as a roadmap/human-gate:
  * "Full OS-level sandbox isolation … is a documented roadmap/human-gate; this
  * layer is 'governed + choke-point', NOT a claim of OS sandboxing." This module
- * closes that honesty gap for spawned processes (command.run / pty.spawn): the
- * Rust host wraps the child in an OS sandbox built from a least-privilege POLICY,
- * so even a human-APPROVED command can't read outside its declared roots, write
- * outside its cwd, or reach the network unless the policy explicitly grants it.
+ * closes that gap for spawned processes (command.run / pty.spawn): the Rust host
+ * wraps the child in an OS sandbox built from a least-privilege POLICY, so even a
+ * human-APPROVED command can't write outside its declared project roots, read the
+ * user's secrets, or reach the network unless the policy explicitly grants it.
  * Governance answers "may this run?"; the sandbox bounds "what can it touch if it
  * does" — defense in depth, not a replacement for the approval gate.
  *
- * This module is the PURE, unit-tested core:
+ * PURE, unit-tested core (the Rust host MIRRORS this policy — governance.ts:13 —
+ * so a hole here would be replicated in Rust; the source of truth must be safe):
  *   1. SandboxPolicy — the capability model (read roots, write roots, network).
- *   2. defaultSandboxPolicy(cwd) — the governed least-privilege default
- *      (system read-only + cwd; write = cwd ONLY; network OFF).
- *   3. validateSandboxPolicy() — write roots must be absolute, non-traversal,
- *      non-sensitive (reuses the governance helpers, so the sandbox can't be
- *      told to grant write to ~/.ssh); read roots absolute + non-traversal.
- *   4. toSeatbeltProfile() (macOS SBPL / sandbox-exec) and toBubblewrapArgs()
- *      (Linux bwrap argv) — what the Rust host applies. SBPL is a STRING, so
- *      every path is escaped: a path containing `"` or `)` must NOT be able to
- *      break out of the profile and neuter it (profile injection). bwrap is
- *      argv (array), injection-free by construction.
- *   5. describeSandbox() — the honest one-line summary shown at approval.
+ *   2. defaultSandboxPolicy(cwd) — least privilege: a TRIMMED system read set +
+ *      cwd; write = cwd ONLY; network OFF. NOT /private, /var, /tmp (per-user
+ *      caches hold tokens), NOT $HOME.
+ *   3. validateSandboxPolicy() — a WRITE grant is a whole subtree, so an
+ *      exact-match denylist is the wrong model (grant the parent, the secret
+ *      comes along). Write roots must pass isSafeWriteRoot (no system tree, no
+ *      home/all-homes root, canonicalized so /private/etc and //etc are caught,
+ *      deep enough to be a real project dir); read roots must not name a secrets
+ *      dir; no write root may be an ancestor of a read root.
+ *   4. toSeatbeltProfile() / toBubblewrapArgs() — VALIDATE first (throw on an
+ *      unsafe policy — a generator must never emit an unsafe profile), then emit.
+ *      SBPL paths are escaped (a `"`/`)` can't break out); bwrap is argv (no
+ *      shell) and adds --unshare-pid/--unshare-ipc (no sibling proc-environ
+ *      snoop) + --clearenv (the child does NOT inherit the host's secret env).
+ *   5. describeSandbox() — honest summary: write scope + network + any NON-system
+ *      read root spelled out (hiding reads behind a count conceals the exfil
+ *      source a reviewer must see).
  *
- * The actual wrapping (sandbox-exec on macOS, bwrap on Linux, AppContainer on
- * Windows) is the Rust host's job at spawn time — a HUMAN-GATE runtime, injected
- * and documented, not claimed here. Windows has no generator yet (documented gap
- * below); a policy still validates, so the host can fail-closed there.
+ * Delegated to the Rust host (documented): real symlink resolution of roots +
+ * final NUL rejection. Windows: no generator yet — host fails closed.
  */
-import { isAbsolutePath, isTraversal, isSensitiveDir } from "./governance";
+import {
+  isAbsolutePath,
+  isTraversal,
+  isSensitiveDir,
+  canonicalizePath,
+} from "./governance";
 
 export interface SandboxPolicy {
   /** Absolute dirs the child may READ (subpaths included). */
@@ -40,14 +50,15 @@ export interface SandboxPolicy {
 }
 
 /**
- * Read-only system roots a typical CLI needs to function (shared libs, certs,
- * interpreters, /dev/null + /dev/urandom, tmp for scratch reads). Deliberately
- * NOT $HOME — a build step reading the whole home dir defeats the point; a
- * policy that needs a specific home subpath adds it explicitly (human-approved).
+ * Read-only system roots a typical CLI needs (shared libs, interpreters, TLS
+ * roots, /dev/null+urandom). Trimmed vs the naive set: NO /private, /var, /tmp
+ * (macOS /private/var/folders/<user> holds session tokens/cookies; /tmp is other
+ * processes' scratch), NO $HOME. A policy needing a specific extra read adds it
+ * explicitly — and validateSandboxPolicy still forbids naming a secrets dir.
  */
 export const SYSTEM_READ_ROOTS: readonly string[] = [
-  "/usr", "/bin", "/sbin", "/lib", "/opt", "/etc", "/dev", "/tmp", "/private", "/var",
-  "/System", "/Library", // macOS
+  "/usr", "/bin", "/sbin", "/lib", "/opt", "/etc", "/dev",
+  "/System", "/Library", // macOS frameworks / dyld
 ];
 
 /** The governed least-privilege default for a process spawned in `cwd`. */
@@ -61,13 +72,8 @@ export function defaultSandboxPolicy(cwd: string): SandboxPolicy {
 
 export type ValidationResult = { ok: true } | { ok: false; reason: string };
 
-/**
- * A control char (NUL, newline, U+2028/2029 line separators) in a path is never
- * legitimate and is exactly what a profile-injection attempt smuggles: even with
- * `"` escaped, an embedded newline could let the tail of a path start a new
- * top-level SBPL directive, and a NUL truncates in the C host. Reject at the
- * validation boundary so neither the SBPL nor the bwrap generator ever sees one.
- */
+/** Control char (NUL, newline, U+2028/2029) — never a real path, exactly what a
+ * profile-injection attempt smuggles. Rejected at the validation boundary. */
 function hasControlChars(s: string): boolean {
   for (let i = 0; i < s.length; i++) {
     const c = s.charCodeAt(i);
@@ -76,87 +82,173 @@ function hasControlChars(s: string): boolean {
   return false;
 }
 
+// Top path segments that are NEVER a legitimate WRITE target at any depth
+// (writing anywhere under them = system tamper: PATH shadowing, LaunchAgents
+// persistence, etc.). Compared against the canonical, lowercased first segment.
+const SYSTEM_WRITE_TREES: ReadonlySet<string> = new Set([
+  "usr", "bin", "sbin", "lib", "opt", "etc", "dev", "proc", "sys",
+  "system", "library", "boot", "root", "var", "windows",
+]);
+// Home CONTAINERS: "/Users", "/home" (all users) and a bare "/Users/<name>"
+// (a whole home dir) are too broad to grant write to — the secret dirs live
+// directly inside. A real project is a subdir BELOW the home.
+const HOME_CONTAINERS: ReadonlySet<string> = new Set(["users", "home"]);
+
+/** A WRITE grant is safe only if it's a real project/scratch subtree, not a
+ * system tree, a home root, or a bare top-level dir. Canonicalizes first so
+ * /private/etc, //etc, and trailing-slash spellings can't slip past. */
+export function isSafeWriteRoot(root: string): boolean {
+  if (!isAbsolutePath(root) || isTraversal(root) || hasControlChars(root)) return false;
+  const canon = canonicalizePath(root);
+  const lc = canon.toLowerCase();
+  if (isSensitiveDir(canon)) return false; // /, /etc (+ /private/etc via canon), secrets
+  const segs = lc.split("/").filter(Boolean);
+  if (segs.length <= 1) return false; // "/", "/Users", "/opt" — too broad
+  if (SYSTEM_WRITE_TREES.has(segs[0])) return false; // /usr/local/bin, /Library/LaunchAgents…
+  if (segs.length === 2 && HOME_CONTAINERS.has(segs[0])) return false; // whole home "/Users/me"
+  return true;
+}
+
+/** True when `anc` is a STRICT ancestor of `desc` (canonical). */
+function isStrictAncestor(anc: string, desc: string): boolean {
+  const a = canonicalizePath(anc);
+  const d = canonicalizePath(desc);
+  return a !== d && (d + "/").startsWith(a + "/");
+}
+
+const SECRET_READ_SEGMENT = /\/\.(ssh|aws|gnupg|gpg|kube|docker)(\/|$)/i;
+
 /**
- * A policy the host will ENFORCE must itself be safe: a write root that is
- * relative, escapes via `..`, holds a control char, or lands in a system/secrets
- * dir would let an approved command scribble where it must not. Read roots must
- * be absolute + non-traversal + control-char-free (system reads are fine; `..`,
- * a NUL, or a newline are not).
+ * A policy the host will ENFORCE must itself be safe. Write roots go through the
+ * allowlist-shaped isSafeWriteRoot (a denylist is bypassable by granting a
+ * parent). Read roots must be absolute, clean, and not name a secrets dir. No
+ * write root may be a strict ancestor of a read root (else the rw bind silently
+ * upgrades the ro child).
  */
 export function validateSandboxPolicy(p: SandboxPolicy): ValidationResult {
   for (const w of p.writeRoots) {
-    if (!isAbsolutePath(w) || isTraversal(w) || hasControlChars(w)) {
-      return { ok: false, reason: `write root not absolute/clean: ${w}` };
-    }
-    if (isSensitiveDir(w)) {
-      return { ok: false, reason: `write root in a system/secrets dir: ${w}` };
+    if (!isSafeWriteRoot(w)) {
+      return { ok: false, reason: `unsafe write root (system/home/too-broad/dirty): ${w}` };
     }
   }
   for (const r of p.readRoots) {
     if (!isAbsolutePath(r) || isTraversal(r) || hasControlChars(r)) {
       return { ok: false, reason: `read root not absolute/clean: ${r}` };
     }
+    if (SECRET_READ_SEGMENT.test(canonicalizePath(r))) {
+      return { ok: false, reason: `read root names a secrets dir: ${r}` };
+    }
+  }
+  for (const w of p.writeRoots) {
+    for (const r of p.readRoots) {
+      if (isStrictAncestor(w, r)) {
+        return { ok: false, reason: `write root ${w} is an ancestor of read root ${r}` };
+      }
+    }
   }
   return { ok: true };
+}
+
+function assertValid(p: SandboxPolicy): void {
+  const v = validateSandboxPolicy(p);
+  if (!v.ok) throw new Error(`refusing to build sandbox profile: ${v.reason}`);
 }
 
 // ── macOS: sandbox-exec SBPL profile ─────────────────────────────────────────
 
 /**
  * Escape a path for an SBPL double-quoted string literal. Backslash first (so we
- * don't double-escape the escapes we add), then the quote. Without this, a path
- * like `/x")(allow default)(deny "` would close the (subpath "…") form and inject
- * profile directives that neuter the sandbox.
+ * don't double-escape), then the quote. In SBPL/TinyScheme a string literal is
+ * terminated ONLY by an unescaped `"`, so `{\, "}` is the complete set; a `)`,
+ * `;`, or newline inside stays inert. (Control chars are already rejected in
+ * validation before generation.)
  */
 export function sbplQuote(path: string): string {
   return `"${path.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
 export function toSeatbeltProfile(p: SandboxPolicy): string {
+  assertValid(p);
+  const read = p.readRoots.map(canonicalizePath);
+  const write = p.writeRoots.map(canonicalizePath);
   const lines = [
     "(version 1)",
     "(deny default)",
-    // A child must be able to fork/exec itself and read basic process info; the
-    // file-read allowlist below is what actually bounds which binaries it can run.
     "(allow process-fork)",
     "(allow process-exec)",
     "(allow sysctl-read)",
     "(allow signal (target self))",
   ];
-  if (p.readRoots.length > 0) {
-    lines.push(`(allow file-read* ${p.readRoots.map((r) => `(subpath ${sbplQuote(r)})`).join(" ")})`);
+  if (read.length > 0) {
+    lines.push(`(allow file-read* ${read.map((r) => `(subpath ${sbplQuote(r)})`).join(" ")})`);
   }
-  if (p.writeRoots.length > 0) {
-    lines.push(`(allow file-write* ${p.writeRoots.map((w) => `(subpath ${sbplQuote(w)})`).join(" ")})`);
+  if (write.length > 0) {
+    lines.push(`(allow file-write* ${write.map((w) => `(subpath ${sbplQuote(w)})`).join(" ")})`);
   }
-  // Network is DENY-by-default (deny default covers it); only opened when granted.
+  // Network + socket creation are covered by (deny default); only opened on grant.
   if (p.allowNetwork) {
     lines.push("(allow network*)");
+    lines.push("(allow system-socket)");
   }
   return lines.join("\n") + "\n";
 }
 
 // ── Linux: bubblewrap argv ───────────────────────────────────────────────────
 
+/** A minimal, secret-free env the child gets after --clearenv (the host scrubs
+ * its own secret-bearing env). HOME points at the first write root (the project
+ * dir), never the real $HOME. */
+function sandboxEnvArgs(p: SandboxPolicy): string[] {
+  const home = p.writeRoots.length > 0 ? canonicalizePath(p.writeRoots[0]) : "/tmp";
+  return [
+    "--clearenv",
+    "--setenv", "PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin",
+    "--setenv", "HOME", home,
+    "--setenv", "TERM", "xterm-256color",
+  ];
+}
+
 /**
- * bwrap argv (array form → no shell, no injection). `--ro-bind-try` / `--bind-try`
- * tolerate a missing root instead of aborting. `--unshare-net` is the network
- * deny. The host appends `-- <cmd> <args>` after this prefix.
+ * bwrap argv (array form → no shell, no injection). Isolation: --unshare-pid
+ * (no host PID visibility → can't read a sibling's /proc/<pid>/environ or
+ * /proc/<pid>/mem, same-UID), --unshare-ipc (no shm snoop), --unshare-net when
+ * network is denied, --new-session (anti-TIOCSTI), --die-with-parent, minimal
+ * --dev/--proc, and --clearenv so host secret env doesn't leak in. Read roots
+ * are ro-bound FIRST, then write roots, so a rw project subdir correctly
+ * overrides its ro parent (and validation already forbids a write root that is
+ * an ancestor of a read root). Host appends `-- <cmd> <args>`.
  */
 export function toBubblewrapArgs(p: SandboxPolicy): string[] {
-  const args: string[] = ["--die-with-parent", "--new-session", "--proc", "/proc", "--dev", "/dev"];
-  for (const r of p.readRoots) args.push("--ro-bind-try", r, r);
-  for (const w of p.writeRoots) args.push("--bind-try", w, w);
+  assertValid(p);
+  const args: string[] = [
+    "--die-with-parent", "--new-session",
+    "--unshare-pid", "--unshare-ipc",
+    "--proc", "/proc", "--dev", "/dev",
+    ...sandboxEnvArgs(p),
+  ];
+  for (const r of p.readRoots) {
+    const c = canonicalizePath(r);
+    args.push("--ro-bind-try", c, c);
+  }
+  for (const w of p.writeRoots) {
+    const c = canonicalizePath(w);
+    args.push("--bind-try", c, c);
+  }
   if (!p.allowNetwork) args.push("--unshare-net");
   return args;
 }
 
 // ── honest summary ───────────────────────────────────────────────────────────
 
-/** One-line human summary for the approval modal + (safe to) audit. No secrets. */
+/** One-line human summary for the approval modal. Spells out write roots + any
+ * read root OUTSIDE the standard system set (the exfil source a reviewer needs
+ * to see), + network state. No secrets. */
 export function describeSandbox(p: SandboxPolicy): string {
   const write = p.writeRoots.length ? p.writeRoots.join(", ") : "(nothing)";
-  return `sandbox: write→${write}, network ${p.allowNetwork ? "ON" : "OFF"}, read ${p.readRoots.length} roots`;
+  const sys = new Set<string>(SYSTEM_READ_ROOTS.map((r) => canonicalizePath(r).toLowerCase()));
+  const extraReads = p.readRoots.filter((r) => !sys.has(canonicalizePath(r).toLowerCase()));
+  const reads = extraReads.length ? `system + ${extraReads.join(", ")}` : "system only";
+  return `sandbox: write→${write}, read ${reads}, network ${p.allowNetwork ? "ON" : "OFF"}`;
 }
 
 /**

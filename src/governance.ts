@@ -152,10 +152,27 @@ const SENSITIVE_CWD_PREFIX = ["/etc/", "/root/", "/boot/", "/dev/", "/proc/", "/
 const SECRET_DIR_SEGMENT = /\/\.(ssh|aws|gnupg|gpg|kube|docker|config\/gcloud)(\/|$)/;
 
 export function isSensitiveDir(cwd: string): boolean {
-  const p = cwd.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase() || "/";
+  const p = canonicalizePath(cwd).toLowerCase();
   if (SENSITIVE_CWD_EXACT.has(p)) return true;
   if (SENSITIVE_CWD_PREFIX.some((pre) => (p + "/").startsWith(pre))) return true;
   return SECRET_DIR_SEGMENT.test(p);
+}
+
+/**
+ * Structural path canonicalization for policy CHECKS (not fs resolution — the
+ * Rust host does real symlink resolution). Collapses `//`, strips a trailing `/`,
+ * and folds the macOS firmlink aliases (`/etc`→`/private/etc` etc. are the same
+ * inode) to their short form so a denylist can't be bypassed by spelling `/etc`
+ * as `/private/etc` or `//etc`. Case-preserving (paths are case-sensitive on
+ * Linux); callers lowercase separately for case-insensitive comparisons.
+ */
+export function canonicalizePath(path: string): string {
+  let s = path.replace(/\\/g, "/").replace(/\/{2,}/g, "/").replace(/(.)\/+$/, "$1");
+  s = s
+    .replace(/^\/private\/etc(\/|$)/, "/etc$1")
+    .replace(/^\/private\/var(\/|$)/, "/var$1")
+    .replace(/^\/private\/tmp(\/|$)/, "/tmp$1");
+  return s || "/";
 }
 
 /**
