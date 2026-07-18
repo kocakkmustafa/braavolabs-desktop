@@ -29,6 +29,8 @@
  * choke-point", NOT a claim of OS sandboxing.
  */
 
+import { isSpawnVendor } from "./spawn";
+
 type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 
 /** Tauri v2 with `withGlobalTauri:true` exposes window.__TAURI__.core.invoke. */
@@ -61,6 +63,13 @@ export const ACTION_KINDS = [
   "browser.read", // observe: screenshot / DOM / accessibility-tree read
   "browser.interact", // mutate page: click / type / scroll / select
   "browser.eval", // execute arbitrary JS in the page (highest risk)
+  // Lane-B real-PTY: open an INTERACTIVE vendor-CLI session inside the app
+  // (portable-pty host-side). The approval covers the SESSION — input/resize/
+  // kill are lifecycle ops on the approved session, not separate side-effect
+  // surfaces. Only a known SPAWN_VENDORS binary is approvable (the PTY host is
+  // NOT a general shell launcher — arbitrary argv stays on command.run's choke
+  // point); unknown vendors and non-absolute/traversal cwds are hard-denied.
+  "pty.spawn",
 ] as const;
 export type ActionKind = (typeof ACTION_KINDS)[number];
 
@@ -106,6 +115,9 @@ export interface ActionDetail {
   provider?: string;
   /** browser.navigate: the target URL (http/https only; other schemes hard-denied). */
   url?: string;
+  /** pty.spawn: extra argv passed to the vendor bin. Bound into the token so an
+   * approval for one flag-set can't be spent to launch a different one. */
+  args?: string[];
 }
 
 /** True when a path tries to escape its base via a `..` segment (defense-in-depth). */
@@ -113,6 +125,12 @@ export function isTraversal(path: string): boolean {
   return path
     .split(/[\\/]+/)
     .some((seg) => seg === "..");
+}
+
+/** Absolute path on either platform (`/…` posix, `C:\…`/`C:/…` windows). Pure —
+ * no node:path in webview code; the Rust host re-checks with real fs semantics. */
+export function isAbsolutePath(path: string): boolean {
+  return /^(\/|[a-zA-Z]:[\\/])/.test(path);
 }
 
 /** True when a joined command line matches an obviously destructive pattern. */
@@ -160,6 +178,18 @@ export function classifyAction(
   // machine / the browser's internals). Non-http(s) is denied, not approvable.
   if (kind === "browser.navigate" && !isSafeHttpUrl(detail.url)) {
     return { decision: "deny", reason: "non-http(s) navigation blocked" };
+  }
+  // pty.spawn may only open a KNOWN vendor CLI (claude/codex) in an absolute,
+  // non-traversal cwd. Arbitrary binaries are NOT approvable here — that keeps
+  // the PTY host from becoming a general shell launcher (command.run's choke
+  // point owns arbitrary argv, with its own destructive-pattern denies).
+  if (kind === "pty.spawn") {
+    if (!detail.vendor || !isSpawnVendor(detail.vendor)) {
+      return { decision: "deny", reason: "unknown PTY vendor blocked" };
+    }
+    if (!detail.cwd || !isAbsolutePath(detail.cwd) || isTraversal(detail.cwd)) {
+      return { decision: "deny", reason: "PTY cwd must be absolute (no traversal)" };
+    }
   }
   // 2. Explicit auto-allow (read-only / local-keyless only).
   if (AUTO_ALLOW.has(kind)) {
@@ -301,6 +331,9 @@ function bindingKey(kind: string, detail: ActionDetail): string {
     // ActionDetail::binding must add `url` in lockstep when the CDP host driver
     // lands; until then browser actions run only through this TS governance.)
     d.url ?? null,
+    // pty.spawn: bind the extra argv so approving `claude --continue` can't be
+    // spent to launch `claude <different-flag>` (confused-deputy on args).
+    d.args ?? null,
   ]);
 }
 
