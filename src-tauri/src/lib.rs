@@ -42,6 +42,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
+// OS-sandbox: the host-side enforcement layer. `governed_command` wraps every
+// spawned child in a least-privilege sandbox built here (mirror of src/sandbox.ts
+// + the host-only realpath resolution the TS delegates). See sandbox.rs.
+mod sandbox;
+
 /// Token bundle mirrored to the CLI's config field names ({token, refreshToken})
 /// so the two clients share one mental model. Serialized as camelCase so the
 /// JS store (store.ts) reads `token` / `refreshToken` directly.
@@ -736,14 +741,34 @@ struct ActionDetail {
     server: Option<String>,
     vendor: Option<String>,
     provider: Option<String>,
+    /// browser.navigate: the target URL. Bound into the token so an approval for
+    /// bank.com can't be spent to reach evil.com (TS governance binds `url`; this
+    /// field closes the gap where the host previously dropped it on deserialize).
+    url: Option<String>,
+    /// pty.spawn: extra argv passed to the vendor bin. Bound into the token so an
+    /// approval for one flag-set can't launch a different one (TS binds `args`;
+    /// same silently-dropped-field gap as `url`).
+    args: Option<Vec<String>>,
 }
 
 impl ActionDetail {
     /// Stable binding key so a token issued for action A can't authorize B.
+    /// `url` + `args` are included so a browser.navigate token is bound to its
+    /// exact URL and a pty.spawn token to its exact flag-set — matching the TS
+    /// governance bindingKey. request_action and consume_action build the binding
+    /// from the SAME struct, so adding the fields keeps host mint/consume in step.
     fn binding(&self, kind: &str) -> String {
         format!(
-            "{kind}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
-            self.argv, self.cwd, self.path, self.tool, self.server, self.vendor, self.provider
+            "{kind}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            self.argv,
+            self.cwd,
+            self.path,
+            self.tool,
+            self.server,
+            self.vendor,
+            self.provider,
+            self.url,
+            self.args
         )
     }
     fn summary_or(&self, kind: &str) -> String {
@@ -763,11 +788,21 @@ impl ActionDetail {
         if let Some(argv) = self.argv.as_ref().filter(|a| !a.is_empty()) {
             lines.push(format!("Command: {}", sanitize_field(&argv.join(" "))));
         }
+        // pty.spawn extra flags — part of what the token authorizes, so the human
+        // must see them (e.g. a `--dangerously-*` flag hiding behind a benign summary).
+        if let Some(args) = self.args.as_ref().filter(|a| !a.is_empty()) {
+            lines.push(format!("Args: {}", sanitize_field(&args.join(" "))));
+        }
         if let Some(cwd) = &self.cwd {
             lines.push(format!("Directory: {}", sanitize_field(cwd)));
         }
         if let Some(path) = &self.path {
             lines.push(format!("Path: {}", sanitize_field(path)));
+        }
+        // browser.navigate target — the human confirms the exact destination the
+        // token binds to, not the webview's free-text summary.
+        if let Some(url) = &self.url {
+            lines.push(format!("URL: {}", sanitize_field(url)));
         }
         if let Some(server) = &self.server {
             lines.push(format!("Server: {}", sanitize_field(server)));
@@ -802,6 +837,19 @@ fn sanitize_field(s: &str) -> String {
         format!("{head}…")
     } else {
         redacted
+    }
+}
+
+/// One extra dialog line stating the sandbox scope a `command.run` will run under,
+/// so the human approves the ISOLATION, not just the command. Only command.run is
+/// spawned inside the OS sandbox (`default_policy(cwd)` — write→cwd, network OFF),
+/// so the note is emitted solely for that kind with a cwd; other kinds return None
+/// (adding a sandbox claim there would be dishonest). Kept a single line per the
+/// "don't over-engineer" review note.
+fn sandbox_dialog_line(kind: &str, cwd: Option<&str>) -> Option<String> {
+    match (kind, cwd) {
+        ("command.run", Some(c)) => Some(format!("Sandbox: write→{}, network OFF", sanitize_field(c))),
+        _ => None,
     }
 }
 
@@ -941,8 +989,14 @@ fn request_action(app: AppHandle, gov: State<'_, Governance>, kind: String, deta
     let binding = detail.binding(&kind);
     let summary = detail.summary_or(&kind);
     // Trust surface for the native dialog is derived from the ENFORCED fields,
-    // NOT the webview's free-text summary (S-012 HIGH fix).
-    let dialog_text = detail.enforced_dialog_text(&kind);
+    // NOT the webview's free-text summary (S-012 HIGH fix). For command.run,
+    // append the sandbox scope the host will actually enforce so the human
+    // approves the isolation too (R6 P3-8).
+    let mut dialog_text = detail.enforced_dialog_text(&kind);
+    if let Some(line) = sandbox_dialog_line(&kind, detail.cwd.as_deref()) {
+        dialog_text.push('\n');
+        dialog_text.push_str(&line);
+    }
 
     match decision {
         "deny" => {
@@ -1136,8 +1190,11 @@ struct CommandResult {
 /// It requires a valid one-time token (from an approved request), enforces a
 /// working-dir allowlist (canonicalized — no `..` escape), builds an argv ARRAY
 /// (never a shell string), optionally clears the environment, and applies a
-/// timeout. This is the enforcement surface; a real OS sandbox around it is a
-/// documented human-gate.
+/// timeout. R6: it now ALSO wraps the child in a real OS sandbox (seatbelt on
+/// macOS, bubblewrap on Linux) built from a least-privilege policy — so even a
+/// human-APPROVED command is bounded to its project roots, can't read the user's
+/// secrets, and can't reach the network. Fail-closed: if the sandbox can't be
+/// built or its launcher is missing, the command is refused, never run bare.
 #[tauri::command]
 fn governed_command(
     app: AppHandle,
@@ -1152,7 +1209,9 @@ fn governed_command(
     use std::process::{Command, Stdio};
     let ts = ts.unwrap_or(0);
 
-    // 1. Spend the token — a command CANNOT run without passing the gate.
+    // 1. Spend the token — a command CANNOT run without passing the gate. The
+    //    map removal IS the gate; the "consumed" ledger line is deferred to step
+    //    4 so it can record the sandbox isolation the command actually ran under.
     let detail = ActionDetail { argv: Some(argv.clone()), cwd: Some(cwd.clone()), ..Default::default() };
     {
         let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
@@ -1165,7 +1224,6 @@ fn governed_command(
             return Err("invalid or already-spent token".into());
         }
         gate.tokens.remove(&token);
-        audit_append(&app, &mut gate, "command.run", "-", "consumed", &redact(&argv.join(" ")), ts);
     }
 
     // 2. Re-validate at the choke point (defense-in-depth, independent of policy).
@@ -1181,14 +1239,75 @@ fn governed_command(
         return Err("working directory is not in the allowlist".into());
     }
 
-    // 3. Build the child from an argv ARRAY — never a shell string.
-    let mut cmd = Command::new(&argv[0]);
-    cmd.args(&argv[1..]).current_dir(&cwd_path).stdout(Stdio::piped()).stderr(Stdio::piped());
-    if clean_env.unwrap_or(false) {
+    // 3. Build the least-privilege OS sandbox for THIS cwd. resolve_policy
+    //    realpath-resolves every root (BR-003: symlinks + firmlinks) so a write
+    //    root that secretly points at ~/.ssh is caught; wrap_command emits the
+    //    seatbelt/bubblewrap launcher prefix. FAIL-CLOSED at every step: a
+    //    resolution/validation failure or a missing launcher refuses the run —
+    //    the host NEVER falls back to an unsandboxed spawn.
+    let policy = sandbox::default_policy(&cwd_path);
+    let resolved = match sandbox::resolve_policy(&policy) {
+        Ok(r) => r,
+        Err(e) => {
+            if let Ok(mut gate) = gov.0.lock() {
+                audit_append(&app, &mut gate, "command.run", "-", "error", "sandbox: policy resolution refused", ts);
+            }
+            return Err(e);
+        }
+    };
+    let sandbox_summary = sandbox::describe_sandbox(&resolved);
+    let wrapped = match sandbox::wrap_command(&argv, &resolved) {
+        Ok(w) => w,
+        Err(e) => {
+            if let Ok(mut gate) = gov.0.lock() {
+                audit_append(&app, &mut gate, "command.run", "-", "error", "sandbox: wrap refused", ts);
+            }
+            return Err(e);
+        }
+    };
+
+    // 4. Audit the consumption now that the sandbox summary is known.
+    {
+        let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+        let line = format!("{} | {}", redact(&argv.join(" ")), sandbox_summary);
+        audit_append(&app, &mut gate, "command.run", "-", "consumed", &line, ts);
+    }
+
+    // 5. Build the child from the WRAPPED argv (sandbox launcher + policy + `--` +
+    //    the original argv) — still an argv ARRAY, never a shell string. The child
+    //    runs in `cwd`.
+    let mut cmd = Command::new(&wrapped[0]);
+    cmd.args(&wrapped[1..]).current_dir(&cwd_path).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Environment scrub. macOS seatbelt does NOT clear env, so the host does it
+    // UNCONDITIONALLY here and injects only a minimal, secret-free set — the
+    // mirror of Linux bwrap's `--clearenv` + `sandbox_env_args`, so both OSes
+    // uphold the same "the child does NOT inherit the host's secret env" guarantee
+    // (previously macOS only scrubbed when `clean_env` was set → asymmetric leak).
+    // `clean_env` is therefore now a NO-OP on the enforced path (env is ALWAYS
+    // clean); it is retained only for API compatibility.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = clean_env; // env is unconditionally cleaned below; param kept for compat
         cmd.env_clear();
-        // Keep a minimal PATH so the binary resolves; nothing else leaks in.
-        if let Some(p) = std::env::var_os("PATH") {
-            cmd.env("PATH", p);
+        let home = resolved
+            .write_roots
+            .first()
+            .map(|w| w.to_string_lossy().into_owned())
+            .unwrap_or_else(|| cwd.clone());
+        cmd.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin");
+        cmd.env("HOME", home);
+        cmd.env("TERM", "xterm-256color");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Linux: bwrap --clearenv already scrubs the grandchild INSIDE the sandbox,
+        // so this only affects the outer bwrap process. Honour `clean_env` for the
+        // launcher env; the sandboxed grandchild is clean regardless.
+        if clean_env.unwrap_or(false) {
+            cmd.env_clear();
+            if let Some(p) = std::env::var_os("PATH") {
+                cmd.env("PATH", p);
+            }
         }
     }
 
@@ -2085,6 +2204,52 @@ mod governance_tests {
         assert!(text.contains("write_file"));
         assert!(text.contains("fs"));
         assert!(!text.contains("harmless"));
+    }
+
+    // ── R6 host-runtime: url/args are bound (previously silently dropped) ──
+
+    #[test]
+    fn binding_includes_url_so_navigate_token_is_url_bound() {
+        let bank = ActionDetail { url: Some("https://bank.com".into()), ..Default::default() };
+        let evil = ActionDetail { url: Some("https://evil.com".into()), ..Default::default() };
+        // A token approved for bank.com can't be spent to reach evil.com.
+        assert_ne!(bank.binding("browser.navigate"), evil.binding("browser.navigate"));
+        assert_eq!(bank.binding("browser.navigate"), bank.binding("browser.navigate"));
+        // And a url-bearing detail differs from the url-less one (the field the
+        // host used to drop on deserialize, leaving the binding url-blind).
+        assert_ne!(bank.binding("browser.navigate"), ActionDetail::default().binding("browser.navigate"));
+    }
+
+    #[test]
+    fn binding_includes_args_so_pty_token_is_flag_bound() {
+        let cont = ActionDetail { vendor: Some("claude".into()), args: Some(vec!["--continue".into()]), ..Default::default() };
+        let resume = ActionDetail { vendor: Some("claude".into()), args: Some(vec!["--resume".into()]), ..Default::default() };
+        assert_ne!(cont.binding("pty.spawn"), resume.binding("pty.spawn"));
+        let no_args = ActionDetail { vendor: Some("claude".into()), ..Default::default() };
+        assert_ne!(cont.binding("pty.spawn"), no_args.binding("pty.spawn"));
+    }
+
+    #[test]
+    fn dialog_text_shows_url_and_args_not_the_summary() {
+        let nav = ActionDetail {
+            summary: Some("benign".into()),
+            url: Some("https://evil.example/login".into()),
+            ..Default::default()
+        };
+        let t = nav.enforced_dialog_text("browser.navigate");
+        assert!(t.contains("URL:"), "dialog must surface the URL line");
+        assert!(t.contains("evil.example"), "dialog must show the real destination");
+        assert!(!t.contains("benign"), "dialog must NOT show the webview summary");
+
+        let pty = ActionDetail {
+            summary: Some("open a shell".into()),
+            vendor: Some("claude".into()),
+            args: Some(vec!["--dangerously-skip".into()]),
+            ..Default::default()
+        };
+        let t2 = pty.enforced_dialog_text("pty.spawn");
+        assert!(t2.contains("Args:"), "dialog must surface the Args line");
+        assert!(t2.contains("--dangerously-skip"), "dialog must show the real flags");
     }
 }
 
