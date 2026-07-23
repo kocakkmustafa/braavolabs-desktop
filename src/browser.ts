@@ -51,10 +51,17 @@ function preview(s: string, max = 120): string {
 }
 
 /**
- * Map a BrowserAction to its governance kind + detail. detail.summary is the ONLY
- * human-facing field (approval modal + redacted audit), so it must be honest but
- * carry NO secret. `url` is also set for navigate so the gate can hard-deny
- * non-http(s) schemes and bind the token to the exact URL.
+ * Map a BrowserAction to its governance kind + detail. TWO cleanly-separated
+ * surfaces live on the returned detail:
+ *
+ *   • `summary` — the REDACTED, length-only human line that reaches the AUDIT
+ *     LEDGER. It never carries a secret: a typed value shows only its length, and
+ *     eval shows only its JS length (never the source).
+ *   • the STRUCTURED fields (`url` · `js` · `selector`/`value`/`interactKind`) —
+ *     bound into the one-time token (so an approval for one URL/JS/selector/value
+ *     can't be swapped for another) AND shown in the host's native approval dialog
+ *     (so the human sees WHAT will actually run). These reach the host but NOT the
+ *     ledger — dialog visibility and ledger privacy are deliberately distinct.
  */
 export function browserActionToGate(a: BrowserAction): { kind: ActionKind; detail: ActionDetail } {
   switch (a.op) {
@@ -63,17 +70,24 @@ export function browserActionToGate(a: BrowserAction): { kind: ActionKind; detai
     case "read":
       return { kind: "browser.read", detail: { summary: `read page (${a.what})` } };
     case "interact": {
-      // A typed value may be a password — show only its length, never the text.
+      // A typed value may be a password — the SUMMARY shows only its length, never
+      // the text. The raw value goes in `value` (bound + dialog only, never audited).
       const summary =
         a.kind === "type"
           ? `type ${a.value?.length ?? 0} chars into ${a.selector}`
           : a.kind === "select"
             ? `select an option in ${a.selector}`
             : `${a.kind} ${a.selector}`;
-      return { kind: "browser.interact", detail: { summary } };
+      return {
+        kind: "browser.interact",
+        detail: { interactKind: a.kind, selector: a.selector, value: a.value, summary },
+      };
     }
     case "eval":
-      return { kind: "browser.eval", detail: { summary: `eval JS: ${preview(a.js)}` } };
+      // eval JS is arbitrary code — the SUMMARY is length-only (no preview) so the
+      // ledger never carries a fragment of it; the raw JS goes in `js` (bound + shown
+      // in the dialog for real consent, never audited).
+      return { kind: "browser.eval", detail: { js: a.js, summary: `eval JS (${a.js.length} chars)` } };
   }
 }
 

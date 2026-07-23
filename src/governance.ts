@@ -118,6 +118,17 @@ export interface ActionDetail {
   /** pty.spawn: extra argv passed to the vendor bin. Bound into the token so an
    * approval for one flag-set can't be spent to launch a different one. */
   args?: string[];
+  /** browser.eval: the JS the token authorizes. Bound into the token (an approval
+   * for js='X' can't be spent on js='Y') AND shown in the native dialog, but NEVER
+   * written to the ledger — the redacted, length-only `summary` is what lands there.
+   * Dialog visibility and ledger privacy are DELIBERATELY separate surfaces. */
+  js?: string;
+  /** browser.interact: the element selector + typed value + interact kind. Bound
+   * into the token + shown in the dialog; the raw value (a possible password) never
+   * enters the ledger (same dialog-vs-ledger split as `js`). */
+  selector?: string;
+  value?: string;
+  interactKind?: string;
 }
 
 /** True when a path tries to escape its base via a `..` segment (defense-in-depth). */
@@ -409,6 +420,16 @@ function bindingKey(kind: string, detail: ActionDetail): string {
     // as `url`), else the host would recompute the binding without args and a
     // no-args token would consume a different-args spawn.
     d.args ?? null,
+    // browser.eval: bind the EXACT JS so an approval for eval('X') can't be spent
+    // on eval('Y') (the old design let one eval approval run arbitrary JS, sliding
+    // past the navigate url-bind). browser.interact: bind kind+selector+value so an
+    // approval to click #ok can't be swapped to #confirm-delete, nor the typed value
+    // changed after approval. The Rust host's ActionDetail::binding adds these in
+    // lockstep — the raw js/value are bound + shown in the dialog, never audited.
+    d.js ?? null,
+    d.selector ?? null,
+    d.value ?? null,
+    d.interactKind ?? null,
   ]);
 }
 

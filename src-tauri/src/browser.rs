@@ -59,6 +59,32 @@ const CDP_TIMEOUT: Duration = Duration::from_secs(30);
 const LOAD_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bound on the DevTools HTTP discovery fetch so a non-responding port can't hang.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+/// OOM guard: the DevTools `/json` target list is a few KB, so cap the discovery
+/// body well above that — a hostile / wrong endpoint can't make us buffer without
+/// bound. (Not a security boundary, a resource one.)
+const MAX_HTTP_BODY: usize = 8 * 1024 * 1024;
+/// Upper bound on a `browser.eval` STRING result before it is truncated (P3-4).
+/// Keeps a hostile eval from flooding the webview IPC channel; the DOM read is
+/// exempt (that's a deliberate full read — see `evaluate_raw`).
+const MAX_EVAL_RESULT_BYTES: usize = 512 * 1024;
+
+/// Truncate an over-long eval STRING result at a UTF-8 boundary and mark it, so a
+/// hostile eval can't return an unbounded payload over IPC. Non-string results
+/// (numbers/objects/arrays) pass through unchanged. Pure — unit-tested.
+fn cap_eval_value(v: Value) -> Value {
+    if let Value::String(s) = &v {
+        if s.len() > MAX_EVAL_RESULT_BYTES {
+            let mut end = MAX_EVAL_RESULT_BYTES;
+            while end > 0 && !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            let mut out = s[..end].to_string();
+            out.push_str("…[truncated]");
+            return Value::String(out);
+        }
+    }
+    v
+}
 
 // ── non-http(s) hard-deny (byte-parity mirror of governance.ts isSafeHttpUrl) ──
 
@@ -82,9 +108,15 @@ pub fn is_safe_http_url(url: Option<&str>) -> bool {
         Some(u) => u,
         None => return false,
     };
-    // WHATWG URL strips leading/trailing C0-control-or-space before parsing; mirror
-    // that so " http://x" is judged on its scheme, not the leading space.
-    let trimmed = raw.trim_matches(|c: char| c <= ' ');
+    // WHATWG URL parsing (what `new URL()` does on the TS dev/test path) first
+    // REMOVES every ASCII tab (0x09) / LF (0x0A) / CR (0x0D) from the WHOLE string,
+    // THEN strips leading/trailing C0-control-or-space, and only then reads the
+    // scheme. Mirror both steps so dev(TS)/prod(Rust) reach the SAME verdict on the
+    // SAME input — e.g. "ht\ttp://x" is http in both, "java\tscript:x" is denied in
+    // both. We remove only what WHATWG removes, so this stays a faithful (and still
+    // fail-closed) mirror rather than an ad-hoc, drifting copy.
+    let stripped: String = raw.chars().filter(|c| !matches!(c, '\t' | '\n' | '\r')).collect();
+    let trimmed = stripped.trim_matches(|c: char| c <= ' ');
     // The scheme is the run before the first ':'. No ':' ⇒ not an absolute URL
     // (a bare "example.com" throws in `new URL`) ⇒ fail-closed.
     let scheme = match trimmed.split_once(':') {
@@ -104,6 +136,56 @@ pub fn is_safe_http_url(url: Option<&str>) -> bool {
     }
     let lower = scheme.to_ascii_lowercase();
     lower == "http" || lower == "https"
+}
+
+// ── loopback-only CDP endpoint (SSRF / loopback-escape guard) ─────────────────
+
+/// Extract the host from a `ws://` / `wss://` URL (case-insensitive scheme). Strips
+/// any userinfo (`user@`) and port, and unwraps a bracketed IPv6 literal. Returns
+/// the lowercased host, or None for a non-ws(s) / malformed URL.
+pub fn ws_host(ws_url: &str) -> Option<String> {
+    let t = ws_url.trim();
+    // Case-insensitive scheme strip; the byte offset is safe (scheme is ASCII).
+    let after = {
+        let lower = t.to_ascii_lowercase();
+        if lower.starts_with("ws://") {
+            &t[5..]
+        } else if lower.starts_with("wss://") {
+            &t[6..]
+        } else {
+            return None;
+        }
+    };
+    // authority = everything up to the first '/', '?' or '#'.
+    let authority = after.split(['/', '?', '#']).next().unwrap_or("");
+    // Drop any userinfo — `127.0.0.1@evil.com` has host evil.com, not 127.0.0.1, so
+    // taking the part AFTER the last '@' is what defeats a userinfo-spoof.
+    let hostport = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(rest) = hostport.strip_prefix('[') {
+        // [::1]:port → the bracketed IPv6 literal.
+        rest.split(']').next().unwrap_or("")
+    } else {
+        // host:port → host is before the (single) ':'.
+        hostport.split(':').next().unwrap_or("")
+    };
+    let host = host.trim();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
+}
+
+/// True iff the CDP endpoint's host is loopback (`127.0.0.1`, `::1`, `localhost`).
+/// `browser_connect` gates on this so an compromised webview can't point the host
+/// at `ws://169.254.169.254/` (cloud metadata) or a LAN browser — the DevTools
+/// endpoint discovery already pins loopback, and this keeps the direct-connect path
+/// symmetric. Fail-closed: any non-loopback / unparseable host is refused.
+pub fn is_loopback_ws_host(ws_url: &str) -> bool {
+    match ws_host(ws_url) {
+        Some(h) => h == "127.0.0.1" || h == "::1" || h == "localhost",
+        None => false,
+    }
 }
 
 // ── DevTools endpoint discovery ───────────────────────────────────────────────
@@ -157,6 +239,9 @@ async fn http_get_json(port: u16, path: &str) -> Result<String, String> {
         let mut body = buf[header_end..].to_vec();
         match parse_content_length(&header_text) {
             Some(len) => {
+                if len > MAX_HTTP_BODY {
+                    return Err("CDP HTTP body too large".into());
+                }
                 while body.len() < len {
                     let n = stream.read(&mut tmp).await.map_err(|e| e.to_string())?;
                     if n == 0 {
@@ -172,6 +257,9 @@ async fn http_get_json(port: u16, path: &str) -> Result<String, String> {
                     break;
                 }
                 body.extend_from_slice(&tmp[..n]);
+                if body.len() > MAX_HTTP_BODY {
+                    return Err("CDP HTTP body too large".into());
+                }
             },
         }
         Ok::<String, String>(String::from_utf8_lossy(&body).into_owned())
@@ -248,9 +336,13 @@ impl CdpConnection {
     /// we drive. Enabling `Page`/`Runtime` twice is harmless, so failures here are
     /// tolerated — the per-action methods surface any real protocol error.
     pub async fn connect(ws_url: &str) -> Result<Self, String> {
-        let (ws, _resp) = connect_async(ws_url)
-            .await
-            .map_err(|e| format!("CDP connect failed: {e}"))?;
+        // Bound the handshake — a half-open / unresponsive endpoint must not hang the
+        // command forever (connect_async has no built-in timeout).
+        let (ws, _resp) = match tokio::time::timeout(CDP_TIMEOUT, connect_async(ws_url)).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => return Err(format!("CDP connect failed: {e}")),
+            Err(_) => return Err("CDP connect timed out".into()),
+        };
         let mut conn = CdpConnection { ws, id: 0 };
         let _ = conn.send("Page.enable", json!({})).await;
         let _ = conn.send("Runtime.enable", json!({})).await;
@@ -364,10 +456,10 @@ impl CdpConnection {
         Ok(format!("data:image/png;base64,{data}"))
     }
 
-    /// Evaluate arbitrary JS in the page and return its by-value result. A thrown
-    /// exception becomes an `Err` (the highest-risk op, but still governed: this
-    /// method only runs after `browser_dispatch` has spent a `browser.eval` token).
-    pub async fn eval(&mut self, js: &str) -> Result<Value, String> {
+    /// Evaluate arbitrary JS in the page and return its by-value result, UNCAPPED. A
+    /// thrown exception becomes an `Err`. Internal: used by the URL/DOM reads (which
+    /// intentionally return the full document) and by the capped public `eval`.
+    async fn evaluate_raw(&mut self, js: &str) -> Result<Value, String> {
         let res = self
             .send(
                 "Runtime.evaluate",
@@ -390,10 +482,20 @@ impl CdpConnection {
             .unwrap_or(Value::Null))
     }
 
-    /// `eval` a snippet whose result is a string; a non-string result is stringified
-    /// (defensive — the callers here always evaluate string expressions).
+    /// Governed `browser.eval`: evaluate arbitrary JS and return its by-value result,
+    /// CAPPED (P3-4). A hostile `document.body.innerHTML` (or any string that grows
+    /// unboundedly) is truncated + marked so it can't flood the IPC channel back to
+    /// the webview. This cap is applied ONLY to the eval op — the DOM read is a
+    /// deliberate full-document read and stays uncapped (see `evaluate_raw`).
+    pub async fn eval(&mut self, js: &str) -> Result<Value, String> {
+        Ok(cap_eval_value(self.evaluate_raw(js).await?))
+    }
+
+    /// `evaluate_raw` a snippet whose result is a string; a non-string result is
+    /// stringified (defensive — the callers here always evaluate string
+    /// expressions). Uncapped on purpose (DOM/URL reads).
     async fn eval_string(&mut self, js: &str) -> Result<String, String> {
-        match self.eval(js).await? {
+        match self.evaluate_raw(js).await? {
             Value::String(s) => Ok(s),
             other => Ok(other.to_string()),
         }
@@ -463,6 +565,66 @@ mod tests {
         assert!(!is_safe_http_url(Some("not a url")));
         assert!(!is_safe_http_url(Some("ht tp://x"))); // space inside "scheme" → invalid
         assert!(!is_safe_http_url(Some("httpsx://x"))); // scheme is "httpsx", not https
+    }
+
+    #[test]
+    fn is_safe_http_url_strips_tab_newline_cr_like_whatwg() {
+        // P3-1: `new URL()` removes ALL ASCII tab/LF/CR from the string before parse,
+        // so these are http/https in the TS dev path too — the Rust prod path must
+        // agree (byte-parity). Only what WHATWG removes is removed → still safe.
+        assert!(is_safe_http_url(Some("ht\ttp://x")));
+        assert!(is_safe_http_url(Some("htt\np://x")));
+        assert!(is_safe_http_url(Some("http://ex\tample.com/a\nb")));
+        assert!(is_safe_http_url(Some("\thttps://ok.example")));
+        // Stripping tab/LF/CR must NOT rescue a dangerous scheme.
+        assert!(!is_safe_http_url(Some("java\tscript:alert(1)")));
+        assert!(!is_safe_http_url(Some("fi\r\nle:///etc/passwd")));
+    }
+
+    // ── loopback-only CDP host (P2-2 SSRF / loopback-escape guard) ──
+
+    #[test]
+    fn is_loopback_ws_host_accepts_only_loopback() {
+        assert!(is_loopback_ws_host("ws://127.0.0.1:9222/devtools/page/ABC"));
+        assert!(is_loopback_ws_host("ws://localhost:9222/x"));
+        assert!(is_loopback_ws_host("wss://[::1]:9222/x"));
+        assert!(is_loopback_ws_host("WS://127.0.0.1:9222/x")); // scheme case-insensitive
+        // Non-loopback hosts are refused — the SSRF / LAN-pivot cases.
+        assert!(!is_loopback_ws_host("ws://10.0.0.5:9222"));
+        assert!(!is_loopback_ws_host("ws://169.254.169.254/")); // cloud metadata
+        assert!(!is_loopback_ws_host("ws://evil.example/x"));
+        // A userinfo spoof (`127.0.0.1@evil`) has host evil — must be refused.
+        assert!(!is_loopback_ws_host("ws://127.0.0.1@evil.example/x"));
+        // Non-ws(s) / malformed → fail-closed.
+        assert!(!is_loopback_ws_host("http://127.0.0.1/"));
+        assert!(!is_loopback_ws_host("127.0.0.1:9222"));
+    }
+
+    #[test]
+    fn ws_host_extracts_host_stripping_userinfo_port_and_brackets() {
+        assert_eq!(ws_host("ws://127.0.0.1:9222/x").as_deref(), Some("127.0.0.1"));
+        assert_eq!(ws_host("wss://[::1]:9222/x").as_deref(), Some("::1"));
+        assert_eq!(ws_host("ws://user:pass@localhost:9222/x").as_deref(), Some("localhost"));
+        assert_eq!(ws_host("ws://EXAMPLE.com/x").as_deref(), Some("example.com"));
+        assert_eq!(ws_host("http://127.0.0.1/x"), None);
+    }
+
+    // ── eval result cap (P3-4) ──
+
+    #[test]
+    fn cap_eval_value_truncates_only_over_long_strings() {
+        // A small string is untouched.
+        assert_eq!(cap_eval_value(json!("hi")), json!("hi"));
+        // A non-string (number/object) passes through whatever its size.
+        assert_eq!(cap_eval_value(json!(2)), json!(2));
+        assert_eq!(cap_eval_value(json!({"a":1})), json!({"a":1}));
+        // An over-long string is truncated + marked, and stays within the cap (+marker).
+        let huge = "x".repeat(MAX_EVAL_RESULT_BYTES + 100);
+        let capped = cap_eval_value(json!(huge));
+        let s = capped.as_str().unwrap();
+        assert!(s.ends_with("…[truncated]"), "over-long result is marked truncated");
+        assert!(s.len() <= MAX_EVAL_RESULT_BYTES + "…[truncated]".len());
+        assert!(s.len() < huge.len(), "the result was actually shortened");
     }
 
     // ── pick_page_ws_url: picks a page target, falls back, tolerates framing ──
