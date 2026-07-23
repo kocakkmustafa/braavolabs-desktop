@@ -34,18 +34,24 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 // OS-sandbox: the host-side enforcement layer. `governed_command` wraps every
 // spawned child in a least-privilege sandbox built here (mirror of src/sandbox.ts
 // + the host-only realpath resolution the TS delegates). See sandbox.rs.
 mod sandbox;
+
+// R6 Lane-B real-PTY host: the reusable session registry / sandbox policy /
+// low-level PTY open for governed interactive vendor-CLI sessions. The
+// `#[tauri::command]` wiring (token spend + reader thread + audit) lives below,
+// where the governance state is owned. See pty.rs.
+mod pty;
 
 /// Token bundle mirrored to the CLI's config field names ({token, refreshToken})
 /// so the two clients share one mental model. Serialized as camelCase so the
@@ -600,14 +606,38 @@ fn classify(kind: &str, argv: &[String], path: Option<&str>) -> (&'static str, &
             }
         }
     }
+    // pty.spawn hard-denies — the host-side mirror of governance.ts's pty deny
+    // block, load-bearing because in PRODUCTION createTauriGovernance delegates
+    // request() straight to this Rust classify (the TS classifyAction runs ONLY
+    // in the dev/test in-memory backend). So THIS is the sole classifier that sees
+    // a prod pty.spawn: without these denies, `claude --mcp-config evil.json` could
+    // reach the native Allow dialog and, once approved, achieve sandbox-in RCE +
+    // (~/.claude read + network ON) credential exfil. For this kind the caller
+    // passes the pty ARGS as `argv` and the pty CWD as `path` (see request_action).
+    // A denied action is never even surfaced for approval.
+    if kind == "pty.spawn" {
+        if has_dangerous_pty_flag(argv).is_some() {
+            return ("deny", "dangerous PTY flag blocked (permission-skip / config-inject)");
+        }
+        if let Some(p) = path {
+            if sandbox::is_sensitive_dir(p) {
+                return ("deny", "PTY cwd in a system/secrets directory blocked");
+            }
+        }
+    }
     // 2. Explicit auto-allow set (read-only / local-keyless only).
     if kind == "probe.detect" || kind == "local.dispatch" {
         return ("auto-allow", "read-only / local-keyless");
     }
     // 3. FAIL-CLOSED default — unknown kinds land here too.
+    // `pty.spawn` (Lane-B real-PTY) is an explicit, reasoned-about side-effecting
+    // kind — it opens an interactive vendor CLI, so it requires approval. Listed
+    // here so it reports "side-effecting action", not "unknown action" (the
+    // vendor/cwd/flag hard-denies live in the TS classifier + pty_spawn's own
+    // resolution; classify only decides the auto-allow/approval split).
     let known = matches!(
         kind,
-        "direct.dispatch" | "spawn.launch" | "command.run" | "mcp.tool" | "file.write"
+        "direct.dispatch" | "spawn.launch" | "command.run" | "mcp.tool" | "file.write" | "pty.spawn"
     );
     if known {
         ("require-approval", "side-effecting action")
@@ -633,6 +663,63 @@ fn is_destructive(joined: &str) -> bool {
 /// True when a path tries to escape its base via a `..` segment.
 fn is_traversal(path: &str) -> bool {
     path.split(['/', '\\']).any(|seg| seg == "..")
+}
+
+/// Flags that turn a "governed PTY session" into arbitrary code execution — the
+/// host mirror of governance.ts `DANGEROUS_PTY_FLAGS`. `--mcp-config evil.json`
+/// registers an MCP stdio server whose command can be `sh -c 'curl … | sh'`,
+/// escaping the "only claude/codex" containment into full RCE;
+/// `--dangerously-skip-permissions` removes the vendor CLI's own prompts (the
+/// supervision the "human watches the terminal" design relies on). HARD-DENIED
+/// for the in-app governed PTY (the user may still run them in their OWN terminal
+/// via `braavo spawn`, outside the moat). Returns the offending flag class for the
+/// audit line, None when clean.
+///
+/// Byte-for-byte parity with the TS regexes (verified in the parity test):
+///   /^--dangerously[\w-]*/i  — any arg PREFIXED `--dangerously`
+///   /^--mcp-config\b/i · /^--mcp-server\b/i · /^--permission-mode\b/i · /^--yolo\b/i
+///   /^--allowed-?tools\b/i   — optional hyphen: `--allowedtools` OR `--allowed-tools`
+/// The `\b`-anchored ones also catch the `=`-adjacent form (`--mcp-config=evil`),
+/// exactly as `\b` does. Case-insensitive; each arg is trimmed first (as the TS).
+/// KNOWN FOLLOW-UP: `--permission-prompt-tool` (another prompt-suppressor) is NOT
+/// on the TS list yet; add to BOTH lists in lockstep when the TS denylist grows.
+fn has_dangerous_pty_flag(args: &[String]) -> Option<&'static str> {
+    for raw in args {
+        // Trim the same whitespace set JS String.prototype.trim strips — ASCII
+        // whitespace PLUS the Unicode BOM/ZWNBSP (U+FEFF), so a "\u{feff}--yolo"
+        // can't slip past a plain ASCII trim and defeat the byte-for-byte claim.
+        let a = raw.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}').to_ascii_lowercase();
+        // /^--dangerously[\w-]*/ — unanchored suffix, so a prefix match is enough.
+        if a.starts_with("--dangerously") {
+            return Some("--dangerously-*");
+        }
+        for (flag, label) in [
+            ("--mcp-config", "--mcp-config"),
+            ("--mcp-server", "--mcp-server"),
+            ("--permission-mode", "--permission-mode"),
+            ("--yolo", "--yolo"),
+        ] {
+            if flag_word_boundary(&a, flag) {
+                return Some(label);
+            }
+        }
+        // /^--allowed-?tools\b/ — the optional hyphen is two spellings.
+        if flag_word_boundary(&a, "--allowed-tools") || flag_word_boundary(&a, "--allowedtools") {
+            return Some("--allowed-tools");
+        }
+    }
+    None
+}
+
+/// True when `arg` equals `flag` or is `flag` followed by a NON-word char — the
+/// manual, regex-free equivalent of a `^<flag>\b` match (catches `--flag` and
+/// `--flag=value` and `--flag-x`, but not `--flagword`). `arg` is pre-lowercased.
+fn flag_word_boundary(arg: &str, flag: &str) -> bool {
+    match arg.strip_prefix(flag) {
+        Some("") => true,
+        Some(rest) => rest.chars().next().map_or(true, |c| !(c.is_ascii_alphanumeric() || c == '_')),
+        None => false,
+    }
 }
 
 /// Strip anything credential-shaped from free text before it enters the ledger.
@@ -983,7 +1070,14 @@ fn mint_id(prefix: &str, seq: u64) -> String {
 fn request_action(app: AppHandle, gov: State<'_, Governance>, kind: String, detail: Option<ActionDetail>, ts: Option<u64>) -> Result<GateResult, String> {
     let detail = detail.unwrap_or_default();
     let ts = ts.unwrap_or(0);
-    let (decision, reason) = classify(&kind, detail.argv.as_deref().unwrap_or(&[]), detail.path.as_deref());
+    // For pty.spawn the classifier's hard-denies live on the pty fields, so pass
+    // the ARGS as argv and the CWD as path (classify's pty block reads them there);
+    // every other kind uses argv/path directly.
+    let (decision, reason) = if kind == "pty.spawn" {
+        classify(&kind, detail.args.as_deref().unwrap_or(&[]), detail.cwd.as_deref())
+    } else {
+        classify(&kind, detail.argv.as_deref().unwrap_or(&[]), detail.path.as_deref())
+    };
     let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
     let action_id = mint_id("act", gate.seq + 1);
     let binding = detail.binding(&kind);
@@ -1356,6 +1450,295 @@ fn command_allowlist(app: &AppHandle) -> Vec<PathBuf> {
         roots.push(home);
     }
     roots
+}
+
+// ── Lane-B real-PTY — the governed interactive vendor-CLI host ────────────────
+//
+// A webview cannot allocate a pseudo-terminal or spawn a child; only the host
+// can. `pty_spawn` opens a REAL PTY running the user's own vendor CLI (claude /
+// codex) — but ONLY through the same fail-closed gate as every other side effect:
+// it spends a one-time `pty.spawn` token (bound to vendor+cwd+args), enforces the
+// host-authoritative running-session cap BEFORE burning that token, resolves the
+// binary at neutral prefixes only, checks the cwd against the command allowlist,
+// and wraps the child in a least-privilege OS sandbox (`pty::pty_policy`,
+// fail-closed). Lifecycle ops (write/resize/kill) act on the ALREADY-approved
+// session — no per-keystroke gate (the human watches the live terminal; the
+// governance line is session-open). The reusable pieces live in pty.rs.
+
+/// The output event streamed to the webview terminal. `dataB64` is base64 because
+/// terminal bytes are not guaranteed UTF-8. Buffer content NEVER reaches audit.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PtyOutputEvent {
+    session_id: String,
+    data_b64: String,
+}
+
+/// The exit event — the process ended (or was killed). `code` is None for a
+/// signal/kill with no numeric status.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PtyExitEvent {
+    session_id: String,
+    code: Option<i32>,
+}
+
+/// The label of the app's single webview window (tauri.conf.json → windows[0]).
+/// PTY events are emitted TO this window (not globally) so a session's terminal
+/// bytes can never leak into another window if the app ever grows multi-window;
+/// today it is single-window, so a global emit would be equivalent — this just
+/// makes the scoping explicit and future-proof.
+const MAIN_WINDOW_LABEL: &str = "main";
+
+/// Start the background thread that drains a session's PTY output. Each chunk is
+/// base64'd into a `pty://output` event (targeted at the owning window) and its
+/// length added to the session's out-byte counter (redacted audit signal). On
+/// EOF/read-error it reaps the child (`mark_exited`), emits `pty://exit`, and
+/// appends the ONE settle audit line — vendor + cwd + byte counts + ending, NEVER
+/// buffer content.
+fn spawn_pty_reader(app: AppHandle, session_id: String, mut reader: Box<dyn Read + Send>) {
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break, // EOF — the child's slave closed (it exited)
+                Ok(n) => {
+                    let data_b64 = pty::base64_encode(&buf[..n]);
+                    let payload = PtyOutputEvent { session_id: session_id.clone(), data_b64 };
+                    // Target the owning window; fall back to a global emit only if
+                    // that window can't be found (edge/headless cases).
+                    if app.emit_to(MAIN_WINDOW_LABEL, "pty://output", payload.clone()).is_err() {
+                        let _ = app.emit("pty://output", payload);
+                    }
+                    if let Some(state) = app.try_state::<pty::PtyHostState>() {
+                        state.note_output(&session_id, n);
+                    }
+                }
+                Err(_) => break, // read error → treat as end-of-session
+            }
+        }
+        // Reap + transition + report. mark_exited returns the final code, the
+        // redacted summary, and whether the session was user-killed.
+        let (code, summary) = match app.try_state::<pty::PtyHostState>() {
+            Some(state) => match state.mark_exited(&session_id) {
+                Some((code, summary, killed)) => {
+                    let payload = PtyExitEvent { session_id: session_id.clone(), code };
+                    if app.emit_to(MAIN_WINDOW_LABEL, "pty://exit", payload.clone()).is_err() {
+                        let _ = app.emit("pty://exit", payload);
+                    }
+                    let outcome = if killed { "killed" } else { "exited" };
+                    (outcome, summary)
+                }
+                None => return, // session vanished — nothing to report
+            },
+            None => return,
+        };
+        // Settle audit line (best-effort — an audit miss must never crash).
+        if let Some(gov) = app.try_state::<Governance>() {
+            if let Ok(mut gate) = gov.0.lock() {
+                audit_append(&app, &mut gate, "pty.spawn", "-", code, &summary, 0);
+            }
+        }
+    });
+}
+
+/// Open a governed interactive vendor-CLI session in a real PTY. Returns the
+/// host-side session id; output/exit arrive as `pty://output` / `pty://exit`
+/// events. Order is security-critical (see the inline steps): hard-denies +
+/// the cap are checked BEFORE the token is spent so a cap-full or policy-denied
+/// request never burns an approval.
+#[tauri::command]
+fn pty_spawn(
+    app: AppHandle,
+    gov: State<'_, Governance>,
+    state: State<'_, pty::PtyHostState>,
+    token: String,
+    vendor: String,
+    cwd: String,
+    args: Option<Vec<String>>,
+    ts: Option<u64>,
+) -> Result<String, String> {
+    let ts = ts.unwrap_or(0);
+    let vendor = vendor.trim().to_string();
+    let norm_args = pty::normalize_pty_args(args);
+
+    // Shared audit helper for every refusal/error path (best-effort — an audit
+    // miss must never crash a decision, but no path may pass silently).
+    let audit_pty = |outcome: &str, reason: &str| {
+        if let Ok(mut gate) = gov.0.lock() {
+            audit_append(&app, &mut gate, "pty.spawn", "-", outcome, reason, ts);
+        }
+    };
+
+    // ── HARD-DENIES — independent of classify, checked BEFORE the token is spent ──
+    // Defense-in-depth mirror of governance.ts's pty deny block (same shape as
+    // governed_command re-checking is_destructive at its choke point). LOAD-BEARING
+    // in production: createTauriGovernance delegates request() straight to the Rust
+    // gate, so the TS classifyAction never runs there — this choke point is the
+    // real enforcement. A policy deny NEVER touches the token.
+    if vendor_bin(&vendor).is_none() {
+        audit_pty("deny", "unknown PTY vendor blocked");
+        return Err(format!("unknown PTY vendor: {vendor}"));
+    }
+    if let Some(flag) = has_dangerous_pty_flag(norm_args.as_deref().unwrap_or(&[])) {
+        audit_pty("deny", &format!("dangerous PTY flag blocked: {flag}"));
+        return Err("dangerous PTY flag blocked (permission-skip / config-inject)".into());
+    }
+    if sandbox::is_sensitive_dir(&cwd) {
+        audit_pty("deny", "PTY cwd in a system/secrets directory blocked");
+        return Err("PTY cwd in a system/secrets directory blocked".into());
+    }
+
+    // (b) HOST-AUTHORITATIVE cap — BEFORE the token is spent, so a full host never
+    //     burns an approval it can't honour (the TS pre-check is only a UI
+    //     throttle). No token is touched on this path.
+    if let Err(e) = pty::admission_check(state.running_count()) {
+        audit_pty("cap-rejected", &e);
+        return Err(e);
+    }
+
+    // (a) Spend the one-time token. The binding mirrors ptySpawnToGate EXACTLY —
+    //     `args` present ONLY when non-empty (normalize) — so a no-arg approval
+    //     can't be replayed to open an args-full session (confused-deputy on args).
+    let detail = ActionDetail {
+        vendor: Some(vendor.clone()),
+        cwd: Some(cwd.clone()),
+        args: norm_args.clone(),
+        ..Default::default()
+    };
+    let binding = detail.binding("pty.spawn");
+    {
+        let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+        if !try_consume_token(&mut gate, &token, "pty.spawn", &binding) {
+            audit_append(&app, &mut gate, "pty.spawn", "-", "replay-rejected", "pty.spawn", ts);
+            return Err("invalid or already-spent token".into());
+        }
+    }
+
+    // (c) Resolve the vendor binary — a KNOWN vendor (asserted above), found on
+    //     PATH or a neutral prefix (never a token/config dir). "Not installed" is
+    //     an availability error (audited), distinct from the unknown-vendor deny.
+    let bin = vendor_bin(&vendor).expect("vendor known — checked before token spend");
+    let bin_path = match find_on_path(bin)
+        .or_else(|| neutral_prefixes(&app, &vendor, bin).into_iter().find(|p| p.is_file()))
+    {
+        Some(p) => p,
+        None => {
+            audit_pty("error", "pty: vendor binary not found");
+            return Err(format!("{bin} CLI not found on PATH or a neutral install prefix"));
+        }
+    };
+
+    // (d) cwd must realpath-resolve INSIDE the command allowlist (the same list
+    //     command.run uses) — rejects a relative / escaping / outside dir.
+    let cwd_path = PathBuf::from(&cwd);
+    if !workdir_allowed(&cwd_path, &command_allowlist(&app)) {
+        audit_pty("error", "pty: cwd not in allowlist");
+        return Err("working directory is not in the allowlist".into());
+    }
+
+    // (e) Vendor-profile sandbox (pty::pty_policy — wider than default_policy:
+    //     network ON + write to the vendor state dir). resolve → validate → wrap,
+    //     FAIL-CLOSED: a resolution/validation failure or missing launcher refuses
+    //     the run (a vendor CLI is never spawned bare/unsandboxed).
+    let home = match app.path().home_dir() {
+        Ok(h) => h,
+        Err(e) => {
+            audit_pty("error", "pty: home dir unresolved");
+            return Err(e.to_string());
+        }
+    };
+    let vendor_dir = pty::vendor_state_dir(&vendor, &home);
+    let mut policy = pty::pty_policy(&cwd_path, vendor_dir.as_deref());
+    // The approved binary may live at a neutral prefix OUTSIDE the system read set
+    // (~/.local/bin, ~/.bun/bin, ~/.cargo/bin). Grant read on JUST its parent dir
+    // so the sandbox can exec it — process-exec needs file-read on the binary
+    // path; without this a CLI installed under $HOME could not launch.
+    if let Some(parent) = bin_path.parent() {
+        policy.read_roots.push(parent.to_path_buf());
+    }
+    let resolved = match sandbox::resolve_policy(&policy) {
+        Ok(r) => r,
+        Err(e) => {
+            audit_pty("error", "pty: sandbox policy resolution refused");
+            return Err(e);
+        }
+    };
+    let mut argv = vec![bin_path.to_string_lossy().into_owned()];
+    argv.extend(norm_args.clone().unwrap_or_default());
+    let wrapped = match sandbox::wrap_command(&argv, &resolved) {
+        Ok(w) => w,
+        Err(e) => {
+            audit_pty("error", "pty: sandbox wrap refused");
+            return Err(e);
+        }
+    };
+
+    // Minimal, secret-free env. HOME = the REAL home: the vendor CLI reads its own
+    // $HOME/.claude|.codex for auth/config, and it is the SANDBOX (not a fake
+    // HOME) that actually bounds filesystem access — so a truthful HOME is safe
+    // here and necessary for the CLI to find its state. PATH stays minimal (+ the
+    // binary's own dir so the CLI's siblings resolve); TERM only, no TERM_PROGRAM.
+    let home_str = home.to_string_lossy().into_owned();
+    let mut path_val = String::from("/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin");
+    if let Some(parent) = bin_path.parent() {
+        path_val.push(':');
+        path_val.push_str(&parent.to_string_lossy());
+    }
+    let env = vec![
+        ("HOME".to_string(), home_str),
+        ("PATH".to_string(), path_val),
+        ("TERM".to_string(), "xterm-256color".to_string()),
+    ];
+
+    // (f) Open the PTY (default 80×24) and spawn the sandbox-wrapped vendor argv.
+    let bundle = match pty::open_pty_child(&wrapped, &cwd_path, &env, 80, 24) {
+        Ok(b) => b,
+        Err(e) => {
+            audit_pty("error", "pty: pty open failed");
+            return Err(e);
+        }
+    };
+    let pty::PtyChild { child, master, writer, reader } = bundle;
+
+    let session_id = mint_id("pty", now_ms());
+    let session = pty::Session::new(child, master, writer, vendor.clone(), cwd.clone());
+    // register defensively re-checks the cap (and tears the child down on refusal
+    // so a lost race can't leak a live process) — before the reader thread starts.
+    if let Err(e) = state.register(session_id.clone(), session) {
+        audit_pty("error", &format!("pty: register refused ({e})"));
+        return Err(e);
+    }
+
+    // Background reader: base64 chunks → pty://output, EOF → pty://exit + settle.
+    spawn_pty_reader(app.clone(), session_id.clone(), reader);
+
+    // (g) consumed audit — redacted "pty <vendor> in <cwd>".
+    {
+        let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+        audit_append(&app, &mut gate, "pty.spawn", "-", "consumed", &format!("pty {vendor} in {cwd}"), ts);
+    }
+
+    Ok(session_id)
+}
+
+/// Write user keystrokes into a running session (lifecycle op — no gate; the
+/// session was already approved at open).
+#[tauri::command]
+fn pty_write(state: State<'_, pty::PtyHostState>, session_id: String, data: String) -> Result<(), String> {
+    state.write_input(&session_id, data.as_bytes())
+}
+
+/// Resize the PTY (terminal panel resized).
+#[tauri::command]
+fn pty_resize(state: State<'_, pty::PtyHostState>, session_id: String, cols: u16, rows: u16) -> Result<(), String> {
+    state.resize(&session_id, cols, rows)
+}
+
+/// Terminate the session (safe direction — stopping needs no approval).
+#[tauri::command]
+fn pty_kill(state: State<'_, pty::PtyHostState>, session_id: String) -> Result<(), String> {
+    state.kill(&session_id)
 }
 
 // ── MCP client — stdio JSON-RPC 2.0, spawned + framed HERE in the host ─────────
@@ -2229,6 +2612,126 @@ mod governance_tests {
         assert_ne!(cont.binding("pty.spawn"), no_args.binding("pty.spawn"));
     }
 
+    // ── R6 Lane-B real-PTY host: classify + the args-bound token guard ──
+
+    #[test]
+    fn classify_pty_spawn_is_known_require_approval() {
+        // pty.spawn must be an EXPLICIT known side-effecting kind, not fall through
+        // to the unknown/fail-closed branch (it still requires approval either way,
+        // but the reason must reflect that we reasoned about it).
+        let (decision, reason) = classify("pty.spawn", &[], None);
+        assert_eq!(decision, "require-approval");
+        assert_eq!(reason, "side-effecting action");
+        assert_ne!(reason, "unknown action (fail-closed)");
+    }
+
+    #[test]
+    fn pty_empty_args_binds_like_no_args() {
+        // The host normalizes Some([]) → None before rebuilding the binding, so an
+        // empty-args spawn consumes a token minted for a no-arg (args-omitted)
+        // session — matching ptySpawnToGate, which omits empty args from the gate.
+        let no_args = ActionDetail { vendor: Some("claude".into()), cwd: Some("/Users/me/p".into()), ..Default::default() };
+        let empty_norm = ActionDetail {
+            vendor: Some("claude".into()),
+            cwd: Some("/Users/me/p".into()),
+            args: pty::normalize_pty_args(Some(vec![])),
+            ..Default::default()
+        };
+        assert_eq!(no_args.binding("pty.spawn"), empty_norm.binding("pty.spawn"));
+    }
+
+    #[test]
+    fn pty_no_arg_token_cannot_open_an_args_full_session() {
+        // Mint a token for a NO-ARG claude session (args omitted → null in binding).
+        let no_args = ActionDetail { vendor: Some("claude".into()), cwd: Some("/Users/me/p".into()), ..Default::default() };
+        let binding = no_args.binding("pty.spawn");
+        let mut gate = GateState::default();
+        seed_token(&mut gate, "tok-pty", "pty.spawn", &binding);
+
+        // An args-FULL spawn (`claude --continue`) must NOT consume it — different
+        // binding (confused-deputy on args is refused). The token stays intact.
+        let args_full = ActionDetail {
+            vendor: Some("claude".into()),
+            cwd: Some("/Users/me/p".into()),
+            args: Some(vec!["--continue".into()]),
+            ..Default::default()
+        };
+        assert!(!try_consume_token(&mut gate, "tok-pty", "pty.spawn", &args_full.binding("pty.spawn")));
+
+        // The exact no-arg binding still consumes it — once (one-time).
+        assert!(try_consume_token(&mut gate, "tok-pty", "pty.spawn", &binding));
+        assert!(!try_consume_token(&mut gate, "tok-pty", "pty.spawn", &binding));
+    }
+
+    #[test]
+    fn has_dangerous_pty_flag_matches_ts_denylist_byte_for_byte() {
+        // Every arg the TS DANGEROUS_PTY_FLAGS regexes flag (incl. the `=`-adjacent
+        // form and the optional-hyphen `--allowed-?tools`), case-insensitively and
+        // after trim. Kept in lockstep with governance.ts.
+        for danger in [
+            "--dangerously-skip-permissions",
+            "--dangerously-skip",
+            "--dangerouslyanything",
+            "--DANGEROUSLY-skip", // case-insensitive
+            "--mcp-config",
+            "--mcp-config=evil.json", // = boundary
+            "--mcp-config-x",         // - boundary
+            "--mcp-server",
+            "--mcp-server=x",
+            "--permission-mode",
+            "--permission-mode=bypassPermissions",
+            "--allowed-tools",
+            "--allowedtools", // optional hyphen
+            "--allowed-tools=Bash",
+            "--yolo",
+            "--yolo=1",
+            " --YOLO ",        // trimmed + case-folded
+            "\u{feff}--yolo",  // BOM-prefixed (JS .trim strips U+FEFF too)
+        ] {
+            assert!(
+                has_dangerous_pty_flag(&[danger.to_string()]).is_some(),
+                "must flag {danger:?}"
+            );
+        }
+        // Clean flags that must NOT be flagged — the `\b` must not over-match.
+        for clean in [
+            "--continue",
+            "--resume",
+            "--model",
+            "sonnet",
+            "--mcp",                 // not a full flag
+            "--mcp-configuration",   // word char after "config" → no boundary
+            "--allowed",             // no "tools"
+            "--allowed-toolset",     // word char after "tools"
+            "--permission",          // no "-mode"
+            "--yoloxyz",             // word char after "yolo"
+        ] {
+            assert!(
+                has_dangerous_pty_flag(&[clean.to_string()]).is_none(),
+                "must NOT flag {clean:?}"
+            );
+        }
+        // A dangerous flag anywhere in the arg list is caught.
+        assert!(has_dangerous_pty_flag(&["--continue".into(), "--yolo".into()]).is_some());
+    }
+
+    #[test]
+    fn classify_pty_spawn_hard_denies_dangerous_flag_and_sensitive_cwd() {
+        // For pty.spawn the caller passes ARGS as argv and CWD as path (see
+        // request_action) — a dangerous flag or a system/secrets cwd is a DENY,
+        // never even surfaced to the native approval dialog.
+        assert_eq!(
+            classify("pty.spawn", &["--mcp-config=evil.json".to_string()], Some("/Users/me/p")).0,
+            "deny"
+        );
+        assert_eq!(classify("pty.spawn", &[], Some("/Users/me/.ssh")).0, "deny");
+        assert_eq!(classify("pty.spawn", &[], Some("/etc")).0, "deny");
+        // A clean, non-sensitive session still requires approval (not auto-allow).
+        let (d, r) = classify("pty.spawn", &["--continue".to_string()], Some("/Users/me/proj"));
+        assert_eq!(d, "require-approval");
+        assert_eq!(r, "side-effecting action");
+    }
+
     #[test]
     fn dialog_text_shows_url_and_args_not_the_summary() {
         let nav = ActionDetail {
@@ -2258,6 +2761,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init()) // S-012 native approval dialog
         .manage(Governance(Mutex::new(GateState::default())))
+        .manage(pty::PtyHostState::default()) // R6 Lane-B real-PTY session registry
         .invoke_handler(tauri::generate_handler![
             secure_store_get,
             secure_store_set,
@@ -2275,12 +2779,26 @@ pub fn run() {
             settle_action,
             audit_recent,
             governed_command,
+            pty_spawn,
+            pty_write,
+            pty_resize,
+            pty_kill,
             mcp_list_servers,
             mcp_add_server,
             mcp_remove_server,
             mcp_list_tools,
             mcp_call_tool
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running the Braavolabs desktop application");
+        .build(tauri::generate_context!())
+        .expect("error while building the Braavolabs desktop application")
+        .run(|app_handle, event| {
+            // App-shutdown hook: kill any live PTY sessions so a vendor CLI child
+            // can't outlive the app (macOS sandbox-exec has no --die-with-parent).
+            // ExitRequested fires when the last window closes / quit is requested.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                if let Some(state) = app_handle.try_state::<pty::PtyHostState>() {
+                    state.kill_all();
+                }
+            }
+        });
 }

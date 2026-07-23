@@ -138,8 +138,10 @@ const HOME_CONTAINERS: &[&str] = &["users", "home"];
 
 /// pty/write sensitive-dir set (governance.ts `isSensitiveDir`). Narrower than the
 /// read-secret set below: e.g. `.config` alone is fine to WRITE (a project may put
-/// scratch there) but `.config/gcloud` is not.
-fn is_sensitive_dir(cwd: &str) -> bool {
+/// scratch there) but `.config/gcloud` is not. `pub(crate)` so the pty.spawn gate
+/// (lib.rs) reuses the SAME sensitive-cwd rule the sandbox write-root check uses —
+/// one source of truth, no drift between the two enforcement points.
+pub(crate) fn is_sensitive_dir(cwd: &str) -> bool {
     let p = canonicalize_path(cwd).to_lowercase();
     const EXACT: &[&str] = &[
         "/", "/etc", "/var", "/usr", "/bin", "/sbin", "/lib", "/boot", "/dev", "/proc", "/sys",
