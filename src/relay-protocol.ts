@@ -49,18 +49,34 @@ export const MAX_LABEL_LEN = 200;
 export const MAX_CWD_LEN = 1024;
 
 // ─── Redaction ──────────────────────────────────────────────────────────
-// Defense-in-depth backstop, NOT a substitute for the contract never
-// carrying raw secrets in the first place. Three simple, cheap patterns:
+// Defense-in-depth BACKSTOP, NOT the primary guarantee. The primary
+// guarantee is upstream discipline: `output` is bounded (MAX_OUTPUT_B64_LEN)
+// and everything else here is already a short human summary, not a raw
+// secret dump — this contract should never be HANDED a secret in the first
+// place. `redact()` below is the last line of defense for the cases that
+// discipline misses. Three simple, cheap patterns:
 //   - `sk-...` style provider API key prefixes
 //   - `Bearer <opaque>` authorization-header-shaped tokens
-//   - long (>=32 char) opaque alnum/[-_.] runs (JWT/hex-secret shaped)
+//   - long (>=32 char) opaque runs — alnum/[-_.] (JWT/hex-secret shaped) OR
+//     standard base64 alphabet (+, /, = — adversarial review P2-1: the
+//     char class used to OMIT +/=/ , so a standard-base64-encoded secret
+//     containing those characters split into sub-32-char alnum runs at each
+//     `+`/`/` and passed through unredacted; base64url's `-`/`_` were
+//     already covered)
 // This will over-redact some legitimate long identifiers (hashes, commit
 // SHAs) — an acceptable false-positive rate for a mirrored, human-readable
 // audit/approval feed where under-redaction is the far worse failure mode.
+//
+// KNOWN, ACCEPTED GAPS (this is a backstop, not a guarantee — do not try to
+// "fix" these here, tighten the upstream discipline instead):
+//   - a secret SHORTER than 32 chars is not caught by this pattern
+//   - a secret split across multiple `emitOutput()` calls (i.e. dribbled a
+//     few bytes at a time across separate chunks/events) is not caught —
+//     redaction runs per-event, not across a stream
 const SECRET_PATTERNS: RegExp[] = [
   /sk-[A-Za-z0-9_-]{10,}/g,
   /Bearer\s+[A-Za-z0-9._-]{10,}/gi,
-  /(?<![A-Za-z0-9._-])[A-Za-z0-9._-]{32,}(?![A-Za-z0-9._-])/g,
+  /(?<![A-Za-z0-9+\/=._-])[A-Za-z0-9+\/=._-]{32,}(?![A-Za-z0-9+\/=._-])/g,
 ];
 
 export function redact(text: string): string {

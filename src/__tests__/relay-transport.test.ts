@@ -164,3 +164,28 @@ describe("createRelayTransport — subscribeCommands (fetch+SSE)", () => {
     await new Promise((r) => setTimeout(r, 10));
   });
 });
+
+describe("adversarial hardening (P2-2b timeout · P3 multi-line data)", () => {
+  it("parseSseEvent joins MULTIPLE data: lines with \\n (SSE spec) instead of keeping only the last", () => {
+    // A payload split across two data: lines must reassemble, not parse to null.
+    const block = 'id: 1\ndata: {"type":\ndata: "kill"}';
+    expect(parseSseEvent(block)).toEqual({ type: "kill" });
+    // Single-line behaviour is unchanged (one leading space stripped).
+    expect(parseSseEvent('data: {"type":"steer","message":"go"}')).toEqual({ type: "steer", message: "go" });
+  });
+
+  it("register() rejects when apiFetch hangs past the timeout (a slow-loris relay can't freeze the caller)", async () => {
+    vi.useFakeTimers();
+    try {
+      // fetchImpl never resolves → without withTimeout the promise would hang forever.
+      const fetchImpl = vi.fn(() => new Promise(() => {}));
+      const transport = createRelayTransport({ cfg: baseCfg(), fetchImpl: fetchImpl as any });
+      const p = transport.register({ surface: "desktop" });
+      const assertion = expect(p).rejects.toThrow(/timed out/);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

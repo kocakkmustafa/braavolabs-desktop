@@ -28,6 +28,30 @@ import type { SessionEventInput, SessionRegistration } from "./relay-protocol";
 
 type FetchLike = (url: string, init?: any) => Promise<any>;
 
+// A plain relay request (register/postEvent) must not hang forever — a
+// TCP-connected but unresponsive relay (slow-loris) would otherwise leave the
+// promise pending indefinitely. bridgeGovernance already fires the mirror
+// emits fire-and-forget so a hang can't freeze the local gate, but bounding
+// the request here is the defence-in-depth half (frees the promise + lets the
+// caller's .catch run). 10s is generous for a JSON round-trip.
+const RELAY_REQUEST_TIMEOUT_MS = 10_000;
+
+// A single SSE frame is tiny (a bounded ControlCommand). A malicious/hung
+// relay that streams bytes WITHOUT a "\n\n" terminator would otherwise grow
+// the receive buffer to OOM. Past this bound we drop the oversized partial
+// frame (fail-closed) rather than killing the stream.
+const MAX_SSE_BUFFER = 256 * 1024;
+
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`relay ${label} timed out after ${ms}ms`)), ms);
+    p.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
+}
+
 export interface RelayTransportOptions {
   cfg: Config;
   /** Injectable for tests; defaults to global fetch. */
@@ -56,12 +80,18 @@ export function splitSseEvents(buffer: string): { events: string[]; rest: string
  * ignores rather than treating as a command.
  */
 export function parseSseEvent(block: string): unknown | null {
-  let data: string | null = null;
+  // SSE spec: an event may carry MULTIPLE `data:` lines that are joined with
+  // "\n" to form the payload (the old code kept only the last line, which
+  // mis-parsed a multi-line data field to null). Strip exactly one leading
+  // space per line (spec), join, then JSON-decode.
+  const dataLines: string[] = [];
   for (const line of block.split("\n")) {
-    if (line.startsWith("data:")) data = line.slice("data:".length).trim();
+    if (line.startsWith("data:")) dataLines.push(line.slice("data:".length).replace(/^ /, ""));
     // "id:"/"event:" lines and ": comment" keepalives are not needed by the
     // command-dispatch path in this slice — ignored on purpose.
   }
+  if (dataLines.length === 0) return null;
+  const data = dataLines.join("\n").trim();
   if (!data) return null;
   try {
     return JSON.parse(data);
@@ -78,24 +108,32 @@ export function createRelayTransport(opts: RelayTransportOptions): RelayTranspor
 
   return {
     async register(reg: SessionRegistration) {
-      const res = await apiFetch("/relay/sessions", {
-        method: "POST",
-        body: reg,
-        cfg,
-        fetchImpl: opts.fetchImpl,
-        save: opts.save,
-      });
+      const res = await withTimeout(
+        apiFetch("/relay/sessions", {
+          method: "POST",
+          body: reg,
+          cfg,
+          fetchImpl: opts.fetchImpl,
+          save: opts.save,
+        }),
+        RELAY_REQUEST_TIMEOUT_MS,
+        "register",
+      );
       return { sessionId: String(res?.sessionId ?? "") };
     },
 
     async postEvent(sessionId: string, ev: SessionEventInput) {
-      await apiFetch(`/relay/sessions/${encodeURIComponent(sessionId)}/events`, {
-        method: "POST",
-        body: ev,
-        cfg,
-        fetchImpl: opts.fetchImpl,
-        save: opts.save,
-      });
+      await withTimeout(
+        apiFetch(`/relay/sessions/${encodeURIComponent(sessionId)}/events`, {
+          method: "POST",
+          body: ev,
+          cfg,
+          fetchImpl: opts.fetchImpl,
+          save: opts.save,
+        }),
+        RELAY_REQUEST_TIMEOUT_MS,
+        "postEvent",
+      );
     },
 
     subscribeCommands(sessionId: string, onCmd: (raw: unknown) => void) {
@@ -125,7 +163,9 @@ export function createRelayTransport(opts: RelayTransportOptions): RelayTranspor
             if (done) break;
             buffer += decoder.decode(value, { stream: true });
             const { events, rest } = splitSseEvents(buffer);
-            buffer = rest;
+            // Drop an oversized partial frame (a relay flooding without a
+            // "\n\n" terminator) rather than growing the buffer to OOM.
+            buffer = rest.length > MAX_SSE_BUFFER ? "" : rest;
             for (const block of events) {
               const payload = parseSseEvent(block);
               if (payload !== null) onCmd(payload);

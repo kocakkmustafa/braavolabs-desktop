@@ -236,6 +236,18 @@ function toBase64(s: string): string {
  * `handlers.onApprove`/`onReject` (see BridgeHandlers), and THAT wiring
  * (headed, out of this slice) is what calls `gov.approve`/`gov.reject` —
  * using the race-safe `resolveApproval`/`resolveRejection` helpers below.
+ *
+ * FIRE-AND-FORGET MIRROR (adversarial review P2-2): `request()`/`settle()`
+ * do NOT await the relay emit — the companion mirror is observability, not
+ * part of the LOCAL governance decision. A relay that is TCP-connected but
+ * never answers (the AbortController timeout in relay-transport.ts only
+ * fires after its own bound) must not freeze every governed action in the
+ * app behind a network round-trip that has nothing to do with whether the
+ * action itself may proceed. Both emits are wrapped in `.catch(() => {})`
+ * on top of RelayBridge's own internal swallow (defense-in-depth against a
+ * synchronous throw before that internal try/catch is reached) — a lost
+ * mirror event is an acceptable, silent degradation; a frozen approval gate
+ * is not.
  */
 export function bridgeGovernance(gov: Governance, bridge: RelayBridge): Governance {
   return {
@@ -243,18 +255,16 @@ export function bridgeGovernance(gov: Governance, bridge: RelayBridge): Governan
     async request(kind, detail) {
       const result = await gov.request(kind, detail);
       if (result.decision === "require-approval") {
-        await bridge.emitApprovalRequest(
-          result.actionId,
-          result.kind,
-          detail?.summary ?? `${kind} requires approval`,
-        );
+        void bridge
+          .emitApprovalRequest(result.actionId, result.kind, detail?.summary ?? `${kind} requires approval`)
+          .catch(() => {});
       }
       return result;
     },
     async settle(kind, outcome, detail) {
       await gov.settle(kind, outcome, detail);
       const suffix = detail?.summary ? ` — ${detail.summary}` : "";
-      await bridge.emitAudit(`${kind}: ${outcome}${suffix}`);
+      void bridge.emitAudit(`${kind}: ${outcome}${suffix}`).catch(() => {});
     },
   };
 }
