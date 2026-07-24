@@ -11,6 +11,9 @@ export type Locale = "en" | "tr";
 type Dict = Record<string, unknown>;
 
 const en: Dict = {
+  titlebar: { settings: "Settings" },
+  surface: { chat: "Chat", code: "Code", codeCrumb: "Code · vendor CLI" },
+  settings: { title: "Settings", close: "esc" },
   app: { name: "Braavolabs", tagline: "Multi-model chat, one workspace." },
   login: {
     title: "Sign in to Braavolabs",
@@ -146,6 +149,9 @@ const en: Dict = {
 };
 
 const tr: Dict = {
+  titlebar: { settings: "Ayarlar" },
+  surface: { chat: "Sohbet", code: "Kod", codeCrumb: "Kod · sağlayıcı CLI" },
+  settings: { title: "Ayarlar", close: "esc" },
   app: { name: "Braavolabs", tagline: "Çok-model sohbet, tek çalışma alanı." },
   login: {
     title: "Braavolabs'a giriş yap",

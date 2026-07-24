@@ -205,10 +205,25 @@ export function renderWorkspace(deps: UiDeps): void {
 
   const shell = el("div", "shell");
 
+  // --- title bar (design v3): traffic lights, mode crumb, Settings ---
+  const titlebar = el("div", "titlebar");
+  const lights = el("div", "tb-lights");
+  lights.append(el("i", "tb-l1"), el("i", "tb-l2"), el("i", "tb-l3"));
+  const crumb = el("span", "tb-crumb mono", t("app.name"));
+  const settingsBtn = el("button", "tb-settings", t("titlebar.settings"));
+  titlebar.append(lights, crumb, el("div", "tb-spacer"), settingsBtn);
+
   // --- left rail ---
   const rail = el("aside", "rail");
   const brand = el("div", "brand");
   brand.append(el("span", "brand-dot"), document.createTextNode(t("app.name")));
+
+  // Surface switch. Chat is the everyday surface; Code is the vendor-CLI
+  // (Lane-B) surface — the same panel that used to live inline in the rail.
+  const seg = el("div", "seg");
+  const segChatBtn = el("button", "seg-btn active", t("surface.chat"));
+  const segCodeBtn = el("button", "seg-btn", t("surface.code"));
+  seg.append(segChatBtn, segCodeBtn);
 
   const connSec = el("div");
   connSec.append(el("div", "rail-section-label", t("rail.connection")));
@@ -216,12 +231,20 @@ export function renderWorkspace(deps: UiDeps): void {
   conn.append(el("span", "conn-dot"), document.createTextNode(t("rail.connected")));
   connSec.append(conn);
 
-  const newChatBtn = el("button", "rail-btn", t("rail.newChat"));
+  const newChatBtn = el("button", "rail-btn primary", t("rail.newChat"));
   const memoryBtn = el("button", "rail-btn", t("rail.memory"));
 
+  // Configuration moved out of the rail and into Settings (design v3): the
+  // rail is for what you're working on, Settings for how the app is wired.
   const keysSec = renderKeysSection(deps);
   const laneBSec = renderLaneBSection(deps);
   const mcpSec = renderMcpSection(deps);
+
+  // Lane-B lives in the Code surface, so it is moved (not copied) out of the
+  // settings sheet — one instance, one source of truth for its state.
+  const codePane = el("div", "code-pane");
+  codePane.style.display = "none";
+  codePane.append(laneBSec);
 
   const spacer = el("div", "rail-spacer");
 
@@ -233,7 +256,7 @@ export function renderWorkspace(deps: UiDeps): void {
 
   const signOutBtn = el("button", "rail-btn", t("rail.signOut"));
 
-  rail.append(brand, connSec, newChatBtn, memoryBtn, keysSec, laneBSec, mcpSec, spacer, savingsCard, signOutBtn);
+  rail.append(brand, seg, newChatBtn, memoryBtn, connSec, spacer, savingsCard, signOutBtn);
 
   // --- center chat ---
   const chat = el("div", "chat");
@@ -311,8 +334,58 @@ export function renderWorkspace(deps: UiDeps): void {
   activityBody.style.display = "none";
   inspector.append(inspTabs, inspectorBody, activityBody);
 
+  chat.append(codePane);
+
   shell.append(rail, chat, inspector);
-  root.append(shell);
+  const win = el("div", "win");
+  win.append(titlebar, shell);
+  root.append(win);
+
+  // --- settings sheet (design v3) ---
+  // One modal for everything configurable: keys, MCP servers, governance
+  // policy. Opened from the title bar, dismissed with Esc / backdrop click.
+  let settingsOpen = false;
+  const backdrop = el("div", "sheet-backdrop");
+  backdrop.style.display = "none";
+  const sheet = el("div", "sheet");
+  const sheetHead = el("div", "sheet-head");
+  sheetHead.append(el("b", "sheet-title", t("settings.title")), el("div", "tb-spacer"));
+  const sheetClose = el("button", "sheet-close mono", t("settings.close"));
+  sheetHead.append(sheetClose);
+  const sheetBody = el("div", "sheet-body");
+  sheetBody.append(keysSec, mcpSec);
+  sheet.append(sheetHead, sheetBody);
+  backdrop.append(sheet);
+  root.append(backdrop);
+
+  const setSettings = (open: boolean) => {
+    settingsOpen = open;
+    backdrop.style.display = open ? "flex" : "none";
+  };
+  settingsBtn.addEventListener("click", () => setSettings(true));
+  sheetClose.addEventListener("click", () => setSettings(false));
+  backdrop.addEventListener("click", (e) => {
+    if (e.target === backdrop) setSettings(false);
+  });
+  // Sheet-local Esc handler; registered once per workspace render.
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && settingsOpen) setSettings(false);
+  });
+
+  // --- surface switch ---
+  let surface: "chat" | "code" = "chat";
+  const applySurface = (s: "chat" | "code") => {
+    surface = s;
+    segChatBtn.classList.toggle("active", s === "chat");
+    segCodeBtn.classList.toggle("active", s === "code");
+    scroll.style.display = s === "chat" ? "" : "none";
+    composer.style.display = s === "chat" ? "" : "none";
+    codePane.style.display = s === "code" ? "" : "none";
+    crumb.textContent = s === "chat" ? t("app.name") : t("surface.codeCrumb");
+  };
+  segChatBtn.addEventListener("click", () => applySurface("chat"));
+  segCodeBtn.addEventListener("click", () => applySurface("code"));
+  applySurface(surface);
 
   // --- governance activity view (policy visibility + audit ledger) ---
   let activeTab: "detail" | "activity" = "detail";
