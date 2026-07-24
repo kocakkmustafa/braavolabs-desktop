@@ -1252,3 +1252,92 @@ textarea {
   flex-direction: column;
   gap: 20px;
 }
+
+/* ── design v3: sessions list + account row + composer chips ───────────── */
+
+.sessions-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 2px;
+  overflow-y: auto;
+  max-height: 38vh;
+}
+.session-item {
+  display: flex;
+  align-items: center;
+  text-align: left;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--muted, #8b93a7);
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  padding: 6px 8px;
+  cursor: pointer;
+  width: 100%;
+}
+.session-item:hover {
+  background: #10131a;
+}
+.session-item.active {
+  background: #131722;
+  color: #e8eaf0;
+}
+.session-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.account-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid #14171f;
+  padding-top: 10px;
+  margin-top: 2px;
+  min-width: 0;
+}
+.account-avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #12151d;
+  border: 1px solid #232a3a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: #7dd3fc;
+  flex: none;
+}
+.account-meta {
+  flex: 1;
+  min-width: 0;
+}
+.account-email {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.account-sub {
+  font-size: 10px;
+  color: #8b93a7;
+}
+
+/* Composer as chips (design v3): pill lane buttons, pill send, ⇧⏎ hint. */
+.mode-toggle button {
+  border-radius: 999px;
+}
+.enter-hint {
+  font-size: 10px;
+  color: #8b93a7;
+  white-space: nowrap;
+  align-self: center;
+  flex: none;
+}
+.send-btn {
+  border-radius: 999px;
+}

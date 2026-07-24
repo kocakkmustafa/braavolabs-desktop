@@ -63,6 +63,12 @@ import {
   McpGateError,
 } from "./mcp";
 import type { Translator } from "./i18n";
+import {
+  resolveSessionStore,
+  groupSessions,
+  type ChatSession,
+  type SessionRole,
+} from "./sessions";
 
 export interface UiDeps {
   root: HTMLElement;
@@ -157,6 +163,13 @@ export function renderLogin(deps: UiDeps): void {
       cfg.token = res.data.token;
       cfg.refreshToken = res.data.refreshToken;
       await deps.persist(cfg);
+      // Email is identity, not a secret — localStorage (not the secure store)
+      // so the account row can show who is signed in.
+      try {
+        globalThis.localStorage?.setItem("bv.account.email", emailInput.value.trim());
+      } catch {
+        /* webview without storage — the account row just stays generic */
+      }
       renderWorkspace(deps);
     } finally {
       btn.disabled = false;
@@ -234,6 +247,12 @@ export function renderWorkspace(deps: UiDeps): void {
   const newChatBtn = el("button", "rail-btn primary", t("rail.newChat"));
   const memoryBtn = el("button", "rail-btn", t("rail.memory"));
 
+  // Chat sessions (design v3 TODAY / EARLIER). List + switching live here;
+  // the store itself is the pure, tested module in sessions.ts.
+  const sessionStore = resolveSessionStore();
+  let activeSession: ChatSession | null = null;
+  const sessionsSec = el("div", "sessions-sec");
+
   // Configuration moved out of the rail and into Settings (design v3): the
   // rail is for what you're working on, Settings for how the app is wired.
   const keysSec = renderKeysSection(deps);
@@ -256,7 +275,23 @@ export function renderWorkspace(deps: UiDeps): void {
 
   const signOutBtn = el("button", "rail-btn", t("rail.signOut"));
 
-  rail.append(brand, seg, newChatBtn, memoryBtn, connSec, spacer, savingsCard, signOutBtn);
+  // Account row (design v3 footer): who is signed in + the BYOK badge.
+  let accountEmail = "";
+  try {
+    accountEmail = globalThis.localStorage?.getItem("bv.account.email") ?? "";
+  } catch {
+    /* no storage — generic row */
+  }
+  const account = el("div", "account-row");
+  const avatar = el("div", "account-avatar mono", (accountEmail[0] ?? "•").toUpperCase());
+  const accountMeta = el("div", "account-meta");
+  accountMeta.append(
+    el("div", "account-email", accountEmail || t("app.name")),
+    el("div", "account-sub mono", "BYOK"),
+  );
+  account.append(avatar, accountMeta);
+
+  rail.append(brand, seg, newChatBtn, memoryBtn, sessionsSec, connSec, spacer, savingsCard, account, signOutBtn);
 
   // --- center chat ---
   const chat = el("div", "chat");
@@ -316,8 +351,9 @@ export function renderWorkspace(deps: UiDeps): void {
   const ta = el("textarea") as HTMLTextAreaElement;
   ta.placeholder = t("chat.placeholder");
   const sendBtn = el("button", "send-btn", t("chat.send"));
+  const enterHint = el("span", "enter-hint mono", t("chat.enterHint"));
   const bottomRow = el("div", "composer-row");
-  bottomRow.append(ta, sendBtn);
+  bottomRow.append(ta, enterHint, sendBtn);
 
   composer.append(hint, topRow, bottomRow);
   chat.append(scroll, composer);
@@ -381,7 +417,7 @@ export function renderWorkspace(deps: UiDeps): void {
     scroll.style.display = s === "chat" ? "" : "none";
     composer.style.display = s === "chat" ? "" : "none";
     codePane.style.display = s === "code" ? "" : "none";
-    crumb.textContent = s === "chat" ? t("app.name") : t("surface.codeCrumb");
+    crumb.textContent = s === "chat" ? activeSession?.title || t("app.name") : t("surface.codeCrumb");
   };
   segChatBtn.addEventListener("click", () => applySurface("chat"));
   segCodeBtn.addEventListener("click", () => applySurface("code"));
@@ -434,6 +470,71 @@ export function renderWorkspace(deps: UiDeps): void {
   // --- behavior ---
   const scrollToEnd = () => (scroll.scrollTop = scroll.scrollHeight);
 
+  // --- chat sessions: list, switch, record ---
+  const sessionItem = (s: ChatSession): HTMLElement => {
+    const item = el("button", "session-item");
+    if (activeSession?.id === s.id) item.classList.add("active");
+    item.append(el("span", "session-title", s.title || t("sessions.untitled")));
+    item.addEventListener("click", () => loadSession(s.id));
+    return item;
+  };
+
+  const refreshSessionList = () => {
+    sessionsSec.replaceChildren();
+    const { today, earlier } = groupSessions(sessionStore.list(), Date.now());
+    if (today.length) {
+      sessionsSec.append(el("div", "rail-section-label", t("sessions.today")));
+      for (const s of today) sessionsSec.append(sessionItem(s));
+    }
+    if (earlier.length) {
+      sessionsSec.append(el("div", "rail-section-label", t("sessions.earlier")));
+      for (const s of earlier) sessionsSec.append(sessionItem(s));
+    }
+  };
+
+  const syncCrumb = () => {
+    if (surface !== "chat") return;
+    crumb.textContent = activeSession?.title || t("app.name");
+  };
+
+  // Replays a stored transcript as plain lines — deliberately NOT the rich
+  // cascade/compare cards (their payloads aren't persisted; see sessions.ts).
+  // All text lands via el()/textContent, never markup.
+  const loadSession = (id: string) => {
+    const s = sessionStore.get(id);
+    if (!s) return;
+    activeSession = s;
+    scroll.replaceChildren();
+    for (const e of s.entries) {
+      if (e.role === "user") scroll.append(el("div", "msg-user", e.text));
+      else if (e.role === "assistant") renderPlainAnswer(scroll, e.text, t);
+      else renderErrorCard(scroll, e.text);
+    }
+    refreshSessionList();
+    syncCrumb();
+    scrollToEnd();
+  };
+
+  const startNewSession = () => {
+    activeSession = null; // created lazily on first send, so empty chats don't pile up
+    scroll.replaceChildren();
+    inspectorBody.replaceChildren(el("div", "inspector-empty", t("inspector.empty")));
+    refreshSessionList();
+    syncCrumb();
+    ta.focus();
+  };
+  newChatBtn.addEventListener("click", startNewSession);
+
+  const record = (role: SessionRole, text: string) => {
+    if (!text) return;
+    if (!activeSession) activeSession = sessionStore.create();
+    const before = activeSession.title;
+    activeSession =
+      sessionStore.append(activeSession.id, { role, mode, text, at: Date.now() }) ?? activeSession;
+    if (activeSession.title !== before) syncCrumb();
+    refreshSessionList();
+  };
+
   const refreshSavings = async () => {
     try {
       const raw = await savingsCall(cfg, { days: 30 });
@@ -466,6 +567,7 @@ export function renderWorkspace(deps: UiDeps): void {
     const userMsg = el("div", "msg-user", text);
     scroll.append(userMsg);
     scrollToEnd();
+    record("user", text);
 
     try {
       if (mode === "cascade") {
@@ -478,6 +580,7 @@ export function renderWorkspace(deps: UiDeps): void {
         const view = toCascadeView(raw);
         renderCascadeAnswer(scroll, view, t);
         renderCascadeInspector(inspectorBody, view, t);
+        record("assistant", view.answer);
       } else if (mode === "local") {
         // Lane-A local — governed (auto-allow), keyless, offline. Even an
         // auto-allowed action is audited so the ledger is a complete record.
@@ -497,6 +600,7 @@ export function renderWorkspace(deps: UiDeps): void {
             thinking.remove();
             renderPlainAnswer(scroll, res.content, t);
             renderSourceInspector(inspectorBody, t("chat.localSource"), res.model, t);
+            record("assistant", res.content);
             await deps.gov.settle("local.dispatch", "success", localDetail);
           } catch (e) {
             thinking.remove();
@@ -544,6 +648,7 @@ export function renderWorkspace(deps: UiDeps): void {
                 thinking.remove();
                 renderPlainAnswer(scroll, res.content, t);
                 renderSourceInspector(inspectorBody, t("chat.directSource", { provider }), res.model, t);
+                record("assistant", res.content);
                 await deps.gov.settle("direct.dispatch", "success", directDetail);
               } catch (e) {
                 thinking.remove();
@@ -575,10 +680,12 @@ export function renderWorkspace(deps: UiDeps): void {
         const view = toCompareView(session);
         renderCompareAnswer(scroll, view, t);
         renderCompareInspector(inspectorBody, view, t);
+        record("assistant", view.finalAnswer || view.synthesis || view.error || view.status);
       }
       void refreshSavings();
     } catch (e) {
       const msg = e instanceof ApiError ? `${e.status} · ${e.message}` : String(e);
+      record("error", msg);
       const errCard = el("div", "msg-final");
       errCard.style.borderLeftColor = "var(--molten)";
       errCard.append(el("div", "msg-label", "error"), document.createTextNode(msg));
@@ -591,15 +698,12 @@ export function renderWorkspace(deps: UiDeps): void {
 
   sendBtn.addEventListener("click", () => void run());
   ta.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+    // Design v3: Enter sends, Shift+Enter inserts a newline (Cmd/Ctrl+Enter
+    // kept for muscle memory from the previous build).
+    if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       void run();
     }
-  });
-  newChatBtn.addEventListener("click", () => {
-    scroll.innerHTML = "";
-    inspectorBody.innerHTML = "";
-    inspectorBody.append(el("div", "inspector-empty", t("inspector.empty")));
   });
   // Thin wiring only — the revoke-then-clear logic + its ordering/gate
   // invariants live in the unit-tested performSignOut (session.ts), which is
@@ -607,6 +711,7 @@ export function renderWorkspace(deps: UiDeps): void {
   signOutBtn.addEventListener("click", () => performSignOut(cfg, deps));
 
   void refreshSavings();
+  refreshSessionList();
 }
 
 // ── answer renderers (center) ───────────────────────────────────────────────

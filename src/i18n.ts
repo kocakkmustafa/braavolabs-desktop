@@ -12,6 +12,7 @@ type Dict = Record<string, unknown>;
 
 const en: Dict = {
   titlebar: { settings: "Settings" },
+  sessions: { today: "Today", earlier: "Earlier", untitled: "New chat" },
   surface: { chat: "Chat", code: "Code", codeCrumb: "Code · vendor CLI" },
   settings: { title: "Settings", close: "esc" },
   app: { name: "Braavolabs", tagline: "Multi-model chat, one workspace." },
@@ -81,6 +82,7 @@ const en: Dict = {
   chat: {
     placeholder: "Ask across your models…",
     send: "Send",
+    enterHint: "⇧⏎ newline",
     modeCompare: "Compare",
     modeCascade: "Cascade",
     modeLocal: "Local",
@@ -150,6 +152,7 @@ const en: Dict = {
 
 const tr: Dict = {
   titlebar: { settings: "Ayarlar" },
+  sessions: { today: "Bugün", earlier: "Daha önce", untitled: "Yeni sohbet" },
   surface: { chat: "Sohbet", code: "Kod", codeCrumb: "Kod · sağlayıcı CLI" },
   settings: { title: "Ayarlar", close: "esc" },
   app: { name: "Braavolabs", tagline: "Çok-model sohbet, tek çalışma alanı." },
@@ -219,6 +222,7 @@ const tr: Dict = {
   chat: {
     placeholder: "Modellerine sor…",
     send: "Gönder",
+    enterHint: "⇧⏎ yeni satır",
     modeCompare: "Karşılaştır",
     modeCascade: "Kademeli",
     modeLocal: "Yerel",
