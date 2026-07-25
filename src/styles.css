@@ -1341,3 +1341,166 @@ textarea {
 .send-btn {
   border-radius: 999px;
 }
+
+/* ── design v3: settings IA + kill switch + reduced motion ─────────────── */
+
+.sheet-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 0 4px;
+  border-bottom: 1px solid #14171f;
+}
+.sheet-sec:last-child {
+  border-bottom: none;
+}
+.sheet-sec-label {
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  color: var(--muted, #8b93a7);
+}
+.set-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 2px;
+}
+.set-meta {
+  flex: 1;
+  min-width: 0;
+}
+.set-title {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+}
+.set-sub {
+  font-size: 12px;
+  color: #69718a;
+}
+.set-btn {
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted, #8b93a7);
+  background: transparent;
+  border: 1px solid #232a3a;
+  border-radius: 999px;
+  padding: 5px 13px;
+  cursor: pointer;
+  flex: none;
+}
+.set-btn:hover {
+  color: #7dd3fc;
+  border-color: var(--arc, #3b82f6);
+}
+.policy-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 18px;
+  padding: 2px 2px 8px;
+}
+.policy-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+.policy-kind {
+  font-size: 11px;
+  color: var(--muted, #8b93a7);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chip-ask {
+  border-color: rgba(255, 122, 26, 0.5);
+  color: var(--ember, #ff7a1a);
+}
+.kill-btn {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--molten, #ff4d4d);
+  background: transparent;
+  border: 1px solid rgba(255, 77, 77, 0.4);
+  border-radius: 999px;
+  padding: 5px 14px;
+  cursor: pointer;
+  flex: none;
+}
+.kill-btn:hover {
+  border-color: var(--molten, #ff4d4d);
+  background: rgba(255, 77, 77, 0.08);
+}
+.kill-card {
+  border-color: rgba(255, 77, 77, 0.45);
+}
+.kill-scope {
+  font-size: 11.5px;
+  line-height: 1.9;
+  color: #c9cfda;
+  background: #07080c;
+  border: 1px solid #1a1e28;
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-top: 10px;
+  text-align: left;
+}
+.kill-scope-note {
+  color: #69718a;
+  margin-top: 6px;
+}
+.kill-confirm {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(135deg, #d43a3a, #ff4d4d);
+  border: none;
+  border-radius: 999px;
+  padding: 9px 20px;
+  cursor: pointer;
+}
+.kill-confirm:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.toggle {
+  width: 34px;
+  height: 20px;
+  border-radius: 999px;
+  background: #232a3a;
+  border: none;
+  position: relative;
+  cursor: pointer;
+  flex: none;
+  transition: background 0.2s;
+}
+.toggle::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #5a6175;
+  transition: transform 0.2s, background 0.2s;
+}
+.toggle.on {
+  background: var(--arc, #3b82f6);
+}
+.toggle.on::after {
+  transform: translateX(14px);
+  background: #fff;
+}
+
+/* App-level reduced motion: the toggle (or the OS) kills every animation. */
+.reduce-motion *,
+.reduce-motion *::before,
+.reduce-motion *::after {
+  animation-duration: 0.01s !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01s !important;
+}

@@ -69,6 +69,58 @@ import {
   type ChatSession,
   type SessionRole,
 } from "./sessions";
+import {
+  resolvePrefs,
+  applyReducedMotion,
+  effectiveReducedMotion,
+} from "./prefs";
+
+/**
+ * Kill switch registry: every open approval modal registers its fail-closed
+ * closer here so "Kill all…" can reject them without reaching into promises.
+ */
+const openApprovalClosers = new Set<() => void>();
+
+/** OS-level reduced-motion, guarded for non-browser test environments. */
+function osPrefersReducedMotion(): boolean {
+  try {
+    return globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+  } catch {
+    return false;
+  }
+}
+
+function initReducedMotion(): ReturnType<typeof resolvePrefs> {
+  const prefs = resolvePrefs();
+  applyReducedMotion(document.documentElement, effectiveReducedMotion(prefs, osPrefersReducedMotion()));
+  return prefs;
+}
+
+/**
+ * Stop everything this UI can actually reach today — honest scope:
+ * open approval requests (rejected, fail-closed) and the governed browser
+ * connection (host audits the disconnect). PTY/relay sessions are not yet
+ * launchable from this UI, so there is nothing of theirs to stop here; the
+ * scope grows with those surfaces.
+ */
+async function killEverything(): Promise<{ approvals: number; browser: boolean }> {
+  const approvals = openApprovalClosers.size;
+  for (const c of [...openApprovalClosers]) c();
+  let browser = false;
+  try {
+    const g = globalThis as Record<string, any>;
+    const inv = g?.__TAURI__?.core?.invoke as
+      | ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>)
+      | undefined;
+    if (inv) {
+      await inv("browser_disconnect", { ts: Date.now() });
+      browser = true;
+    }
+  } catch {
+    // No live browser connection (or no host in dev) — nothing to stop.
+  }
+  return { approvals, browser };
+}
 
 export interface UiDeps {
   root: HTMLElement;
@@ -104,6 +156,7 @@ const el = <K extends keyof HTMLElementTagNameMap>(
 // ── login view ────────────────────────────────────────────────────────────
 export function renderLogin(deps: UiDeps): void {
   const { root, cfg, t } = deps;
+  initReducedMotion();
   root.innerHTML = "";
   const wrap = el("div", "login-wrap");
   const card = el("div", "login-card");
@@ -213,6 +266,7 @@ function mapLoginErrorText(t: Translator, view: ReturnType<typeof toLoginError>)
 // ── workspace (3-pane) ──────────────────────────────────────────────────────
 export function renderWorkspace(deps: UiDeps): void {
   const { root, cfg, t } = deps;
+  const prefs = initReducedMotion();
   root.innerHTML = "";
   let mode: Mode = "cascade";
 
@@ -389,7 +443,82 @@ export function renderWorkspace(deps: UiDeps): void {
   const sheetClose = el("button", "sheet-close mono", t("settings.close"));
   sheetHead.append(sheetClose);
   const sheetBody = el("div", "sheet-body");
-  sheetBody.append(keysSec, mcpSec);
+
+  // Design-v3 settings IA: four labelled sections. Rows are thin wiring —
+  // anything with behavior delegates to tested modules (vault/mcp/gov/prefs).
+  const setRow = (title: string, sub: string, control?: HTMLElement): HTMLElement => {
+    const row = el("div", "set-row");
+    const meta = el("div", "set-meta");
+    meta.append(el("b", "set-title", title), el("span", "set-sub", sub));
+    row.append(meta);
+    if (control) row.append(control);
+    return row;
+  };
+
+  // MODELS & KEYS — vault + the Lane-B pointer (single source: Code surface).
+  const openCodeBtn = el("button", "set-btn", t("settings.openCode"));
+  openCodeBtn.addEventListener("click", () => {
+    sheetClose.click();
+    segCodeBtn.click();
+  });
+  const secModels = el("div", "sheet-sec");
+  secModels.append(
+    el("div", "sheet-sec-label mono", t("settings.secModels")),
+    keysSec,
+    setRow(t("settings.vendorCli"), t("settings.vendorCliSub"), openCodeBtn),
+  );
+
+  // CONNECTORS & HOSTS — MCP registry + the host-runtime disclosure line.
+  const secConn = el("div", "sheet-sec");
+  secConn.append(
+    el("div", "sheet-sec-label mono", t("settings.secConnectors")),
+    mcpSec,
+    setRow(t("settings.hosts"), t("settings.hostsSub")),
+  );
+
+  // GOVERNANCE — the real per-action policy table (gov.policy(), pure) + kill.
+  const policyList = el("div", "policy-list");
+  for (const row of deps.gov.policy()) {
+    const r = el("div", "policy-row");
+    r.append(el("span", "policy-kind mono", row.kind));
+    const chipCls =
+      row.decision === "auto-allow" ? "chip chip-safe" : row.decision === "deny" ? "chip chip-risk" : "chip chip-ask";
+    const chipText =
+      row.decision === "auto-allow"
+        ? t("settings.policyAuto")
+        : row.decision === "deny"
+          ? t("settings.policyDeny")
+          : t("settings.policyAsk");
+    r.append(el("span", chipCls, chipText));
+    policyList.append(r);
+  }
+  const killBtn = el("button", "kill-btn", t("settings.killBtn"));
+  killBtn.addEventListener("click", () => void showKillDialog(deps));
+  const secGov = el("div", "sheet-sec");
+  secGov.append(
+    el("div", "sheet-sec-label mono", t("settings.secGovernance")),
+    setRow(t("settings.policyTitle"), t("settings.policySub")),
+    policyList,
+    setRow(t("settings.killTitle"), t("settings.killSub"), killBtn),
+  );
+
+  // APP & DATA — a WORKING reduced-motion toggle + the honest telemetry line.
+  const rmToggle = el("button", "toggle");
+  const syncRm = () => rmToggle.classList.toggle("on", prefs.reducedMotion());
+  syncRm();
+  rmToggle.addEventListener("click", () => {
+    prefs.setReducedMotion(!prefs.reducedMotion());
+    applyReducedMotion(document.documentElement, effectiveReducedMotion(prefs, osPrefersReducedMotion()));
+    syncRm();
+  });
+  const secApp = el("div", "sheet-sec");
+  secApp.append(
+    el("div", "sheet-sec-label mono", t("settings.secApp")),
+    setRow(t("settings.reducedMotion"), t("settings.reducedMotionSub"), rmToggle),
+    setRow(t("settings.telemetry"), t("settings.telemetrySub")),
+  );
+
+  sheetBody.append(secModels, secConn, secGov, secApp);
   sheet.append(sheetHead, sheetBody);
   backdrop.append(sheet);
   root.append(backdrop);
@@ -890,9 +1019,12 @@ function showApprovalModal(deps: UiDeps, detail: ActionDetail, reason: string): 
     card.append(btns);
 
     const close = (v: boolean) => {
+      openApprovalClosers.delete(closer);
       overlay.remove();
       resolve(v);
     };
+    const closer = () => close(false);
+    openApprovalClosers.add(closer);
     rejectBtn.addEventListener("click", () => close(false));
     approveBtn.addEventListener("click", () => close(true));
     overlay.addEventListener("click", (e) => {
@@ -902,6 +1034,61 @@ function showApprovalModal(deps: UiDeps, detail: ActionDetail, reason: string): 
     overlay.append(card);
     root.append(overlay);
     approveBtn.focus();
+  });
+}
+
+/**
+ * Two-step kill switch. Step one is the molten button in Settings; THIS dialog
+ * is step two — it lists exactly what will be stopped (honest scope: open
+ * approvals + the governed browser connection; PTY/relay aren't launchable
+ * from this UI yet) and only acts on the explicit confirm. Afterwards it
+ * reports what actually happened instead of claiming "everything".
+ */
+function showKillDialog(deps: UiDeps): Promise<void> {
+  const { t, root } = deps;
+  return new Promise<void>((resolve) => {
+    const overlay = el("div", "approve-overlay");
+    const card = el("div", "approve-card kill-card");
+    card.append(el("h2", "approve-title", t("kill.title")));
+    card.append(el("div", "approve-body", t("kill.body")));
+
+    const scope = el("div", "kill-scope mono");
+    scope.append(
+      el("div", undefined, `• ${t("kill.scopeApprovals")}`),
+      el("div", undefined, `• ${t("kill.scopeBrowser")}`),
+      el("div", "kill-scope-note", t("kill.scopeNote")),
+    );
+    card.append(scope);
+
+    const btns = el("div", "approve-btns");
+    const cancelBtn = el("button", "approve-reject", t("kill.cancel"));
+    const confirmBtn = el("button", "kill-confirm", t("kill.confirm"));
+    btns.append(cancelBtn, confirmBtn);
+    card.append(btns);
+
+    const close = () => {
+      overlay.remove();
+      resolve();
+    };
+    cancelBtn.addEventListener("click", close);
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close();
+    });
+    confirmBtn.addEventListener("click", () => {
+      confirmBtn.disabled = true;
+      void killEverything().then((r) => {
+        scope.replaceChildren(
+          el("div", undefined, `✓ ${t("kill.doneApprovals", { n: String(r.approvals) })}`),
+          el("div", undefined, r.browser ? `✓ ${t("kill.doneBrowser")}` : `— ${t("kill.doneNoBrowser")}`),
+        );
+        btns.replaceChildren(cancelBtn);
+        cancelBtn.textContent = t("settings.close");
+      });
+    });
+
+    overlay.append(card);
+    root.append(overlay);
+    cancelBtn.focus(); // default focus on the SAFE action
   });
 }
 
