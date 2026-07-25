@@ -56,7 +56,38 @@ describe("policyRows — Settings visibility table", () => {
     const rows = policyRows();
     expect(rows.map((r) => r.kind).sort()).toEqual([...ACTION_KINDS].sort());
     const auto = rows.filter((r) => r.decision === "auto-allow").map((r) => r.kind).sort();
-    expect(auto).toEqual(["local.dispatch", "probe.detect"]);
+    // Exhaustive on purpose: this list is the security invariant, so ADDING a
+    // kind here must be a deliberate edit with a reason, never a silent drift.
+    //   probe.detect     — read-only vendor-CLI detection
+    //   local.dispatch   — keyless localhost Ollama
+    //   server.dispatch  — the tenant's own cloud spend on their own keys; a
+    //                      dialog per chat message would be theatre, and the
+    //                      desktop is unattended exactly when a companion
+    //                      steer lands. It is governed for the AUDIT TRAIL
+    //                      (request→consume→settle with the origin in the
+    //                      summary), which is what was missing.
+    expect(auto).toEqual(["local.dispatch", "probe.detect", "server.dispatch"]);
+  });
+
+  it("every OTHER kind still requires approval or is denied — no silent widening", () => {
+    const rows = policyRows();
+    const notAuto = rows.filter((r) => r.decision !== "auto-allow");
+    expect(notAuto.length).toBe(ACTION_KINDS.length - 3);
+    for (const r of notAuto) {
+      expect(["require-approval", "deny"]).toContain(r.decision);
+    }
+  });
+
+  it("a server dispatch is auto-allowed but still mints a consumable token", async () => {
+    // The point of governing an auto-allowed kind: no dialog, but a real
+    // request/consume pair so the ledger records that it happened.
+    const gov = createMemoryGovernance();
+    const res = await gov.request("server.dispatch", { summary: "cascade (companion-initiated)" });
+    expect(res.decision).toBe("auto-allow");
+    expect(res.token).toBeTruthy();
+    expect(await gov.consume(res.token!, "server.dispatch", {})).toBe(true);
+    // Replay must fail — a token is one-time even on an auto-allowed lane.
+    expect(await gov.consume(res.token!, "server.dispatch", {})).toBe(false);
   });
 });
 

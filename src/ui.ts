@@ -15,6 +15,10 @@ import {
   pollCompare,
   cascade,
   savings as savingsCall,
+  listCompanies,
+  listScheduledPipelines,
+  pauseCompany,
+  resumeCompany,
 } from "./client";
 import { performSignOut } from "./session";
 import {
@@ -63,6 +67,20 @@ import {
   McpGateError,
 } from "./mcp";
 import type { Translator } from "./i18n";
+import {
+  toChangeViews,
+  changeSummary,
+  changeCounts,
+  type ChangeView,
+} from "./changes";
+import {
+  toCompanyViews,
+  toJobViews,
+  companySummary,
+  relativeAge,
+  type CompanyView,
+  type JobView,
+} from "./company";
 import {
   resolveSessionStore,
   groupSessions,
@@ -353,7 +371,8 @@ export function renderWorkspace(deps: UiDeps): void {
   const seg = el("div", "seg");
   const segChatBtn = el("button", "seg-btn active", t("surface.chat"));
   const segCodeBtn = el("button", "seg-btn", t("surface.code"));
-  seg.append(segChatBtn, segCodeBtn);
+  const segCompanyBtn = el("button", "seg-btn", t("surface.company"));
+  seg.append(segChatBtn, segCompanyBtn, segCodeBtn);
 
   const connSec = el("div");
   connSec.append(el("div", "rail-section-label", t("rail.connection")));
@@ -381,6 +400,101 @@ export function renderWorkspace(deps: UiDeps): void {
   const codePane = el("div", "code-pane");
   codePane.style.display = "none";
   codePane.append(laneBSec);
+
+  /**
+   * Changed files in the workspace. The Lane-B session runs in the user's OWN
+   * terminal (this UI reveals the launch command; it does not drive a PTY), so
+   * the comp's in-thread tool/diff feed has no data source here — parsing the
+   * vendor stream is forbidden by contract. Git does have the answer, so this
+   * shows what the session actually changed on disk. Honest subset, real data.
+   */
+  const changesSec = el("div", "changes-sec");
+  const changesHead = el("div", "rail-section-label", t("changes.title"));
+  const changesPathInput = el("input", "changes-path");
+  changesPathInput.type = "text";
+  changesPathInput.placeholder = t("changes.pathPlaceholder");
+  try {
+    changesPathInput.value = globalThis.localStorage?.getItem("bv.changes.cwd") ?? "";
+  } catch {
+    /* no storage — the field just starts empty */
+  }
+  const changesBtn = el("button", "set-btn", t("changes.refresh"));
+  const changesRow = el("div", "changes-row");
+  changesRow.append(changesPathInput, changesBtn);
+  const changesBody = el("div", "changes-body");
+  changesSec.append(changesHead, changesRow, changesBody);
+  codePane.append(changesSec);
+
+  const renderChanges = (views: ChangeView[], error?: string) => {
+    changesBody.replaceChildren();
+    if (error) {
+      changesBody.append(el("div", "changes-error", error));
+      return;
+    }
+    if (views.length === 0) {
+      changesBody.append(el("div", "changes-empty", t("changes.clean")));
+      return;
+    }
+    const sum = changeSummary(views);
+    changesBody.append(
+      el(
+        "div",
+        "changes-summary mono",
+        t("changes.summary", {
+          files: String(sum.files),
+          added: String(sum.added),
+          removed: String(sum.removed),
+        }),
+      ),
+    );
+    for (const v of views) {
+      const row = el("div", "changes-item");
+      const name = el("span", "changes-file mono", v.file);
+      name.title = v.path; // full path without widening the row
+      row.append(el("span", "changes-status mono", v.status), name);
+      row.append(el("span", `changes-counts mono${v.countless ? " faint" : ""}`, changeCounts(v)));
+      changesBody.append(row);
+    }
+  };
+
+  const loadChanges = async () => {
+    const cwd = changesPathInput.value.trim();
+    if (!cwd) {
+      renderChanges([], t("changes.needPath"));
+      return;
+    }
+    try {
+      globalThis.localStorage?.setItem("bv.changes.cwd", cwd);
+    } catch {
+      /* not persisted — not worth failing the read for */
+    }
+    changesBody.replaceChildren(el("div", "changes-empty", t("changes.loading")));
+    const g = globalThis as Record<string, any>;
+    const inv = g?.__TAURI__?.core?.invoke as
+      | ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>)
+      | undefined;
+    if (!inv) {
+      // Dev/browser build: say so rather than showing an empty "clean" list.
+      renderChanges([], t("changes.hostOnly"));
+      return;
+    }
+    try {
+      const raw = await inv("git_changed_files", { cwd });
+      renderChanges(toChangeViews(raw));
+    } catch (e) {
+      renderChanges([], String(e instanceof Error ? e.message : e));
+    }
+  };
+  changesBtn.addEventListener("click", () => void loadChanges());
+  changesPathInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") void loadChanges();
+  });
+
+  // Company surface (design v3 "Company"): read-only cloud state + the two
+  // lifecycle actions the API actually exposes. Every value comes from the
+  // server via the pure mappers in company.ts — nothing is invented here.
+  const companyPane = el("div", "company-pane");
+  companyPane.style.display = "none";
 
   const spacer = el("div", "rail-spacer");
 
@@ -488,6 +602,7 @@ export function renderWorkspace(deps: UiDeps): void {
   inspector.append(inspTabs, inspectorBody, activityBody);
 
   chat.append(codePane);
+  chat.append(companyPane);
 
   shell.append(rail, chat, inspector);
   const win = el("div", "win");
@@ -578,6 +693,7 @@ export function renderWorkspace(deps: UiDeps): void {
             return;
           }
           void b?.emitAudit(`steer: remote prompt accepted (${mode})`).catch(() => {});
+          nextDispatchRemote = true;
           record("user", `↯ ${m}`); // ↯ marks remote origin in the transcript
           ta.value = m;
           void run();
@@ -692,18 +808,156 @@ export function renderWorkspace(deps: UiDeps): void {
   };
   window.addEventListener("keydown", onWorkspaceKey);
 
+  // --- company surface ---
+  let companyBusy = false;
+  const renderCompany = (companies: CompanyView[], jobs: JobView[], error?: string) => {
+    companyPane.replaceChildren();
+
+    if (error) {
+      const err = el("div", "company-error", error);
+      companyPane.append(err);
+      return;
+    }
+
+    const sum = companySummary(companies, jobs);
+    companyPane.append(
+      el(
+        "div",
+        "company-summary mono",
+        t("company.summary", {
+          total: String(sum.total),
+          active: String(sum.active),
+          jobs: String(sum.jobs),
+          scheduled: String(sum.scheduled),
+        }),
+      ),
+    );
+
+    if (companies.length === 0) {
+      // Authoring lives on the web; the desktop reads and controls.
+      companyPane.append(el("div", "company-empty", t("company.empty")));
+    }
+
+    companyPane.append(el("div", "rail-section-label", t("company.companies")));
+    for (const c of companies) {
+      const row = el("div", "company-row");
+      row.append(el("span", `dot dot-${c.tone === "arc" ? "done" : c.tone === "ember" ? "run" : c.tone === "molten" ? "risk" : "idle"}`));
+      const meta = el("div", "company-meta");
+      meta.append(
+        el("div", "company-name", c.name),
+        el(
+          "div",
+          "company-sub mono",
+          t("company.counts", { agents: String(c.agentCount), pipelines: String(c.pipelineCount) }),
+        ),
+      );
+      row.append(meta);
+      row.append(el("span", "company-status mono", c.status.toLowerCase()));
+
+      // Only render an action the server will actually accept (pause 404s on a
+      // non-ACTIVE company, resume on a non-PAUSED one) — a button that always
+      // fails is worse than no button.
+      if (c.canPause || c.canResume) {
+        const btn = el("button", "set-btn", c.canPause ? t("company.pause") : t("company.resume"));
+        btn.addEventListener("click", async () => {
+          if (companyBusy) return;
+          companyBusy = true;
+          btn.disabled = true;
+          try {
+            if (c.canPause) await pauseCompany(cfg, c.id, { save: deps.persist });
+            else await resumeCompany(cfg, c.id, { save: deps.persist });
+            await loadCompany();
+          } catch (e) {
+            const msg = e instanceof ApiError ? `${e.status} · ${e.message}` : String(e);
+            renderCompany(companies, jobs, msg);
+          } finally {
+            companyBusy = false;
+          }
+        });
+        row.append(btn);
+      }
+      companyPane.append(row);
+    }
+
+    companyPane.append(el("div", "rail-section-label", t("company.jobs")));
+    if (jobs.length === 0) {
+      companyPane.append(el("div", "company-empty", t("company.noJobs")));
+    }
+    const now = Date.now();
+    for (const j of jobs) {
+      const row = el("div", "company-row");
+      const meta = el("div", "company-meta");
+      const age = relativeAge(j.lastRunAt, now);
+      meta.append(
+        el("div", "company-name", j.name),
+        el(
+          "div",
+          "company-sub mono",
+          [j.schedule, age ? t("company.lastRun", { age }) : ""].filter(Boolean).join(" · "),
+        ),
+      );
+      row.append(meta);
+      // "unscheduled" is its own word on purpose: an enabled job whose cron
+      // never reached the scheduler is a real bug, not the same as paused.
+      const stateText =
+        j.state === "scheduled"
+          ? relativeAge(j.nextRunAt, now)
+            ? t("company.nextRun", { age: relativeAge(j.nextRunAt, now) })
+            : t("company.stateScheduled")
+          : j.state === "paused"
+            ? t("company.statePaused")
+            : t("company.stateUnscheduled");
+      row.append(
+        el(
+          "span",
+          `company-status mono${j.state === "unscheduled" ? " bad" : ""}`,
+          stateText,
+        ),
+      );
+      companyPane.append(row);
+    }
+  };
+
+  const loadCompany = async () => {
+    companyPane.replaceChildren(el("div", "company-empty", t("company.loading")));
+    try {
+      const [rawCompanies, rawJobs] = await Promise.all([
+        listCompanies(cfg, { save: deps.persist }),
+        // Jobs are a nice-to-have: if the scheduled endpoint fails we still show
+        // the companies rather than blanking the whole surface.
+        listScheduledPipelines(cfg, { save: deps.persist }).catch(() => null),
+      ]);
+      renderCompany(toCompanyViews(rawCompanies), toJobViews(rawJobs));
+    } catch (e) {
+      const msg = e instanceof ApiError ? `${e.status} · ${e.message}` : String(e);
+      renderCompany([], [], t("company.loadFailed", { reason: msg }));
+    }
+  };
+
   // --- surface switch ---
-  let surface: "chat" | "code" = "chat";
-  const applySurface = (s: "chat" | "code") => {
+  let surface: "chat" | "company" | "code" = "chat";
+  const applySurface = (s: "chat" | "company" | "code") => {
     surface = s;
     segChatBtn.classList.toggle("active", s === "chat");
+    segCompanyBtn.classList.toggle("active", s === "company");
     segCodeBtn.classList.toggle("active", s === "code");
     scroll.style.display = s === "chat" ? "" : "none";
     composer.style.display = s === "chat" ? "" : "none";
     codePane.style.display = s === "code" ? "" : "none";
-    crumb.textContent = s === "chat" ? activeSession?.title || t("app.name") : t("surface.codeCrumb");
+    companyPane.style.display = s === "company" ? "" : "none";
+    crumb.textContent =
+      s === "chat"
+        ? activeSession?.title || t("app.name")
+        : s === "company"
+          ? t("surface.companyCrumb")
+          : t("surface.codeCrumb");
+    // Fetch on entry, not on mount: the Company surface costs two requests and
+    // most sessions never open it.
+    if (s === "company") void loadCompany();
+    if (s === "code" && changesPathInput.value.trim()) void loadChanges();
   };
   segChatBtn.addEventListener("click", () => applySurface("chat"));
+  segCompanyBtn.addEventListener("click", () => applySurface("company"));
   segCodeBtn.addEventListener("click", () => applySurface("code"));
   applySurface(surface);
 
@@ -813,6 +1067,8 @@ export function renderWorkspace(deps: UiDeps): void {
   // textarea is cleared first) but a remote steer SETS the textarea, so
   // without this a burst of relay frames would dispatch concurrently.
   let dispatching = false;
+  /** Set by onSteer for exactly one dispatch, so the audit line names the origin. */
+  let nextDispatchRemote = false;
 
   const record = (role: SessionRole, text: string) => {
     if (!text) return;
@@ -862,6 +1118,25 @@ export function renderWorkspace(deps: UiDeps): void {
       // Inside the try: a storage failure here must not strand sendBtn
       // disabled with the user's text already cleared.
       record("user", text);
+      const origin = nextDispatchRemote ? "companion" : "local";
+      nextDispatchRemote = false;
+
+      if (mode === "cascade" || mode === "compare") {
+        // Governed (auto-allow) so the ledger has evidence of every server-lane
+        // dispatch — including one a companion steer initiated while nobody was
+        // at the desk. See ACTION_KINDS "server.dispatch" in governance.ts.
+        const serverDetail: ActionDetail = {
+          summary: t("gov.kindServerDispatch", { mode, origin }),
+        };
+        const gate = await gateAction(deps, "server.dispatch", serverDetail);
+        if (!gate.ok) {
+          renderErrorCard(scroll, gate.reason);
+          record("error", gate.reason);
+          bumpActivity();
+          return;
+        }
+      }
+
       if (mode === "cascade") {
         const thinking = el("div", "thinking");
         thinking.append(el("span", "spinner"), document.createTextNode(t("chat.thinking", { n: 1 })));
@@ -873,6 +1148,9 @@ export function renderWorkspace(deps: UiDeps): void {
         renderCascadeAnswer(scroll, view, t);
         renderCascadeInspector(inspectorBody, view, t);
         record("assistant", view.answer);
+        await deps.gov.settle("server.dispatch", "success", {
+          summary: t("gov.kindServerDispatch", { mode, origin }),
+        });
       } else if (mode === "local") {
         // Lane-A local — governed (auto-allow), keyless, offline. Even an
         // auto-allowed action is audited so the ledger is a complete record.
@@ -980,6 +1258,9 @@ export function renderWorkspace(deps: UiDeps): void {
         renderCompareAnswer(scroll, view, t);
         renderCompareInspector(inspectorBody, view, t);
         record("assistant", view.finalAnswer || view.synthesis || view.error || view.status);
+        await deps.gov.settle("server.dispatch", "success", {
+          summary: t("gov.kindServerDispatch", { mode, origin }),
+        });
       }
       void refreshSavings();
     } catch (e) {
