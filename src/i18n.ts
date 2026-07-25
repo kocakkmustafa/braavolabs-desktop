@@ -20,6 +20,16 @@ const en: Dict = {
     codeCrumb: "Code · vendor CLI",
     companyCrumb: "Company · cloud",
   },
+  changes: {
+    title: "Changed files",
+    pathPlaceholder: "/absolute/path/to/your/repo",
+    refresh: "Refresh",
+    summary: "{files} files · +{added} −{removed}",
+    clean: "Working tree clean.",
+    loading: "Reading git…",
+    needPath: "Enter the repo path your CLI session is working in.",
+    hostOnly: "Reading git needs the Braavolabs desktop host (run the Tauri app).",
+  },
   company: {
     summary: "{total} companies · {active} active · {jobs} jobs · {scheduled} scheduled",
     companies: "COMPANIES",
@@ -233,6 +243,16 @@ const tr: Dict = {
     code: "Kod",
     codeCrumb: "Kod · vendor CLI",
     companyCrumb: "Şirket · bulut",
+  },
+  changes: {
+    title: "Değişen dosyalar",
+    pathPlaceholder: "/repo/dizinin/tam/yolu",
+    refresh: "Yenile",
+    summary: "{files} dosya · +{added} −{removed}",
+    clean: "Çalışma ağacı temiz.",
+    loading: "git okunuyor…",
+    needPath: "CLI oturumunun çalıştığı repo yolunu gir.",
+    hostOnly: "git okuması Braavolabs masaüstü host'unu gerektirir (Tauri uygulamasını çalıştır).",
   },
   company: {
     summary: "{total} şirket · {active} aktif · {jobs} iş · {scheduled} zamanlanmış",

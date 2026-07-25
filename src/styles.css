@@ -1556,3 +1556,81 @@ textarea {
 .company-error {
   color: var(--molten, #ff4d4d);
 }
+
+/* ── design v3: Code surface — changed files ───────────────────────────── */
+
+.changes-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 16px;
+  margin-top: 12px;
+  border-top: 1px solid #14171f;
+}
+.changes-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.changes-path {
+  flex: 1;
+  min-width: 0;
+  background: #07080c;
+  border: 1px solid var(--gunmetal, #232836);
+  border-radius: 8px;
+  color: var(--text, #e8eaf0);
+  font-family: var(--mono, ui-monospace), monospace;
+  font-size: 11.5px;
+  padding: 7px 10px;
+}
+.changes-path:focus {
+  outline: none;
+  border-color: var(--arc, #3b82f6);
+}
+.changes-body {
+  display: flex;
+  flex-direction: column;
+}
+.changes-summary {
+  font-size: 11px;
+  color: var(--muted, #8b93a7);
+  padding: 6px 0 2px;
+}
+.changes-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 30px;
+  border-top: 1px solid #12151d;
+}
+.changes-status {
+  font-size: 10.5px;
+  color: var(--ember, #ff7a1a);
+  width: 22px;
+  flex: none;
+}
+.changes-file {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.changes-counts {
+  font-size: 11px;
+  color: #7dd3fc;
+  flex: none;
+}
+.changes-counts.faint {
+  color: #5a6175;
+}
+.changes-empty,
+.changes-error {
+  font-size: 11.5px;
+  color: #69718a;
+  padding: 8px 0;
+}
+.changes-error {
+  color: var(--molten, #ff4d4d);
+}

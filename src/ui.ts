@@ -68,6 +68,12 @@ import {
 } from "./mcp";
 import type { Translator } from "./i18n";
 import {
+  toChangeViews,
+  changeSummary,
+  changeCounts,
+  type ChangeView,
+} from "./changes";
+import {
   toCompanyViews,
   toJobViews,
   companySummary,
@@ -394,6 +400,95 @@ export function renderWorkspace(deps: UiDeps): void {
   const codePane = el("div", "code-pane");
   codePane.style.display = "none";
   codePane.append(laneBSec);
+
+  /**
+   * Changed files in the workspace. The Lane-B session runs in the user's OWN
+   * terminal (this UI reveals the launch command; it does not drive a PTY), so
+   * the comp's in-thread tool/diff feed has no data source here — parsing the
+   * vendor stream is forbidden by contract. Git does have the answer, so this
+   * shows what the session actually changed on disk. Honest subset, real data.
+   */
+  const changesSec = el("div", "changes-sec");
+  const changesHead = el("div", "rail-section-label", t("changes.title"));
+  const changesPathInput = el("input", "changes-path");
+  changesPathInput.type = "text";
+  changesPathInput.placeholder = t("changes.pathPlaceholder");
+  try {
+    changesPathInput.value = globalThis.localStorage?.getItem("bv.changes.cwd") ?? "";
+  } catch {
+    /* no storage — the field just starts empty */
+  }
+  const changesBtn = el("button", "set-btn", t("changes.refresh"));
+  const changesRow = el("div", "changes-row");
+  changesRow.append(changesPathInput, changesBtn);
+  const changesBody = el("div", "changes-body");
+  changesSec.append(changesHead, changesRow, changesBody);
+  codePane.append(changesSec);
+
+  const renderChanges = (views: ChangeView[], error?: string) => {
+    changesBody.replaceChildren();
+    if (error) {
+      changesBody.append(el("div", "changes-error", error));
+      return;
+    }
+    if (views.length === 0) {
+      changesBody.append(el("div", "changes-empty", t("changes.clean")));
+      return;
+    }
+    const sum = changeSummary(views);
+    changesBody.append(
+      el(
+        "div",
+        "changes-summary mono",
+        t("changes.summary", {
+          files: String(sum.files),
+          added: String(sum.added),
+          removed: String(sum.removed),
+        }),
+      ),
+    );
+    for (const v of views) {
+      const row = el("div", "changes-item");
+      const name = el("span", "changes-file mono", v.file);
+      name.title = v.path; // full path without widening the row
+      row.append(el("span", "changes-status mono", v.status), name);
+      row.append(el("span", `changes-counts mono${v.countless ? " faint" : ""}`, changeCounts(v)));
+      changesBody.append(row);
+    }
+  };
+
+  const loadChanges = async () => {
+    const cwd = changesPathInput.value.trim();
+    if (!cwd) {
+      renderChanges([], t("changes.needPath"));
+      return;
+    }
+    try {
+      globalThis.localStorage?.setItem("bv.changes.cwd", cwd);
+    } catch {
+      /* not persisted — not worth failing the read for */
+    }
+    changesBody.replaceChildren(el("div", "changes-empty", t("changes.loading")));
+    const g = globalThis as Record<string, any>;
+    const inv = g?.__TAURI__?.core?.invoke as
+      | ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>)
+      | undefined;
+    if (!inv) {
+      // Dev/browser build: say so rather than showing an empty "clean" list.
+      renderChanges([], t("changes.hostOnly"));
+      return;
+    }
+    try {
+      const raw = await inv("git_changed_files", { cwd });
+      renderChanges(toChangeViews(raw));
+    } catch (e) {
+      renderChanges([], String(e instanceof Error ? e.message : e));
+    }
+  };
+  changesBtn.addEventListener("click", () => void loadChanges());
+  changesPathInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") void loadChanges();
+  });
 
   // Company surface (design v3 "Company"): read-only cloud state + the two
   // lifecycle actions the API actually exposes. Every value comes from the
@@ -859,6 +954,7 @@ export function renderWorkspace(deps: UiDeps): void {
     // Fetch on entry, not on mount: the Company surface costs two requests and
     // most sessions never open it.
     if (s === "company") void loadCompany();
+    if (s === "code" && changesPathInput.value.trim()) void loadChanges();
   };
   segChatBtn.addEventListener("click", () => applySurface("chat"));
   segCompanyBtn.addEventListener("click", () => applySurface("company"));

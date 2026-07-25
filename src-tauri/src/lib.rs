@@ -686,6 +686,103 @@ fn classify(kind: &str, argv: &[String], path: Option<&str>) -> (&'static str, &
     }
 }
 
+// ── workspace git status (Code surface "changed files") ───────────────────
+//
+// Read-only, and deliberately NOT a general git bridge: exactly two
+// `git` invocations with fixed arguments, spawned directly (no shell, so no
+// argument injection), in a caller-supplied cwd that must be absolute,
+// traversal-free and outside the sensitive-dir set. Output is capped.
+//
+// WHY this exists: the Code surface's "changed files" cannot come from the
+// vendor CLI's stdout — the Lane-B contract keeps that stream OPAQUE (parsing
+// it is forbidden). But the session edits the user's real working tree, so git
+// is the honest source for what changed. No governance gate: this reads
+// metadata the user already owns and mutates nothing (mirrors probe.detect).
+#[derive(serde::Serialize)]
+struct GitChange {
+    path: String,
+    added: u32,
+    removed: u32,
+    /// Porcelain status code ("M", "A", "??", …) — surfaced verbatim.
+    status: String,
+}
+
+/// Hard cap: a repo mid-refactor can have thousands of entries; the UI shows a
+/// list, not a report, and an unbounded payload would freeze the webview.
+const GIT_MAX_ENTRIES: usize = 200;
+
+#[tauri::command]
+fn git_changed_files(cwd: String) -> Result<Vec<GitChange>, String> {
+    let path = std::path::Path::new(&cwd);
+    if !path.is_absolute() {
+        return Err("cwd must be an absolute path".into());
+    }
+    if is_traversal(&cwd) {
+        return Err("cwd must not contain a `..` segment".into());
+    }
+    if sandbox::is_sensitive_dir(&cwd) {
+        return Err("cwd is in a system/secrets directory".into());
+    }
+    if !path.is_dir() {
+        return Err("cwd is not a directory".into());
+    }
+
+    let run = |args: &[&str]| -> Result<String, String> {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&cwd)
+            .output()
+            .map_err(|e| format!("git not available: {e}"))?;
+        if !out.status.success() {
+            // Most common cause by far: the directory is not a git repo. Report
+            // it as-is rather than pretending there are no changes.
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Err(err.lines().next().unwrap_or("git failed").trim().to_string());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    };
+
+    // Status first: it is the set of paths that changed at all (including
+    // untracked ones, which have no numstat line).
+    let status_out = run(&["status", "--porcelain=v1", "--untracked-files=all"])?;
+    let mut changes: Vec<GitChange> = Vec::new();
+    for line in status_out.lines().take(GIT_MAX_ENTRIES) {
+        if line.len() < 4 {
+            continue;
+        }
+        let code = line[..2].trim().to_string();
+        let raw = line[3..].trim();
+        // Renames read "old -> new"; the new path is what the user cares about.
+        let path = raw.rsplit(" -> ").next().unwrap_or(raw).trim_matches('"').to_string();
+        if path.is_empty() {
+            continue;
+        }
+        changes.push(GitChange { path, added: 0, removed: 0, status: code });
+    }
+
+    // Then numstat for the +/- counts on TRACKED changes (HEAD..worktree,
+    // staged included). Untracked files simply keep 0/0 — honest: git has no
+    // diff for a file it has never seen.
+    if let Ok(numstat) = run(&["diff", "--numstat", "HEAD"]) {
+        for line in numstat.lines() {
+            let mut parts = line.split('\t');
+            let a = parts.next().unwrap_or("");
+            let r = parts.next().unwrap_or("");
+            let p = parts.next().unwrap_or("").trim();
+            if p.is_empty() {
+                continue;
+            }
+            if let Some(entry) = changes.iter_mut().find(|c| c.path == p) {
+                // "-" means binary; leave the counts at 0 rather than guessing.
+                entry.added = a.parse().unwrap_or(0);
+                entry.removed = r.parse().unwrap_or(0);
+            }
+        }
+    }
+
+    Ok(changes)
+}
+
 /// True when a joined command line matches an obviously destructive pattern.
 /// Substring/keyword checks kept simple + dependency-free (no regex crate).
 fn is_destructive(joined: &str) -> bool {
@@ -3506,6 +3603,7 @@ pub fn run() {
             browser_connect,
             browser_disconnect,
             browser_dispatch,
+            git_changed_files,
             mcp_list_servers,
             mcp_add_server,
             mcp_remove_server,
