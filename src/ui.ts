@@ -82,14 +82,48 @@ import {
 } from "./relay-bridge";
 import { createRelayTransport } from "./relay-transport";
 
+/** How an approval was settled. `token` is present only when the resolver
+ *  ALREADY minted one (companion approve) — the local click mints its own. */
+export interface ApprovalOutcome {
+  approved: boolean;
+  token?: string;
+}
+
 /**
- * Kill switch registry: every open approval modal registers its fail-closed
- * closer here so "Kill all…" can reject them without reaching into promises.
+ * Open approval modals, keyed by governance actionId. Two things resolve them
+ * besides the user's click: a companion decision arriving over the relay
+ * (which must hand its minted token over — approving on the phone and then
+ * failing locally would be worse than not offering it), and the kill switch
+ * (fail-closed, no token).
  */
-const openApprovalClosers = new Set<() => void>();
+const openApprovals = new Map<string, (o: ApprovalOutcome) => void>();
+
+/** Settle every open approval. Used by the kill switch and by teardown. */
+function settleAllApprovals(outcome: ApprovalOutcome): number {
+  const n = openApprovals.size;
+  for (const resolve of [...openApprovals.values()]) resolve(outcome);
+  openApprovals.clear();
+  return n;
+}
 
 /** Set while the companion broadcast is live so the kill switch can stop it. */
 let activeRelayStopper: (() => Promise<void>) | null = null;
+
+/**
+ * Teardown for the CURRENT workspace render. Registered by renderWorkspace and
+ * run before the next render (or the login view) replaces it. Without this the
+ * companion bridge, the governance decorator and the keydown listener outlive
+ * sign-out — so the NEXT account's approvals would mirror to the previous
+ * account's phone, which could still steer and kill.
+ */
+let disposeWorkspace: (() => void) | null = null;
+
+function runWorkspaceTeardown(): void {
+  const dispose = disposeWorkspace;
+  disposeWorkspace = null;
+  dispose?.();
+  settleAllApprovals({ approved: false });
+}
 
 /** OS-level reduced-motion, guarded for non-browser test environments. */
 function osPrefersReducedMotion(): boolean {
@@ -113,34 +147,38 @@ function initReducedMotion(): ReturnType<typeof resolvePrefs> {
  * launchable from this UI, so there is nothing of theirs to stop here; the
  * scope grows with those surfaces.
  */
-async function killEverything(): Promise<{ approvals: number; browser: boolean; relay: boolean }> {
-  const approvals = openApprovalClosers.size;
-  for (const c of [...openApprovalClosers]) c();
-  let relay = false;
+async function killEverything(): Promise<{ approvals: number; relay: "stopped" | "failed" | "inactive" }> {
+  const approvals = settleAllApprovals({ approved: false });
+
+  let relay: "stopped" | "failed" | "inactive" = "inactive";
   if (activeRelayStopper) {
     const stop = activeRelayStopper;
     activeRelayStopper = null;
     try {
       await stop();
-      relay = true;
+      relay = "stopped";
     } catch {
-      // Relay unreachable — the local side is still torn down by the stopper.
+      // Local teardown still happened inside the stopper; the relay may not
+      // have received the `ended` event — report that difference honestly.
+      relay = "failed";
     }
   }
-  let browser = false;
+
+  // Belt-and-braces: ask the host to drop any governed browser connection.
+  // NOT reported to the user — the host returns Ok() whether or not anything
+  // was connected, and no surface in this UI opens one, so a "✓ disconnected"
+  // line would be a guaranteed false positive.
   try {
     const g = globalThis as Record<string, any>;
     const inv = g?.__TAURI__?.core?.invoke as
       | ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>)
       | undefined;
-    if (inv) {
-      await inv("browser_disconnect", { ts: Date.now() });
-      browser = true;
-    }
+    await inv?.("browser_disconnect", { ts: Date.now() });
   } catch {
-    // No live browser connection (or no host in dev) — nothing to stop.
+    /* no host / nothing connected */
   }
-  return { approvals, browser, relay };
+
+  return { approvals, relay };
 }
 
 export interface UiDeps {
@@ -177,6 +215,7 @@ const el = <K extends keyof HTMLElementTagNameMap>(
 // ── login view ────────────────────────────────────────────────────────────
 export function renderLogin(deps: UiDeps): void {
   const { root, cfg, t } = deps;
+  runWorkspaceTeardown();
   initReducedMotion();
   root.innerHTML = "";
   const wrap = el("div", "login-wrap");
@@ -287,6 +326,9 @@ function mapLoginErrorText(t: Translator, view: ReturnType<typeof toLoginError>)
 // ── workspace (3-pane) ──────────────────────────────────────────────────────
 export function renderWorkspace(deps: UiDeps): void {
   const { root, cfg, t } = deps;
+  // A second render must not leave the previous one's bridge, governance
+  // decorator or key listener alive (see runWorkspaceTeardown).
+  runWorkspaceTeardown();
   const prefs = initReducedMotion();
   root.innerHTML = "";
   let mode: Mode = "cascade";
@@ -522,15 +564,42 @@ export function renderWorkspace(deps: UiDeps): void {
     try {
       const transport = createRelayTransport({ cfg });
       const b = new RelayBridge(transport, {
-        // Owner-bound remote steer behaves like a typed prompt: fill + run.
+        /**
+         * Owner-bound remote steer behaves like a typed prompt: fill + run.
+         * Two guards the local path gets for free but this one doesn't:
+         * (a) refuse while a dispatch is in flight — a burst of steer frames
+         *     would otherwise fan out into concurrent paid dispatches;
+         * (b) mirror an audit line so the ledger and the phone both record
+         *     that THIS dispatch was remote-initiated, not typed here.
+         */
         onSteer: (m) => {
+          if (dispatching) {
+            void b?.emitAudit("steer: refused — a dispatch is already running").catch(() => {});
+            return;
+          }
+          void b?.emitAudit(`steer: remote prompt accepted (${mode})`).catch(() => {});
+          record("user", `↯ ${m}`); // ↯ marks remote origin in the transcript
           ta.value = m;
           void run();
         },
         onApprove: async (id) => {
-          await resolveApproval(deps.gov, id);
+          // Hand the minted token to the modal that is still waiting locally,
+          // otherwise the phone's "Allow" burns the pending record and the
+          // local flow fails with "resolved elsewhere" — approving would
+          // cancel the very action the user approved.
+          const r = await resolveApproval(deps.gov, id);
+          const settle = openApprovals.get(id);
+          if (r.resolved && settle) settle({ approved: true, token: r.token });
+          else if (r.resolved) {
+            // No modal waiting (app re-rendered): the grant is unusable, so
+            // say so rather than leaving a silent dangling token.
+            void b?.emitAudit(`approve: no local request waiting for ${id}`).catch(() => {});
+          }
         },
-        onReject: (id) => resolveRejection(deps.gov, id),
+        onReject: async (id) => {
+          await resolveRejection(deps.gov, id);
+          openApprovals.get(id)?.({ approved: false });
+        },
         onKill: async () => {
           await killEverything();
         },
@@ -618,9 +687,10 @@ export function renderWorkspace(deps: UiDeps): void {
     if (e.target === backdrop) setSettings(false);
   });
   // Sheet-local Esc handler; registered once per workspace render.
-  window.addEventListener("keydown", (e) => {
+  const onWorkspaceKey = (e: KeyboardEvent) => {
     if (e.key === "Escape" && settingsOpen) setSettings(false);
-  });
+  };
+  window.addEventListener("keydown", onWorkspaceKey);
 
   // --- surface switch ---
   let surface: "chat" | "code" = "chat";
@@ -739,6 +809,11 @@ export function renderWorkspace(deps: UiDeps): void {
   };
   newChatBtn.addEventListener("click", startNewSession);
 
+  // In-flight guard for run(). The local path is accidentally safe (the
+  // textarea is cleared first) but a remote steer SETS the textarea, so
+  // without this a burst of relay frames would dispatch concurrently.
+  let dispatching = false;
+
   const record = (role: SessionRole, text: string) => {
     if (!text) return;
     if (!activeSession) activeSession = sessionStore.create();
@@ -775,15 +850,18 @@ export function renderWorkspace(deps: UiDeps): void {
       return;
     }
     hint.style.display = "none";
+    dispatching = true;
     sendBtn.disabled = true;
     ta.value = "";
 
     const userMsg = el("div", "msg-user", text);
     scroll.append(userMsg);
     scrollToEnd();
-    record("user", text);
 
     try {
+      // Inside the try: a storage failure here must not strand sendBtn
+      // disabled with the user's text already cleared.
+      record("user", text);
       if (mode === "cascade") {
         const thinking = el("div", "thinking");
         thinking.append(el("span", "spinner"), document.createTextNode(t("chat.thinking", { n: 1 })));
@@ -802,6 +880,7 @@ export function renderWorkspace(deps: UiDeps): void {
         const gate = await gateAction(deps, "local.dispatch", localDetail);
         if (!gate.ok) {
           renderErrorCard(scroll, gate.reason);
+          record("error", gate.reason);
         } else {
           const host = resolveOllamaHost();
           const thinking = el("div", "thinking");
@@ -820,8 +899,10 @@ export function renderWorkspace(deps: UiDeps): void {
             thinking.remove();
             if (e instanceof OllamaUnreachableError) {
               renderErrorCard(scroll, t("chat.localUnreachable", { host: e.host }));
+              record("error", t("chat.localUnreachable", { host: e.host }));
             } else {
               renderErrorCard(scroll, String(e instanceof Error ? e.message : e));
+              record("error", String(e instanceof Error ? e.message : e));
             }
             await deps.gov.settle("local.dispatch", "error", localDetail);
           }
@@ -834,6 +915,7 @@ export function renderWorkspace(deps: UiDeps): void {
         const providerRaw = directProviderSel.value;
         if (!isDirectProvider(providerRaw)) {
           renderErrorCard(scroll, t("chat.empty"));
+          record("error", t("chat.empty"));
         } else {
           const provider: DirectProvider = providerRaw;
           const directDetail: ActionDetail = { provider, summary: t("gov.kindDirectDispatch", { provider }) };
@@ -844,12 +926,14 @@ export function renderWorkspace(deps: UiDeps): void {
           const gate = await gateForToken(deps, "direct.dispatch", directDetail);
           if (!gate.ok) {
             renderErrorCard(scroll, gate.reason);
+            record("error", gate.reason);
           } else {
             // One-time raw key retrieval at dispatch — never rendered to the DOM.
             // The host consumes gate.token inside key_get before returning it.
             const apiKey = await deps.vault.get(provider, gate.token);
             if (!apiKey) {
               renderErrorCard(scroll, t("chat.noKey", { provider }));
+              record("error", t("chat.noKey", { provider }));
               await deps.gov.settle("direct.dispatch", "error", directDetail);
             } else {
               const model = resolveDirectModel(provider, directModelInput.value.trim() || undefined);
@@ -868,6 +952,7 @@ export function renderWorkspace(deps: UiDeps): void {
                 thinking.remove();
                 const msg = e instanceof DirectApiError ? `${e.status} · ${e.message}` : String(e instanceof Error ? e.message : e);
                 renderErrorCard(scroll, msg);
+                record("error", msg);
                 await deps.gov.settle("direct.dispatch", "error", directDetail);
               }
             }
@@ -905,6 +990,7 @@ export function renderWorkspace(deps: UiDeps): void {
       errCard.append(el("div", "msg-label", "error"), document.createTextNode(msg));
       scroll.append(errCard);
     } finally {
+      dispatching = false;
       sendBtn.disabled = false;
       scrollToEnd();
     }
@@ -923,6 +1009,14 @@ export function renderWorkspace(deps: UiDeps): void {
   // invariants live in the unit-tested performSignOut (session.ts), which is
   // where the C3/#1 regression is guarded.
   signOutBtn.addEventListener("click", () => performSignOut(cfg, deps));
+
+  // Everything this render owns beyond the DOM: the companion bridge + the
+  // governance decorator installed with it, and the window key listener.
+  disposeWorkspace = () => {
+    window.removeEventListener("keydown", onWorkspaceKey);
+    if (compBridge) void stopCompanion();
+    else deps.gov = baseGov;
+  };
 
   void refreshSavings();
   refreshSessionList();
@@ -1030,19 +1124,25 @@ async function gateAction(
   }
   let token = res.token;
   if (res.decision === "require-approval") {
-    const approved = await showApprovalModal(deps, detail, res.reason);
-    if (!approved) {
+    const outcome = await showApprovalModal(deps, res.actionId, detail, res.reason);
+    if (!outcome.approved) {
       await gov.reject(res.actionId);
       return { ok: false, reason: t("gov.rejectedByUser") };
     }
-    try {
-      const r = await gov.approve(res.actionId);
-      token = r.token;
-    } catch {
-      // First-resolver-wins: a companion approve/reject (or the kill switch)
-      // already settled this actionId — the local click loses the race,
-      // fail-closed with an honest message instead of an uncaught throw.
-      return { ok: false, reason: t("gov.resolvedElsewhere") };
+    if (outcome.token) {
+      // Approved on the companion: the token was minted THERE. Reusing it is
+      // what makes a phone approval actually run the action (calling approve()
+      // again would throw — the pending record is already spent).
+      token = outcome.token;
+    } else {
+      try {
+        const r = await gov.approve(res.actionId);
+        token = r.token;
+      } catch {
+        // First-resolver-wins: something else settled this actionId — the local
+        // click loses, fail-closed with an honest message, not a throw.
+        return { ok: false, reason: t("gov.resolvedElsewhere") };
+      }
     }
   }
   if (!token) return { ok: false, reason: t("gov.rejectedByUser") };
@@ -1069,15 +1169,19 @@ async function gateForToken(
   if (res.decision === "deny") return { ok: false, reason: t("gov.denied", { reason: res.reason }) };
   let token = res.token;
   if (res.decision === "require-approval") {
-    const approved = await showApprovalModal(deps, detail, res.reason);
-    if (!approved) {
+    const outcome = await showApprovalModal(deps, res.actionId, detail, res.reason);
+    if (!outcome.approved) {
       await gov.reject(res.actionId);
       return { ok: false, reason: t("gov.rejectedByUser") };
     }
-    try {
-      token = (await gov.approve(res.actionId)).token;
-    } catch {
-      return { ok: false, reason: t("gov.resolvedElsewhere") };
+    if (outcome.token) {
+      token = outcome.token; // companion-minted (see gateAction)
+    } else {
+      try {
+        token = (await gov.approve(res.actionId)).token;
+      } catch {
+        return { ok: false, reason: t("gov.resolvedElsewhere") };
+      }
     }
   }
   if (!token) return { ok: false, reason: t("gov.rejectedByUser") };
@@ -1089,9 +1193,14 @@ async function gateForToken(
  * user decides. Blocks on a promise until Approve or Reject. The action summary
  * is the only thing shown; no secret ever reaches this surface.
  */
-function showApprovalModal(deps: UiDeps, detail: ActionDetail, reason: string): Promise<boolean> {
+function showApprovalModal(
+  deps: UiDeps,
+  actionId: string,
+  detail: ActionDetail,
+  reason: string,
+): Promise<ApprovalOutcome> {
   const { t, root } = deps;
-  return new Promise<boolean>((resolve) => {
+  return new Promise<ApprovalOutcome>((resolve) => {
     const overlay = el("div", "approve-overlay");
     const card = el("div", "approve-card");
     const flip = el("div", "approve-flip"); // coin-flip micro-animation host
@@ -1114,17 +1223,18 @@ function showApprovalModal(deps: UiDeps, detail: ActionDetail, reason: string): 
     btns.append(rejectBtn, approveBtn);
     card.append(btns);
 
-    const close = (v: boolean) => {
-      openApprovalClosers.delete(closer);
+    const close = (o: ApprovalOutcome) => {
+      openApprovals.delete(actionId);
       overlay.remove();
-      resolve(v);
+      resolve(o);
     };
-    const closer = () => close(false);
-    openApprovalClosers.add(closer);
-    rejectBtn.addEventListener("click", () => close(false));
-    approveBtn.addEventListener("click", () => close(true));
+    // Registered so a companion decision (with its already-minted token) or the
+    // kill switch can settle this modal without a local click.
+    openApprovals.set(actionId, close);
+    rejectBtn.addEventListener("click", () => close({ approved: false }));
+    approveBtn.addEventListener("click", () => close({ approved: true }));
     overlay.addEventListener("click", (e) => {
-      if (e.target === overlay) close(false); // click-outside = reject (fail-closed)
+      if (e.target === overlay) close({ approved: false }); // click-outside = reject (fail-closed)
     });
 
     overlay.append(card);
@@ -1152,7 +1262,6 @@ function showKillDialog(deps: UiDeps): Promise<void> {
     scope.append(
       el("div", undefined, `• ${t("kill.scopeApprovals")}`),
       el("div", undefined, `• ${t("kill.scopeRelay")}`),
-      el("div", undefined, `• ${t("kill.scopeBrowser")}`),
       el("div", "kill-scope-note", t("kill.scopeNote")),
     );
     card.append(scope);
@@ -1176,11 +1285,18 @@ function showKillDialog(deps: UiDeps): Promise<void> {
       void killEverything().then((r) => {
         scope.replaceChildren(
           el("div", undefined, `✓ ${t("kill.doneApprovals", { n: String(r.approvals) })}`),
-          el("div", undefined, r.relay ? `✓ ${t("kill.doneRelay")}` : `— ${t("kill.doneNoRelay")}`),
-          el("div", undefined, r.browser ? `✓ ${t("kill.doneBrowser")}` : `— ${t("kill.doneNoBrowser")}`),
+          el(
+            "div",
+            undefined,
+            r.relay === "stopped"
+              ? `✓ ${t("kill.doneRelay")}`
+              : r.relay === "failed"
+                ? `! ${t("kill.failedRelay")}`
+                : `— ${t("kill.doneNoRelay")}`,
+          ),
         );
         btns.replaceChildren(cancelBtn);
-        cancelBtn.textContent = t("settings.close");
+        cancelBtn.textContent = t("kill.closeBtn");
       });
     });
 

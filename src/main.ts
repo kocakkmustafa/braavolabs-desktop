@@ -12,6 +12,7 @@ import { resolveGovernance } from "./governance";
 import { resolveMcpBridge } from "./mcp";
 import { detectLocale, makeT } from "./i18n";
 import { renderLogin, renderWorkspace, type UiDeps } from "./ui";
+import { clearAllSessions } from "./sessions";
 
 async function boot(): Promise<void> {
   const root = document.getElementById("app");
@@ -41,6 +42,11 @@ async function boot(): Promise<void> {
     persist,
     onSignedOut: () => {
       void store.clear();
+      // Transcripts + the cached account email are plain user content, but they
+      // are THIS user's content — the next account on this machine must not
+      // find them in the sidebar. renderLogin() also tears the workspace down
+      // (companion bridge + governance decorator), see runWorkspaceTeardown.
+      clearAllSessions();
       renderLogin(deps);
     },
   };

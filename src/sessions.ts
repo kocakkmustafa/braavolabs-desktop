@@ -34,6 +34,9 @@ export interface ChatSession {
 export const MAX_SESSIONS = 50;
 /** Per-session entry cap — oldest entries dropped first. */
 export const MAX_ENTRIES = 200;
+/** Per-entry character cap. Model answers are unbounded and localStorage is
+ *  ~5MB/origin; the transcript is a convenience record, not an archive. */
+export const MAX_ENTRY_CHARS = 4000;
 /** Sidebar title length, derived from the first user entry. */
 export const TITLE_MAX = 42;
 
@@ -112,11 +115,29 @@ export function createSessionStore(storage: KVStorage, idGen?: () => string): Se
     }
   };
 
+  /**
+   * Persist, DEGRADING instead of throwing. `record()` runs on the send path,
+   * so a QuotaExceededError propagating from here would strand the send button
+   * disabled with the user's text already cleared — and stay broken across
+   * restarts, since storage is still full. So: try, then retry with a quarter
+   * of the history, then give up quietly (the conversation still renders; only
+   * its persistence is lost).
+   */
   const save = (sessions: ChatSession[]) => {
     const bounded = [...sessions]
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .slice(0, MAX_SESSIONS);
-    storage.setItem(STORE_KEY, JSON.stringify(bounded));
+    try {
+      storage.setItem(STORE_KEY, JSON.stringify(bounded));
+      return;
+    } catch {
+      /* quota / storage unavailable — fall through to the eviction retry */
+    }
+    try {
+      storage.setItem(STORE_KEY, JSON.stringify(bounded.slice(0, Math.floor(MAX_SESSIONS / 4))));
+    } catch {
+      /* still failing — persistence is off for now, by design */
+    }
   };
 
   return {
@@ -137,7 +158,11 @@ export function createSessionStore(storage: KVStorage, idGen?: () => string): Se
       const sessions = load();
       const s = sessions.find((x) => x.id === id);
       if (!s) return undefined;
-      s.entries.push(entry);
+      s.entries.push(
+        entry.text.length > MAX_ENTRY_CHARS
+          ? { ...entry, text: `${entry.text.slice(0, MAX_ENTRY_CHARS)}…` }
+          : entry,
+      );
       if (s.entries.length > MAX_ENTRIES) s.entries.splice(0, s.entries.length - MAX_ENTRIES);
       if (!s.title && entry.role === "user") s.title = deriveTitle(entry.text);
       s.updatedAt = entry.at;
@@ -148,6 +173,21 @@ export function createSessionStore(storage: KVStorage, idGen?: () => string): Se
       save(load().filter((s) => s.id !== id));
     },
   };
+}
+
+/**
+ * Wipe every persisted transcript + the cached account email. Called on
+ * sign-out: these are plain user content (which is why localStorage is the
+ * right home) but they are still THAT user's content — the next account to
+ * sign in on this machine must not find them waiting in the sidebar.
+ */
+export function clearAllSessions(): void {
+  try {
+    globalThis.localStorage?.removeItem(STORE_KEY);
+    globalThis.localStorage?.removeItem("bv.account.email");
+  } catch {
+    /* no storage — nothing persisted to clear */
+  }
 }
 
 /** Runtime resolver — localStorage in the webview, memory when unavailable. */

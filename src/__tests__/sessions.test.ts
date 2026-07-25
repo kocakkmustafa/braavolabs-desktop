@@ -4,6 +4,7 @@ import {
   deriveTitle,
   groupSessions,
   MAX_ENTRIES,
+  MAX_ENTRY_CHARS,
   MAX_SESSIONS,
   TITLE_MAX,
   type KVStorage,
@@ -126,6 +127,56 @@ describe("createSessionStore", () => {
     const s = store.create(1);
     store.remove(s.id);
     expect(store.get(s.id)).toBeUndefined();
+  });
+});
+
+describe("storage failure handling (adversarial: quota exhaustion)", () => {
+  it("a throwing setItem never propagates — the send path must not be stranded", () => {
+    const store = createSessionStore(
+      { getItem: () => "[]", setItem: () => { throw new Error("QuotaExceededError"); } },
+      () => "id-1",
+    );
+    // Both writes go through save(); neither may throw.
+    expect(() => store.create(1)).not.toThrow();
+    expect(() => store.append("id-1", entry())).not.toThrow();
+  });
+
+  it("retries with a smaller history when the full write fails", () => {
+    let calls = 0;
+    const written: string[] = [];
+    const store = createSessionStore(
+      {
+        getItem: () =>
+          JSON.stringify(
+            Array.from({ length: MAX_SESSIONS }, (_, i) => ({
+              id: `s${i}`,
+              title: "t",
+              createdAt: i,
+              updatedAt: i,
+              entries: [],
+            })),
+          ),
+        setItem: (_k, v) => {
+          calls += 1;
+          if (calls === 1) throw new Error("QuotaExceededError");
+          written.push(v);
+        },
+      },
+      () => "new",
+    );
+    store.create(999);
+    expect(calls).toBe(2); // full write, then the evicted retry
+    expect(JSON.parse(written[0]).length).toBeLessThan(MAX_SESSIONS);
+  });
+
+  it("truncates an oversized entry instead of storing an unbounded answer", () => {
+    const storage = memStorage();
+    const store = createSessionStore(storage, () => "id-1");
+    const s = store.create(0);
+    store.append(s.id, entry({ role: "assistant", text: "x".repeat(MAX_ENTRY_CHARS * 3), at: 1 }));
+    const stored = store.get(s.id)!.entries[0].text;
+    expect(stored.length).toBe(MAX_ENTRY_CHARS + 1); // + the ellipsis
+    expect(stored.endsWith("…")).toBe(true);
   });
 });
 
