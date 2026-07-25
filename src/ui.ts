@@ -74,12 +74,22 @@ import {
   applyReducedMotion,
   effectiveReducedMotion,
 } from "./prefs";
+import {
+  RelayBridge,
+  bridgeGovernance,
+  resolveApproval,
+  resolveRejection,
+} from "./relay-bridge";
+import { createRelayTransport } from "./relay-transport";
 
 /**
  * Kill switch registry: every open approval modal registers its fail-closed
  * closer here so "Kill all…" can reject them without reaching into promises.
  */
 const openApprovalClosers = new Set<() => void>();
+
+/** Set while the companion broadcast is live so the kill switch can stop it. */
+let activeRelayStopper: (() => Promise<void>) | null = null;
 
 /** OS-level reduced-motion, guarded for non-browser test environments. */
 function osPrefersReducedMotion(): boolean {
@@ -103,9 +113,20 @@ function initReducedMotion(): ReturnType<typeof resolvePrefs> {
  * launchable from this UI, so there is nothing of theirs to stop here; the
  * scope grows with those surfaces.
  */
-async function killEverything(): Promise<{ approvals: number; browser: boolean }> {
+async function killEverything(): Promise<{ approvals: number; browser: boolean; relay: boolean }> {
   const approvals = openApprovalClosers.size;
   for (const c of [...openApprovalClosers]) c();
+  let relay = false;
+  if (activeRelayStopper) {
+    const stop = activeRelayStopper;
+    activeRelayStopper = null;
+    try {
+      await stop();
+      relay = true;
+    } catch {
+      // Relay unreachable — the local side is still torn down by the stopper.
+    }
+  }
   let browser = false;
   try {
     const g = globalThis as Record<string, any>;
@@ -119,7 +140,7 @@ async function killEverything(): Promise<{ approvals: number; browser: boolean }
   } catch {
     // No live browser connection (or no host in dev) — nothing to stop.
   }
-  return { approvals, browser };
+  return { approvals, browser, relay };
 }
 
 export interface UiDeps {
@@ -476,6 +497,70 @@ export function renderWorkspace(deps: UiDeps): void {
     setRow(t("settings.hosts"), t("settings.hostsSub")),
   );
 
+  // COMPANION — broadcast THIS workspace session to the relay so the phone
+  // (same account — owner-binding needs no pairing) can watch, steer and
+  // answer approvals. deps.gov is swapped to the bridgeGovernance decorator
+  // while live so approval requests + audit mirror up; the swap is reversed
+  // on stop. NOTE: a companion approve still lands on the Rust NATIVE dialog
+  // (R4) — remote approval without the native confirm is a founder decision.
+  let compBridge: RelayBridge | null = null;
+  const baseGov = deps.gov;
+  const compToggle = el("button", "toggle");
+  const compStatus = el("div", "set-sub mono", t("settings.companionOff"));
+  const syncComp = () => compToggle.classList.toggle("on", !!compBridge);
+  const stopCompanion = async () => {
+    deps.gov = baseGov;
+    activeRelayStopper = null;
+    const b = compBridge;
+    compBridge = null;
+    syncComp();
+    compStatus.textContent = t("settings.companionOff");
+    await b?.stop().catch(() => {});
+  };
+  const startCompanion = async () => {
+    compToggle.disabled = true;
+    try {
+      const transport = createRelayTransport({ cfg });
+      const b = new RelayBridge(transport, {
+        // Owner-bound remote steer behaves like a typed prompt: fill + run.
+        onSteer: (m) => {
+          ta.value = m;
+          void run();
+        },
+        onApprove: async (id) => {
+          await resolveApproval(deps.gov, id);
+        },
+        onReject: (id) => resolveRejection(deps.gov, id),
+        onKill: async () => {
+          await killEverything();
+        },
+      });
+      const { sessionId } = await b.start({
+        surface: "desktop",
+        label: (activeSession?.title || t("app.name")).slice(0, 200),
+      });
+      compBridge = b;
+      deps.gov = bridgeGovernance(baseGov, b);
+      activeRelayStopper = stopCompanion;
+      compStatus.textContent = t("settings.companionOn", { id: sessionId.slice(0, 12) });
+    } catch {
+      compStatus.textContent = t("settings.companionErr");
+      await stopCompanion();
+    } finally {
+      compToggle.disabled = false;
+      syncComp();
+    }
+  };
+  compToggle.addEventListener("click", () => (compBridge ? void stopCompanion() : void startCompanion()));
+  const secComp = el("div", "sheet-sec");
+  const compRow = setRow(t("settings.companionTitle"), t("settings.companionSub"), compToggle);
+  secComp.append(
+    el("div", "sheet-sec-label mono", t("settings.secCompanion")),
+    compRow,
+    compStatus,
+    setRow(t("settings.companionPhone"), t("settings.companionPhoneSub")),
+  );
+
   // GOVERNANCE — the real per-action policy table (gov.policy(), pure) + kill.
   const policyList = el("div", "policy-list");
   for (const row of deps.gov.policy()) {
@@ -518,7 +603,7 @@ export function renderWorkspace(deps: UiDeps): void {
     setRow(t("settings.telemetry"), t("settings.telemetrySub")),
   );
 
-  sheetBody.append(secModels, secConn, secGov, secApp);
+  sheetBody.append(secModels, secConn, secComp, secGov, secApp);
   sheet.append(sheetHead, sheetBody);
   backdrop.append(sheet);
   root.append(backdrop);
@@ -950,8 +1035,15 @@ async function gateAction(
       await gov.reject(res.actionId);
       return { ok: false, reason: t("gov.rejectedByUser") };
     }
-    const r = await gov.approve(res.actionId);
-    token = r.token;
+    try {
+      const r = await gov.approve(res.actionId);
+      token = r.token;
+    } catch {
+      // First-resolver-wins: a companion approve/reject (or the kill switch)
+      // already settled this actionId — the local click loses the race,
+      // fail-closed with an honest message instead of an uncaught throw.
+      return { ok: false, reason: t("gov.resolvedElsewhere") };
+    }
   }
   if (!token) return { ok: false, reason: t("gov.rejectedByUser") };
   const consumed = await gov.consume(token, kind, detail);
@@ -982,7 +1074,11 @@ async function gateForToken(
       await gov.reject(res.actionId);
       return { ok: false, reason: t("gov.rejectedByUser") };
     }
-    token = (await gov.approve(res.actionId)).token;
+    try {
+      token = (await gov.approve(res.actionId)).token;
+    } catch {
+      return { ok: false, reason: t("gov.resolvedElsewhere") };
+    }
   }
   if (!token) return { ok: false, reason: t("gov.rejectedByUser") };
   return { ok: true, token };
@@ -1055,6 +1151,7 @@ function showKillDialog(deps: UiDeps): Promise<void> {
     const scope = el("div", "kill-scope mono");
     scope.append(
       el("div", undefined, `• ${t("kill.scopeApprovals")}`),
+      el("div", undefined, `• ${t("kill.scopeRelay")}`),
       el("div", undefined, `• ${t("kill.scopeBrowser")}`),
       el("div", "kill-scope-note", t("kill.scopeNote")),
     );
@@ -1079,6 +1176,7 @@ function showKillDialog(deps: UiDeps): Promise<void> {
       void killEverything().then((r) => {
         scope.replaceChildren(
           el("div", undefined, `✓ ${t("kill.doneApprovals", { n: String(r.approvals) })}`),
+          el("div", undefined, r.relay ? `✓ ${t("kill.doneRelay")}` : `— ${t("kill.doneNoRelay")}`),
           el("div", undefined, r.browser ? `✓ ${t("kill.doneBrowser")}` : `— ${t("kill.doneNoBrowser")}`),
         );
         btns.replaceChildren(cancelBtn);
