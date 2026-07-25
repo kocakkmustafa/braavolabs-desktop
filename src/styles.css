@@ -1097,3 +1097,410 @@ textarea {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* ── design v3 shell ─────────────────────────────────────────────────────
+   Title bar + surface switch + settings sheet, ported from the approved
+   Claude Design comp. Configuration (keys, MCP) moved out of the rail and
+   into the sheet; the rail now only carries what you're working on. */
+
+.win {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  min-height: 0;
+}
+
+.titlebar {
+  height: 40px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  background: #0b0d13;
+  border-bottom: 1px solid #14171f;
+  -webkit-app-region: drag;
+}
+.tb-lights {
+  display: flex;
+  gap: 7px;
+}
+.tb-lights i {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  display: block;
+}
+.tb-l1 { background: #ff5f57; }
+.tb-l2 { background: #febc2e; }
+.tb-l3 { background: #57aaf7; }
+.tb-crumb {
+  font-size: 11.5px;
+  color: #69718a;
+  margin-left: 6px;
+}
+.tb-spacer { flex: 1; }
+.tb-settings {
+  -webkit-app-region: no-drag;
+  font: inherit;
+  font-size: 12px;
+  color: #69718a;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 3px 8px;
+  border-radius: 6px;
+}
+.tb-settings:hover {
+  color: #e8eaf0;
+  background: #12151d;
+}
+
+.win .shell {
+  flex: 1;
+  min-height: 0;
+}
+
+/* Surface switch — Chat / Code. */
+.seg {
+  display: flex;
+  background: #0d0f15;
+  border: 1px solid #1a1e28;
+  border-radius: 999px;
+  padding: 2px;
+  margin: 0 2px 12px;
+}
+.seg-btn {
+  flex: 1;
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: #69718a;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.seg-btn.active {
+  background: #1a1f2b;
+  color: #e8eaf0;
+}
+.rail-btn.primary {
+  border-color: #232a3a;
+  background: #12151d;
+  color: #e8eaf0;
+}
+.rail-btn.primary:hover {
+  border-color: #3b82f6;
+  color: #7dd3fc;
+}
+
+/* Code surface: the Lane-B panel takes the whole center column. */
+.code-pane {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px 22px;
+}
+
+/* Settings sheet. */
+.sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 5, 10, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+.sheet {
+  width: 740px;
+  max-width: 92%;
+  max-height: 86%;
+  overflow-y: auto;
+  background: #0b0c11;
+  border: 1px solid #232a3a;
+  border-radius: 14px;
+}
+.sheet-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid #14171f;
+  position: sticky;
+  top: 0;
+  background: #0b0c11;
+}
+.sheet-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+.sheet-close {
+  font: inherit;
+  font-size: 11px;
+  color: #8b93a7;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.sheet-close:hover { color: #e8eaf0; }
+.sheet-body {
+  padding: 16px 18px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ── design v3: sessions list + account row + composer chips ───────────── */
+
+.sessions-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 2px;
+  overflow-y: auto;
+  max-height: 38vh;
+}
+.session-item {
+  display: flex;
+  align-items: center;
+  text-align: left;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--muted, #8b93a7);
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  padding: 6px 8px;
+  cursor: pointer;
+  width: 100%;
+}
+.session-item:hover {
+  background: #10131a;
+}
+.session-item.active {
+  background: #131722;
+  color: #e8eaf0;
+}
+.session-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.account-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid #14171f;
+  padding-top: 10px;
+  margin-top: 2px;
+  min-width: 0;
+}
+.account-avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #12151d;
+  border: 1px solid #232a3a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: #7dd3fc;
+  flex: none;
+}
+.account-meta {
+  flex: 1;
+  min-width: 0;
+}
+.account-email {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.account-sub {
+  font-size: 10px;
+  color: #8b93a7;
+}
+
+/* Composer as chips (design v3): pill lane buttons, pill send, ⇧⏎ hint. */
+.mode-toggle button {
+  border-radius: 999px;
+}
+.enter-hint {
+  font-size: 10px;
+  color: #8b93a7;
+  white-space: nowrap;
+  align-self: center;
+  flex: none;
+}
+.send-btn {
+  border-radius: 999px;
+}
+
+/* ── design v3: settings IA + kill switch + reduced motion ─────────────── */
+
+.sheet-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 0 4px;
+  border-bottom: 1px solid #14171f;
+}
+.sheet-sec:last-child {
+  border-bottom: none;
+}
+.sheet-sec-label {
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  color: var(--muted, #8b93a7);
+}
+.set-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 2px;
+}
+.set-meta {
+  flex: 1;
+  min-width: 0;
+}
+.set-title {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+}
+.set-sub {
+  font-size: 12px;
+  color: #69718a;
+}
+.set-btn {
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted, #8b93a7);
+  background: transparent;
+  border: 1px solid #232a3a;
+  border-radius: 999px;
+  padding: 5px 13px;
+  cursor: pointer;
+  flex: none;
+}
+.set-btn:hover {
+  color: #7dd3fc;
+  border-color: var(--arc, #3b82f6);
+}
+.policy-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 18px;
+  padding: 2px 2px 8px;
+}
+.policy-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+.policy-kind {
+  font-size: 11px;
+  color: var(--muted, #8b93a7);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chip-ask {
+  border-color: rgba(255, 122, 26, 0.5);
+  color: var(--ember, #ff7a1a);
+}
+.kill-btn {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--molten, #ff4d4d);
+  background: transparent;
+  border: 1px solid rgba(255, 77, 77, 0.4);
+  border-radius: 999px;
+  padding: 5px 14px;
+  cursor: pointer;
+  flex: none;
+}
+.kill-btn:hover {
+  border-color: var(--molten, #ff4d4d);
+  background: rgba(255, 77, 77, 0.08);
+}
+.kill-card {
+  border-color: rgba(255, 77, 77, 0.45);
+}
+.kill-scope {
+  font-size: 11.5px;
+  line-height: 1.9;
+  color: #c9cfda;
+  background: #07080c;
+  border: 1px solid #1a1e28;
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-top: 10px;
+  text-align: left;
+}
+.kill-scope-note {
+  color: #69718a;
+  margin-top: 6px;
+}
+.kill-confirm {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(135deg, #d43a3a, #ff4d4d);
+  border: none;
+  border-radius: 999px;
+  padding: 9px 20px;
+  cursor: pointer;
+}
+.kill-confirm:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.toggle {
+  width: 34px;
+  height: 20px;
+  border-radius: 999px;
+  background: #232a3a;
+  border: none;
+  position: relative;
+  cursor: pointer;
+  flex: none;
+  transition: background 0.2s;
+}
+.toggle::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #5a6175;
+  transition: transform 0.2s, background 0.2s;
+}
+.toggle.on {
+  background: var(--arc, #3b82f6);
+}
+.toggle.on::after {
+  transform: translateX(14px);
+  background: #fff;
+}
+
+/* App-level reduced motion: the toggle (or the OS) kills every animation. */
+.reduce-motion *,
+.reduce-motion *::before,
+.reduce-motion *::after {
+  animation-duration: 0.01s !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01s !important;
+}

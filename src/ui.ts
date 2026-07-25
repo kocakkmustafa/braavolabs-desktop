@@ -63,6 +63,123 @@ import {
   McpGateError,
 } from "./mcp";
 import type { Translator } from "./i18n";
+import {
+  resolveSessionStore,
+  groupSessions,
+  type ChatSession,
+  type SessionRole,
+} from "./sessions";
+import {
+  resolvePrefs,
+  applyReducedMotion,
+  effectiveReducedMotion,
+} from "./prefs";
+import {
+  RelayBridge,
+  bridgeGovernance,
+  resolveApproval,
+  resolveRejection,
+} from "./relay-bridge";
+import { createRelayTransport } from "./relay-transport";
+
+/** How an approval was settled. `token` is present only when the resolver
+ *  ALREADY minted one (companion approve) — the local click mints its own. */
+export interface ApprovalOutcome {
+  approved: boolean;
+  token?: string;
+}
+
+/**
+ * Open approval modals, keyed by governance actionId. Two things resolve them
+ * besides the user's click: a companion decision arriving over the relay
+ * (which must hand its minted token over — approving on the phone and then
+ * failing locally would be worse than not offering it), and the kill switch
+ * (fail-closed, no token).
+ */
+const openApprovals = new Map<string, (o: ApprovalOutcome) => void>();
+
+/** Settle every open approval. Used by the kill switch and by teardown. */
+function settleAllApprovals(outcome: ApprovalOutcome): number {
+  const n = openApprovals.size;
+  for (const resolve of [...openApprovals.values()]) resolve(outcome);
+  openApprovals.clear();
+  return n;
+}
+
+/** Set while the companion broadcast is live so the kill switch can stop it. */
+let activeRelayStopper: (() => Promise<void>) | null = null;
+
+/**
+ * Teardown for the CURRENT workspace render. Registered by renderWorkspace and
+ * run before the next render (or the login view) replaces it. Without this the
+ * companion bridge, the governance decorator and the keydown listener outlive
+ * sign-out — so the NEXT account's approvals would mirror to the previous
+ * account's phone, which could still steer and kill.
+ */
+let disposeWorkspace: (() => void) | null = null;
+
+function runWorkspaceTeardown(): void {
+  const dispose = disposeWorkspace;
+  disposeWorkspace = null;
+  dispose?.();
+  settleAllApprovals({ approved: false });
+}
+
+/** OS-level reduced-motion, guarded for non-browser test environments. */
+function osPrefersReducedMotion(): boolean {
+  try {
+    return globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+  } catch {
+    return false;
+  }
+}
+
+function initReducedMotion(): ReturnType<typeof resolvePrefs> {
+  const prefs = resolvePrefs();
+  applyReducedMotion(document.documentElement, effectiveReducedMotion(prefs, osPrefersReducedMotion()));
+  return prefs;
+}
+
+/**
+ * Stop everything this UI can actually reach today — honest scope:
+ * open approval requests (rejected, fail-closed) and the governed browser
+ * connection (host audits the disconnect). PTY/relay sessions are not yet
+ * launchable from this UI, so there is nothing of theirs to stop here; the
+ * scope grows with those surfaces.
+ */
+async function killEverything(): Promise<{ approvals: number; relay: "stopped" | "failed" | "inactive" }> {
+  const approvals = settleAllApprovals({ approved: false });
+
+  let relay: "stopped" | "failed" | "inactive" = "inactive";
+  if (activeRelayStopper) {
+    const stop = activeRelayStopper;
+    activeRelayStopper = null;
+    try {
+      await stop();
+      relay = "stopped";
+    } catch {
+      // Local teardown still happened inside the stopper; the relay may not
+      // have received the `ended` event — report that difference honestly.
+      relay = "failed";
+    }
+  }
+
+  // Belt-and-braces: ask the host to drop any governed browser connection.
+  // NOT reported to the user — the host returns Ok() whether or not anything
+  // was connected, and no surface in this UI opens one, so a "✓ disconnected"
+  // line would be a guaranteed false positive.
+  try {
+    const g = globalThis as Record<string, any>;
+    const inv = g?.__TAURI__?.core?.invoke as
+      | ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>)
+      | undefined;
+    await inv?.("browser_disconnect", { ts: Date.now() });
+  } catch {
+    /* no host / nothing connected */
+  }
+
+  return { approvals, relay };
+}
 
 export interface UiDeps {
   root: HTMLElement;
@@ -98,6 +215,8 @@ const el = <K extends keyof HTMLElementTagNameMap>(
 // ── login view ────────────────────────────────────────────────────────────
 export function renderLogin(deps: UiDeps): void {
   const { root, cfg, t } = deps;
+  runWorkspaceTeardown();
+  initReducedMotion();
   root.innerHTML = "";
   const wrap = el("div", "login-wrap");
   const card = el("div", "login-card");
@@ -157,6 +276,13 @@ export function renderLogin(deps: UiDeps): void {
       cfg.token = res.data.token;
       cfg.refreshToken = res.data.refreshToken;
       await deps.persist(cfg);
+      // Email is identity, not a secret — localStorage (not the secure store)
+      // so the account row can show who is signed in.
+      try {
+        globalThis.localStorage?.setItem("bv.account.email", emailInput.value.trim());
+      } catch {
+        /* webview without storage — the account row just stays generic */
+      }
       renderWorkspace(deps);
     } finally {
       btn.disabled = false;
@@ -200,15 +326,34 @@ function mapLoginErrorText(t: Translator, view: ReturnType<typeof toLoginError>)
 // ── workspace (3-pane) ──────────────────────────────────────────────────────
 export function renderWorkspace(deps: UiDeps): void {
   const { root, cfg, t } = deps;
+  // A second render must not leave the previous one's bridge, governance
+  // decorator or key listener alive (see runWorkspaceTeardown).
+  runWorkspaceTeardown();
+  const prefs = initReducedMotion();
   root.innerHTML = "";
   let mode: Mode = "cascade";
 
   const shell = el("div", "shell");
 
+  // --- title bar (design v3): traffic lights, mode crumb, Settings ---
+  const titlebar = el("div", "titlebar");
+  const lights = el("div", "tb-lights");
+  lights.append(el("i", "tb-l1"), el("i", "tb-l2"), el("i", "tb-l3"));
+  const crumb = el("span", "tb-crumb mono", t("app.name"));
+  const settingsBtn = el("button", "tb-settings", t("titlebar.settings"));
+  titlebar.append(lights, crumb, el("div", "tb-spacer"), settingsBtn);
+
   // --- left rail ---
   const rail = el("aside", "rail");
   const brand = el("div", "brand");
   brand.append(el("span", "brand-dot"), document.createTextNode(t("app.name")));
+
+  // Surface switch. Chat is the everyday surface; Code is the vendor-CLI
+  // (Lane-B) surface — the same panel that used to live inline in the rail.
+  const seg = el("div", "seg");
+  const segChatBtn = el("button", "seg-btn active", t("surface.chat"));
+  const segCodeBtn = el("button", "seg-btn", t("surface.code"));
+  seg.append(segChatBtn, segCodeBtn);
 
   const connSec = el("div");
   connSec.append(el("div", "rail-section-label", t("rail.connection")));
@@ -216,12 +361,26 @@ export function renderWorkspace(deps: UiDeps): void {
   conn.append(el("span", "conn-dot"), document.createTextNode(t("rail.connected")));
   connSec.append(conn);
 
-  const newChatBtn = el("button", "rail-btn", t("rail.newChat"));
+  const newChatBtn = el("button", "rail-btn primary", t("rail.newChat"));
   const memoryBtn = el("button", "rail-btn", t("rail.memory"));
 
+  // Chat sessions (design v3 TODAY / EARLIER). List + switching live here;
+  // the store itself is the pure, tested module in sessions.ts.
+  const sessionStore = resolveSessionStore();
+  let activeSession: ChatSession | null = null;
+  const sessionsSec = el("div", "sessions-sec");
+
+  // Configuration moved out of the rail and into Settings (design v3): the
+  // rail is for what you're working on, Settings for how the app is wired.
   const keysSec = renderKeysSection(deps);
   const laneBSec = renderLaneBSection(deps);
   const mcpSec = renderMcpSection(deps);
+
+  // Lane-B lives in the Code surface, so it is moved (not copied) out of the
+  // settings sheet — one instance, one source of truth for its state.
+  const codePane = el("div", "code-pane");
+  codePane.style.display = "none";
+  codePane.append(laneBSec);
 
   const spacer = el("div", "rail-spacer");
 
@@ -233,7 +392,23 @@ export function renderWorkspace(deps: UiDeps): void {
 
   const signOutBtn = el("button", "rail-btn", t("rail.signOut"));
 
-  rail.append(brand, connSec, newChatBtn, memoryBtn, keysSec, laneBSec, mcpSec, spacer, savingsCard, signOutBtn);
+  // Account row (design v3 footer): who is signed in + the BYOK badge.
+  let accountEmail = "";
+  try {
+    accountEmail = globalThis.localStorage?.getItem("bv.account.email") ?? "";
+  } catch {
+    /* no storage — generic row */
+  }
+  const account = el("div", "account-row");
+  const avatar = el("div", "account-avatar mono", (accountEmail[0] ?? "•").toUpperCase());
+  const accountMeta = el("div", "account-meta");
+  accountMeta.append(
+    el("div", "account-email", accountEmail || t("app.name")),
+    el("div", "account-sub mono", "BYOK"),
+  );
+  account.append(avatar, accountMeta);
+
+  rail.append(brand, seg, newChatBtn, memoryBtn, sessionsSec, connSec, spacer, savingsCard, account, signOutBtn);
 
   // --- center chat ---
   const chat = el("div", "chat");
@@ -293,8 +468,9 @@ export function renderWorkspace(deps: UiDeps): void {
   const ta = el("textarea") as HTMLTextAreaElement;
   ta.placeholder = t("chat.placeholder");
   const sendBtn = el("button", "send-btn", t("chat.send"));
+  const enterHint = el("span", "enter-hint mono", t("chat.enterHint"));
   const bottomRow = el("div", "composer-row");
-  bottomRow.append(ta, sendBtn);
+  bottomRow.append(ta, enterHint, sendBtn);
 
   composer.append(hint, topRow, bottomRow);
   chat.append(scroll, composer);
@@ -311,8 +487,225 @@ export function renderWorkspace(deps: UiDeps): void {
   activityBody.style.display = "none";
   inspector.append(inspTabs, inspectorBody, activityBody);
 
+  chat.append(codePane);
+
   shell.append(rail, chat, inspector);
-  root.append(shell);
+  const win = el("div", "win");
+  win.append(titlebar, shell);
+  root.append(win);
+
+  // --- settings sheet (design v3) ---
+  // One modal for everything configurable: keys, MCP servers, governance
+  // policy. Opened from the title bar, dismissed with Esc / backdrop click.
+  let settingsOpen = false;
+  const backdrop = el("div", "sheet-backdrop");
+  backdrop.style.display = "none";
+  const sheet = el("div", "sheet");
+  const sheetHead = el("div", "sheet-head");
+  sheetHead.append(el("b", "sheet-title", t("settings.title")), el("div", "tb-spacer"));
+  const sheetClose = el("button", "sheet-close mono", t("settings.close"));
+  sheetHead.append(sheetClose);
+  const sheetBody = el("div", "sheet-body");
+
+  // Design-v3 settings IA: four labelled sections. Rows are thin wiring —
+  // anything with behavior delegates to tested modules (vault/mcp/gov/prefs).
+  const setRow = (title: string, sub: string, control?: HTMLElement): HTMLElement => {
+    const row = el("div", "set-row");
+    const meta = el("div", "set-meta");
+    meta.append(el("b", "set-title", title), el("span", "set-sub", sub));
+    row.append(meta);
+    if (control) row.append(control);
+    return row;
+  };
+
+  // MODELS & KEYS — vault + the Lane-B pointer (single source: Code surface).
+  const openCodeBtn = el("button", "set-btn", t("settings.openCode"));
+  openCodeBtn.addEventListener("click", () => {
+    sheetClose.click();
+    segCodeBtn.click();
+  });
+  const secModels = el("div", "sheet-sec");
+  secModels.append(
+    el("div", "sheet-sec-label mono", t("settings.secModels")),
+    keysSec,
+    setRow(t("settings.vendorCli"), t("settings.vendorCliSub"), openCodeBtn),
+  );
+
+  // CONNECTORS & HOSTS — MCP registry + the host-runtime disclosure line.
+  const secConn = el("div", "sheet-sec");
+  secConn.append(
+    el("div", "sheet-sec-label mono", t("settings.secConnectors")),
+    mcpSec,
+    setRow(t("settings.hosts"), t("settings.hostsSub")),
+  );
+
+  // COMPANION — broadcast THIS workspace session to the relay so the phone
+  // (same account — owner-binding needs no pairing) can watch, steer and
+  // answer approvals. deps.gov is swapped to the bridgeGovernance decorator
+  // while live so approval requests + audit mirror up; the swap is reversed
+  // on stop. NOTE: a companion approve still lands on the Rust NATIVE dialog
+  // (R4) — remote approval without the native confirm is a founder decision.
+  let compBridge: RelayBridge | null = null;
+  const baseGov = deps.gov;
+  const compToggle = el("button", "toggle");
+  const compStatus = el("div", "set-sub mono", t("settings.companionOff"));
+  const syncComp = () => compToggle.classList.toggle("on", !!compBridge);
+  const stopCompanion = async () => {
+    deps.gov = baseGov;
+    activeRelayStopper = null;
+    const b = compBridge;
+    compBridge = null;
+    syncComp();
+    compStatus.textContent = t("settings.companionOff");
+    await b?.stop().catch(() => {});
+  };
+  const startCompanion = async () => {
+    compToggle.disabled = true;
+    try {
+      const transport = createRelayTransport({ cfg });
+      const b = new RelayBridge(transport, {
+        /**
+         * Owner-bound remote steer behaves like a typed prompt: fill + run.
+         * Two guards the local path gets for free but this one doesn't:
+         * (a) refuse while a dispatch is in flight — a burst of steer frames
+         *     would otherwise fan out into concurrent paid dispatches;
+         * (b) mirror an audit line so the ledger and the phone both record
+         *     that THIS dispatch was remote-initiated, not typed here.
+         */
+        onSteer: (m) => {
+          if (dispatching) {
+            void b?.emitAudit("steer: refused — a dispatch is already running").catch(() => {});
+            return;
+          }
+          void b?.emitAudit(`steer: remote prompt accepted (${mode})`).catch(() => {});
+          record("user", `↯ ${m}`); // ↯ marks remote origin in the transcript
+          ta.value = m;
+          void run();
+        },
+        onApprove: async (id) => {
+          // Hand the minted token to the modal that is still waiting locally,
+          // otherwise the phone's "Allow" burns the pending record and the
+          // local flow fails with "resolved elsewhere" — approving would
+          // cancel the very action the user approved.
+          const r = await resolveApproval(deps.gov, id);
+          const settle = openApprovals.get(id);
+          if (r.resolved && settle) settle({ approved: true, token: r.token });
+          else if (r.resolved) {
+            // No modal waiting (app re-rendered): the grant is unusable, so
+            // say so rather than leaving a silent dangling token.
+            void b?.emitAudit(`approve: no local request waiting for ${id}`).catch(() => {});
+          }
+        },
+        onReject: async (id) => {
+          await resolveRejection(deps.gov, id);
+          openApprovals.get(id)?.({ approved: false });
+        },
+        onKill: async () => {
+          await killEverything();
+        },
+      });
+      const { sessionId } = await b.start({
+        surface: "desktop",
+        label: (activeSession?.title || t("app.name")).slice(0, 200),
+      });
+      compBridge = b;
+      deps.gov = bridgeGovernance(baseGov, b);
+      activeRelayStopper = stopCompanion;
+      compStatus.textContent = t("settings.companionOn", { id: sessionId.slice(0, 12) });
+    } catch {
+      compStatus.textContent = t("settings.companionErr");
+      await stopCompanion();
+    } finally {
+      compToggle.disabled = false;
+      syncComp();
+    }
+  };
+  compToggle.addEventListener("click", () => (compBridge ? void stopCompanion() : void startCompanion()));
+  const secComp = el("div", "sheet-sec");
+  const compRow = setRow(t("settings.companionTitle"), t("settings.companionSub"), compToggle);
+  secComp.append(
+    el("div", "sheet-sec-label mono", t("settings.secCompanion")),
+    compRow,
+    compStatus,
+    setRow(t("settings.companionPhone"), t("settings.companionPhoneSub")),
+  );
+
+  // GOVERNANCE — the real per-action policy table (gov.policy(), pure) + kill.
+  const policyList = el("div", "policy-list");
+  for (const row of deps.gov.policy()) {
+    const r = el("div", "policy-row");
+    r.append(el("span", "policy-kind mono", row.kind));
+    const chipCls =
+      row.decision === "auto-allow" ? "chip chip-safe" : row.decision === "deny" ? "chip chip-risk" : "chip chip-ask";
+    const chipText =
+      row.decision === "auto-allow"
+        ? t("settings.policyAuto")
+        : row.decision === "deny"
+          ? t("settings.policyDeny")
+          : t("settings.policyAsk");
+    r.append(el("span", chipCls, chipText));
+    policyList.append(r);
+  }
+  const killBtn = el("button", "kill-btn", t("settings.killBtn"));
+  killBtn.addEventListener("click", () => void showKillDialog(deps));
+  const secGov = el("div", "sheet-sec");
+  secGov.append(
+    el("div", "sheet-sec-label mono", t("settings.secGovernance")),
+    setRow(t("settings.policyTitle"), t("settings.policySub")),
+    policyList,
+    setRow(t("settings.killTitle"), t("settings.killSub"), killBtn),
+  );
+
+  // APP & DATA — a WORKING reduced-motion toggle + the honest telemetry line.
+  const rmToggle = el("button", "toggle");
+  const syncRm = () => rmToggle.classList.toggle("on", prefs.reducedMotion());
+  syncRm();
+  rmToggle.addEventListener("click", () => {
+    prefs.setReducedMotion(!prefs.reducedMotion());
+    applyReducedMotion(document.documentElement, effectiveReducedMotion(prefs, osPrefersReducedMotion()));
+    syncRm();
+  });
+  const secApp = el("div", "sheet-sec");
+  secApp.append(
+    el("div", "sheet-sec-label mono", t("settings.secApp")),
+    setRow(t("settings.reducedMotion"), t("settings.reducedMotionSub"), rmToggle),
+    setRow(t("settings.telemetry"), t("settings.telemetrySub")),
+  );
+
+  sheetBody.append(secModels, secConn, secComp, secGov, secApp);
+  sheet.append(sheetHead, sheetBody);
+  backdrop.append(sheet);
+  root.append(backdrop);
+
+  const setSettings = (open: boolean) => {
+    settingsOpen = open;
+    backdrop.style.display = open ? "flex" : "none";
+  };
+  settingsBtn.addEventListener("click", () => setSettings(true));
+  sheetClose.addEventListener("click", () => setSettings(false));
+  backdrop.addEventListener("click", (e) => {
+    if (e.target === backdrop) setSettings(false);
+  });
+  // Sheet-local Esc handler; registered once per workspace render.
+  const onWorkspaceKey = (e: KeyboardEvent) => {
+    if (e.key === "Escape" && settingsOpen) setSettings(false);
+  };
+  window.addEventListener("keydown", onWorkspaceKey);
+
+  // --- surface switch ---
+  let surface: "chat" | "code" = "chat";
+  const applySurface = (s: "chat" | "code") => {
+    surface = s;
+    segChatBtn.classList.toggle("active", s === "chat");
+    segCodeBtn.classList.toggle("active", s === "code");
+    scroll.style.display = s === "chat" ? "" : "none";
+    composer.style.display = s === "chat" ? "" : "none";
+    codePane.style.display = s === "code" ? "" : "none";
+    crumb.textContent = s === "chat" ? activeSession?.title || t("app.name") : t("surface.codeCrumb");
+  };
+  segChatBtn.addEventListener("click", () => applySurface("chat"));
+  segCodeBtn.addEventListener("click", () => applySurface("code"));
+  applySurface(surface);
 
   // --- governance activity view (policy visibility + audit ledger) ---
   let activeTab: "detail" | "activity" = "detail";
@@ -361,6 +754,76 @@ export function renderWorkspace(deps: UiDeps): void {
   // --- behavior ---
   const scrollToEnd = () => (scroll.scrollTop = scroll.scrollHeight);
 
+  // --- chat sessions: list, switch, record ---
+  const sessionItem = (s: ChatSession): HTMLElement => {
+    const item = el("button", "session-item");
+    if (activeSession?.id === s.id) item.classList.add("active");
+    item.append(el("span", "session-title", s.title || t("sessions.untitled")));
+    item.addEventListener("click", () => loadSession(s.id));
+    return item;
+  };
+
+  const refreshSessionList = () => {
+    sessionsSec.replaceChildren();
+    const { today, earlier } = groupSessions(sessionStore.list(), Date.now());
+    if (today.length) {
+      sessionsSec.append(el("div", "rail-section-label", t("sessions.today")));
+      for (const s of today) sessionsSec.append(sessionItem(s));
+    }
+    if (earlier.length) {
+      sessionsSec.append(el("div", "rail-section-label", t("sessions.earlier")));
+      for (const s of earlier) sessionsSec.append(sessionItem(s));
+    }
+  };
+
+  const syncCrumb = () => {
+    if (surface !== "chat") return;
+    crumb.textContent = activeSession?.title || t("app.name");
+  };
+
+  // Replays a stored transcript as plain lines — deliberately NOT the rich
+  // cascade/compare cards (their payloads aren't persisted; see sessions.ts).
+  // All text lands via el()/textContent, never markup.
+  const loadSession = (id: string) => {
+    const s = sessionStore.get(id);
+    if (!s) return;
+    activeSession = s;
+    scroll.replaceChildren();
+    for (const e of s.entries) {
+      if (e.role === "user") scroll.append(el("div", "msg-user", e.text));
+      else if (e.role === "assistant") renderPlainAnswer(scroll, e.text, t);
+      else renderErrorCard(scroll, e.text);
+    }
+    refreshSessionList();
+    syncCrumb();
+    scrollToEnd();
+  };
+
+  const startNewSession = () => {
+    activeSession = null; // created lazily on first send, so empty chats don't pile up
+    scroll.replaceChildren();
+    inspectorBody.replaceChildren(el("div", "inspector-empty", t("inspector.empty")));
+    refreshSessionList();
+    syncCrumb();
+    ta.focus();
+  };
+  newChatBtn.addEventListener("click", startNewSession);
+
+  // In-flight guard for run(). The local path is accidentally safe (the
+  // textarea is cleared first) but a remote steer SETS the textarea, so
+  // without this a burst of relay frames would dispatch concurrently.
+  let dispatching = false;
+
+  const record = (role: SessionRole, text: string) => {
+    if (!text) return;
+    if (!activeSession) activeSession = sessionStore.create();
+    const before = activeSession.title;
+    activeSession =
+      sessionStore.append(activeSession.id, { role, mode, text, at: Date.now() }) ?? activeSession;
+    if (activeSession.title !== before) syncCrumb();
+    refreshSessionList();
+  };
+
   const refreshSavings = async () => {
     try {
       const raw = await savingsCall(cfg, { days: 30 });
@@ -387,6 +850,7 @@ export function renderWorkspace(deps: UiDeps): void {
       return;
     }
     hint.style.display = "none";
+    dispatching = true;
     sendBtn.disabled = true;
     ta.value = "";
 
@@ -395,6 +859,9 @@ export function renderWorkspace(deps: UiDeps): void {
     scrollToEnd();
 
     try {
+      // Inside the try: a storage failure here must not strand sendBtn
+      // disabled with the user's text already cleared.
+      record("user", text);
       if (mode === "cascade") {
         const thinking = el("div", "thinking");
         thinking.append(el("span", "spinner"), document.createTextNode(t("chat.thinking", { n: 1 })));
@@ -405,6 +872,7 @@ export function renderWorkspace(deps: UiDeps): void {
         const view = toCascadeView(raw);
         renderCascadeAnswer(scroll, view, t);
         renderCascadeInspector(inspectorBody, view, t);
+        record("assistant", view.answer);
       } else if (mode === "local") {
         // Lane-A local — governed (auto-allow), keyless, offline. Even an
         // auto-allowed action is audited so the ledger is a complete record.
@@ -412,6 +880,7 @@ export function renderWorkspace(deps: UiDeps): void {
         const gate = await gateAction(deps, "local.dispatch", localDetail);
         if (!gate.ok) {
           renderErrorCard(scroll, gate.reason);
+          record("error", gate.reason);
         } else {
           const host = resolveOllamaHost();
           const thinking = el("div", "thinking");
@@ -424,13 +893,16 @@ export function renderWorkspace(deps: UiDeps): void {
             thinking.remove();
             renderPlainAnswer(scroll, res.content, t);
             renderSourceInspector(inspectorBody, t("chat.localSource"), res.model, t);
+            record("assistant", res.content);
             await deps.gov.settle("local.dispatch", "success", localDetail);
           } catch (e) {
             thinking.remove();
             if (e instanceof OllamaUnreachableError) {
               renderErrorCard(scroll, t("chat.localUnreachable", { host: e.host }));
+              record("error", t("chat.localUnreachable", { host: e.host }));
             } else {
               renderErrorCard(scroll, String(e instanceof Error ? e.message : e));
+              record("error", String(e instanceof Error ? e.message : e));
             }
             await deps.gov.settle("local.dispatch", "error", localDetail);
           }
@@ -443,6 +915,7 @@ export function renderWorkspace(deps: UiDeps): void {
         const providerRaw = directProviderSel.value;
         if (!isDirectProvider(providerRaw)) {
           renderErrorCard(scroll, t("chat.empty"));
+          record("error", t("chat.empty"));
         } else {
           const provider: DirectProvider = providerRaw;
           const directDetail: ActionDetail = { provider, summary: t("gov.kindDirectDispatch", { provider }) };
@@ -453,12 +926,14 @@ export function renderWorkspace(deps: UiDeps): void {
           const gate = await gateForToken(deps, "direct.dispatch", directDetail);
           if (!gate.ok) {
             renderErrorCard(scroll, gate.reason);
+            record("error", gate.reason);
           } else {
             // One-time raw key retrieval at dispatch — never rendered to the DOM.
             // The host consumes gate.token inside key_get before returning it.
             const apiKey = await deps.vault.get(provider, gate.token);
             if (!apiKey) {
               renderErrorCard(scroll, t("chat.noKey", { provider }));
+              record("error", t("chat.noKey", { provider }));
               await deps.gov.settle("direct.dispatch", "error", directDetail);
             } else {
               const model = resolveDirectModel(provider, directModelInput.value.trim() || undefined);
@@ -471,11 +946,13 @@ export function renderWorkspace(deps: UiDeps): void {
                 thinking.remove();
                 renderPlainAnswer(scroll, res.content, t);
                 renderSourceInspector(inspectorBody, t("chat.directSource", { provider }), res.model, t);
+                record("assistant", res.content);
                 await deps.gov.settle("direct.dispatch", "success", directDetail);
               } catch (e) {
                 thinking.remove();
                 const msg = e instanceof DirectApiError ? `${e.status} · ${e.message}` : String(e instanceof Error ? e.message : e);
                 renderErrorCard(scroll, msg);
+                record("error", msg);
                 await deps.gov.settle("direct.dispatch", "error", directDetail);
               }
             }
@@ -502,15 +979,18 @@ export function renderWorkspace(deps: UiDeps): void {
         const view = toCompareView(session);
         renderCompareAnswer(scroll, view, t);
         renderCompareInspector(inspectorBody, view, t);
+        record("assistant", view.finalAnswer || view.synthesis || view.error || view.status);
       }
       void refreshSavings();
     } catch (e) {
       const msg = e instanceof ApiError ? `${e.status} · ${e.message}` : String(e);
+      record("error", msg);
       const errCard = el("div", "msg-final");
       errCard.style.borderLeftColor = "var(--molten)";
       errCard.append(el("div", "msg-label", "error"), document.createTextNode(msg));
       scroll.append(errCard);
     } finally {
+      dispatching = false;
       sendBtn.disabled = false;
       scrollToEnd();
     }
@@ -518,22 +998,28 @@ export function renderWorkspace(deps: UiDeps): void {
 
   sendBtn.addEventListener("click", () => void run());
   ta.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+    // Design v3: Enter sends, Shift+Enter inserts a newline (Cmd/Ctrl+Enter
+    // kept for muscle memory from the previous build).
+    if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       void run();
     }
-  });
-  newChatBtn.addEventListener("click", () => {
-    scroll.innerHTML = "";
-    inspectorBody.innerHTML = "";
-    inspectorBody.append(el("div", "inspector-empty", t("inspector.empty")));
   });
   // Thin wiring only — the revoke-then-clear logic + its ordering/gate
   // invariants live in the unit-tested performSignOut (session.ts), which is
   // where the C3/#1 regression is guarded.
   signOutBtn.addEventListener("click", () => performSignOut(cfg, deps));
 
+  // Everything this render owns beyond the DOM: the companion bridge + the
+  // governance decorator installed with it, and the window key listener.
+  disposeWorkspace = () => {
+    window.removeEventListener("keydown", onWorkspaceKey);
+    if (compBridge) void stopCompanion();
+    else deps.gov = baseGov;
+  };
+
   void refreshSavings();
+  refreshSessionList();
 }
 
 // ── answer renderers (center) ───────────────────────────────────────────────
@@ -638,13 +1124,26 @@ async function gateAction(
   }
   let token = res.token;
   if (res.decision === "require-approval") {
-    const approved = await showApprovalModal(deps, detail, res.reason);
-    if (!approved) {
+    const outcome = await showApprovalModal(deps, res.actionId, detail, res.reason);
+    if (!outcome.approved) {
       await gov.reject(res.actionId);
       return { ok: false, reason: t("gov.rejectedByUser") };
     }
-    const r = await gov.approve(res.actionId);
-    token = r.token;
+    if (outcome.token) {
+      // Approved on the companion: the token was minted THERE. Reusing it is
+      // what makes a phone approval actually run the action (calling approve()
+      // again would throw — the pending record is already spent).
+      token = outcome.token;
+    } else {
+      try {
+        const r = await gov.approve(res.actionId);
+        token = r.token;
+      } catch {
+        // First-resolver-wins: something else settled this actionId — the local
+        // click loses, fail-closed with an honest message, not a throw.
+        return { ok: false, reason: t("gov.resolvedElsewhere") };
+      }
+    }
   }
   if (!token) return { ok: false, reason: t("gov.rejectedByUser") };
   const consumed = await gov.consume(token, kind, detail);
@@ -670,12 +1169,20 @@ async function gateForToken(
   if (res.decision === "deny") return { ok: false, reason: t("gov.denied", { reason: res.reason }) };
   let token = res.token;
   if (res.decision === "require-approval") {
-    const approved = await showApprovalModal(deps, detail, res.reason);
-    if (!approved) {
+    const outcome = await showApprovalModal(deps, res.actionId, detail, res.reason);
+    if (!outcome.approved) {
       await gov.reject(res.actionId);
       return { ok: false, reason: t("gov.rejectedByUser") };
     }
-    token = (await gov.approve(res.actionId)).token;
+    if (outcome.token) {
+      token = outcome.token; // companion-minted (see gateAction)
+    } else {
+      try {
+        token = (await gov.approve(res.actionId)).token;
+      } catch {
+        return { ok: false, reason: t("gov.resolvedElsewhere") };
+      }
+    }
   }
   if (!token) return { ok: false, reason: t("gov.rejectedByUser") };
   return { ok: true, token };
@@ -686,9 +1193,14 @@ async function gateForToken(
  * user decides. Blocks on a promise until Approve or Reject. The action summary
  * is the only thing shown; no secret ever reaches this surface.
  */
-function showApprovalModal(deps: UiDeps, detail: ActionDetail, reason: string): Promise<boolean> {
+function showApprovalModal(
+  deps: UiDeps,
+  actionId: string,
+  detail: ActionDetail,
+  reason: string,
+): Promise<ApprovalOutcome> {
   const { t, root } = deps;
-  return new Promise<boolean>((resolve) => {
+  return new Promise<ApprovalOutcome>((resolve) => {
     const overlay = el("div", "approve-overlay");
     const card = el("div", "approve-card");
     const flip = el("div", "approve-flip"); // coin-flip micro-animation host
@@ -711,19 +1223,86 @@ function showApprovalModal(deps: UiDeps, detail: ActionDetail, reason: string): 
     btns.append(rejectBtn, approveBtn);
     card.append(btns);
 
-    const close = (v: boolean) => {
+    const close = (o: ApprovalOutcome) => {
+      openApprovals.delete(actionId);
       overlay.remove();
-      resolve(v);
+      resolve(o);
     };
-    rejectBtn.addEventListener("click", () => close(false));
-    approveBtn.addEventListener("click", () => close(true));
+    // Registered so a companion decision (with its already-minted token) or the
+    // kill switch can settle this modal without a local click.
+    openApprovals.set(actionId, close);
+    rejectBtn.addEventListener("click", () => close({ approved: false }));
+    approveBtn.addEventListener("click", () => close({ approved: true }));
     overlay.addEventListener("click", (e) => {
-      if (e.target === overlay) close(false); // click-outside = reject (fail-closed)
+      if (e.target === overlay) close({ approved: false }); // click-outside = reject (fail-closed)
     });
 
     overlay.append(card);
     root.append(overlay);
     approveBtn.focus();
+  });
+}
+
+/**
+ * Two-step kill switch. Step one is the molten button in Settings; THIS dialog
+ * is step two — it lists exactly what will be stopped (honest scope: open
+ * approvals + the governed browser connection; PTY/relay aren't launchable
+ * from this UI yet) and only acts on the explicit confirm. Afterwards it
+ * reports what actually happened instead of claiming "everything".
+ */
+function showKillDialog(deps: UiDeps): Promise<void> {
+  const { t, root } = deps;
+  return new Promise<void>((resolve) => {
+    const overlay = el("div", "approve-overlay");
+    const card = el("div", "approve-card kill-card");
+    card.append(el("h2", "approve-title", t("kill.title")));
+    card.append(el("div", "approve-body", t("kill.body")));
+
+    const scope = el("div", "kill-scope mono");
+    scope.append(
+      el("div", undefined, `• ${t("kill.scopeApprovals")}`),
+      el("div", undefined, `• ${t("kill.scopeRelay")}`),
+      el("div", "kill-scope-note", t("kill.scopeNote")),
+    );
+    card.append(scope);
+
+    const btns = el("div", "approve-btns");
+    const cancelBtn = el("button", "approve-reject", t("kill.cancel"));
+    const confirmBtn = el("button", "kill-confirm", t("kill.confirm"));
+    btns.append(cancelBtn, confirmBtn);
+    card.append(btns);
+
+    const close = () => {
+      overlay.remove();
+      resolve();
+    };
+    cancelBtn.addEventListener("click", close);
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close();
+    });
+    confirmBtn.addEventListener("click", () => {
+      confirmBtn.disabled = true;
+      void killEverything().then((r) => {
+        scope.replaceChildren(
+          el("div", undefined, `✓ ${t("kill.doneApprovals", { n: String(r.approvals) })}`),
+          el(
+            "div",
+            undefined,
+            r.relay === "stopped"
+              ? `✓ ${t("kill.doneRelay")}`
+              : r.relay === "failed"
+                ? `! ${t("kill.failedRelay")}`
+                : `— ${t("kill.doneNoRelay")}`,
+          ),
+        );
+        btns.replaceChildren(cancelBtn);
+        cancelBtn.textContent = t("kill.closeBtn");
+      });
+    });
+
+    overlay.append(card);
+    root.append(overlay);
+    cancelBtn.focus(); // default focus on the SAFE action
   });
 }
 
