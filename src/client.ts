@@ -252,3 +252,53 @@ export async function listMemory(
   if (p.status) qs.set("status", p.status);
   return apiFetch(`/memory?${qs.toString()}`, { cfg, fetchImpl: o.fetchImpl, save: o.save });
 }
+
+// ── companies + always-on jobs (Company surface) ──────────────────────────
+
+/** GET /companies — the tenant's companies with agent/pipeline counts. */
+export async function listCompanies(
+  cfg: Config,
+  o: { fetchImpl?: FetchLike; save?: (c: Config) => void } = {},
+): Promise<any> {
+  return apiFetch("/companies", { cfg, fetchImpl: o.fetchImpl, save: o.save });
+}
+
+/**
+ * GET /pipelines/scheduled — always-on jobs. The server joins each pipeline's
+ * cron with the LIVE scheduler state, so `nextRunAt` is real (null when no
+ * scheduler is registered) instead of something we guess client-side.
+ */
+export async function listScheduledPipelines(
+  cfg: Config,
+  o: { fetchImpl?: FetchLike; save?: (c: Config) => void } = {},
+): Promise<any> {
+  return apiFetch("/pipelines/scheduled", { cfg, fetchImpl: o.fetchImpl, save: o.save });
+}
+
+/** POST /companies/:id/pause — 404s when the company is not ACTIVE. */
+export async function pauseCompany(
+  cfg: Config,
+  id: string,
+  o: { fetchImpl?: FetchLike; save?: (c: Config) => void } = {},
+): Promise<any> {
+  return apiFetch(`/companies/${encodeURIComponent(id)}/pause`, {
+    cfg,
+    method: "POST",
+    fetchImpl: o.fetchImpl,
+    save: o.save,
+  });
+}
+
+/** POST /companies/:id/resume — the inverse; 404s when not PAUSED. */
+export async function resumeCompany(
+  cfg: Config,
+  id: string,
+  o: { fetchImpl?: FetchLike; save?: (c: Config) => void } = {},
+): Promise<any> {
+  return apiFetch(`/companies/${encodeURIComponent(id)}/resume`, {
+    cfg,
+    method: "POST",
+    fetchImpl: o.fetchImpl,
+    save: o.save,
+  });
+}

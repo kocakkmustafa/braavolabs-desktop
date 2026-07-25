@@ -15,6 +15,10 @@ import {
   pollCompare,
   cascade,
   savings as savingsCall,
+  listCompanies,
+  listScheduledPipelines,
+  pauseCompany,
+  resumeCompany,
 } from "./client";
 import { performSignOut } from "./session";
 import {
@@ -63,6 +67,14 @@ import {
   McpGateError,
 } from "./mcp";
 import type { Translator } from "./i18n";
+import {
+  toCompanyViews,
+  toJobViews,
+  companySummary,
+  relativeAge,
+  type CompanyView,
+  type JobView,
+} from "./company";
 import {
   resolveSessionStore,
   groupSessions,
@@ -353,7 +365,8 @@ export function renderWorkspace(deps: UiDeps): void {
   const seg = el("div", "seg");
   const segChatBtn = el("button", "seg-btn active", t("surface.chat"));
   const segCodeBtn = el("button", "seg-btn", t("surface.code"));
-  seg.append(segChatBtn, segCodeBtn);
+  const segCompanyBtn = el("button", "seg-btn", t("surface.company"));
+  seg.append(segChatBtn, segCompanyBtn, segCodeBtn);
 
   const connSec = el("div");
   connSec.append(el("div", "rail-section-label", t("rail.connection")));
@@ -381,6 +394,12 @@ export function renderWorkspace(deps: UiDeps): void {
   const codePane = el("div", "code-pane");
   codePane.style.display = "none";
   codePane.append(laneBSec);
+
+  // Company surface (design v3 "Company"): read-only cloud state + the two
+  // lifecycle actions the API actually exposes. Every value comes from the
+  // server via the pure mappers in company.ts — nothing is invented here.
+  const companyPane = el("div", "company-pane");
+  companyPane.style.display = "none";
 
   const spacer = el("div", "rail-spacer");
 
@@ -488,6 +507,7 @@ export function renderWorkspace(deps: UiDeps): void {
   inspector.append(inspTabs, inspectorBody, activityBody);
 
   chat.append(codePane);
+  chat.append(companyPane);
 
   shell.append(rail, chat, inspector);
   const win = el("div", "win");
@@ -693,18 +713,155 @@ export function renderWorkspace(deps: UiDeps): void {
   };
   window.addEventListener("keydown", onWorkspaceKey);
 
+  // --- company surface ---
+  let companyBusy = false;
+  const renderCompany = (companies: CompanyView[], jobs: JobView[], error?: string) => {
+    companyPane.replaceChildren();
+
+    if (error) {
+      const err = el("div", "company-error", error);
+      companyPane.append(err);
+      return;
+    }
+
+    const sum = companySummary(companies, jobs);
+    companyPane.append(
+      el(
+        "div",
+        "company-summary mono",
+        t("company.summary", {
+          total: String(sum.total),
+          active: String(sum.active),
+          jobs: String(sum.jobs),
+          scheduled: String(sum.scheduled),
+        }),
+      ),
+    );
+
+    if (companies.length === 0) {
+      // Authoring lives on the web; the desktop reads and controls.
+      companyPane.append(el("div", "company-empty", t("company.empty")));
+    }
+
+    companyPane.append(el("div", "rail-section-label", t("company.companies")));
+    for (const c of companies) {
+      const row = el("div", "company-row");
+      row.append(el("span", `dot dot-${c.tone === "arc" ? "done" : c.tone === "ember" ? "run" : c.tone === "molten" ? "risk" : "idle"}`));
+      const meta = el("div", "company-meta");
+      meta.append(
+        el("div", "company-name", c.name),
+        el(
+          "div",
+          "company-sub mono",
+          t("company.counts", { agents: String(c.agentCount), pipelines: String(c.pipelineCount) }),
+        ),
+      );
+      row.append(meta);
+      row.append(el("span", "company-status mono", c.status.toLowerCase()));
+
+      // Only render an action the server will actually accept (pause 404s on a
+      // non-ACTIVE company, resume on a non-PAUSED one) — a button that always
+      // fails is worse than no button.
+      if (c.canPause || c.canResume) {
+        const btn = el("button", "set-btn", c.canPause ? t("company.pause") : t("company.resume"));
+        btn.addEventListener("click", async () => {
+          if (companyBusy) return;
+          companyBusy = true;
+          btn.disabled = true;
+          try {
+            if (c.canPause) await pauseCompany(cfg, c.id, { save: deps.persist });
+            else await resumeCompany(cfg, c.id, { save: deps.persist });
+            await loadCompany();
+          } catch (e) {
+            const msg = e instanceof ApiError ? `${e.status} · ${e.message}` : String(e);
+            renderCompany(companies, jobs, msg);
+          } finally {
+            companyBusy = false;
+          }
+        });
+        row.append(btn);
+      }
+      companyPane.append(row);
+    }
+
+    companyPane.append(el("div", "rail-section-label", t("company.jobs")));
+    if (jobs.length === 0) {
+      companyPane.append(el("div", "company-empty", t("company.noJobs")));
+    }
+    const now = Date.now();
+    for (const j of jobs) {
+      const row = el("div", "company-row");
+      const meta = el("div", "company-meta");
+      const age = relativeAge(j.lastRunAt, now);
+      meta.append(
+        el("div", "company-name", j.name),
+        el(
+          "div",
+          "company-sub mono",
+          [j.schedule, age ? t("company.lastRun", { age }) : ""].filter(Boolean).join(" · "),
+        ),
+      );
+      row.append(meta);
+      // "unscheduled" is its own word on purpose: an enabled job whose cron
+      // never reached the scheduler is a real bug, not the same as paused.
+      const stateText =
+        j.state === "scheduled"
+          ? relativeAge(j.nextRunAt, now)
+            ? t("company.nextRun", { age: relativeAge(j.nextRunAt, now) })
+            : t("company.stateScheduled")
+          : j.state === "paused"
+            ? t("company.statePaused")
+            : t("company.stateUnscheduled");
+      row.append(
+        el(
+          "span",
+          `company-status mono${j.state === "unscheduled" ? " bad" : ""}`,
+          stateText,
+        ),
+      );
+      companyPane.append(row);
+    }
+  };
+
+  const loadCompany = async () => {
+    companyPane.replaceChildren(el("div", "company-empty", t("company.loading")));
+    try {
+      const [rawCompanies, rawJobs] = await Promise.all([
+        listCompanies(cfg, { save: deps.persist }),
+        // Jobs are a nice-to-have: if the scheduled endpoint fails we still show
+        // the companies rather than blanking the whole surface.
+        listScheduledPipelines(cfg, { save: deps.persist }).catch(() => null),
+      ]);
+      renderCompany(toCompanyViews(rawCompanies), toJobViews(rawJobs));
+    } catch (e) {
+      const msg = e instanceof ApiError ? `${e.status} · ${e.message}` : String(e);
+      renderCompany([], [], t("company.loadFailed", { reason: msg }));
+    }
+  };
+
   // --- surface switch ---
-  let surface: "chat" | "code" = "chat";
-  const applySurface = (s: "chat" | "code") => {
+  let surface: "chat" | "company" | "code" = "chat";
+  const applySurface = (s: "chat" | "company" | "code") => {
     surface = s;
     segChatBtn.classList.toggle("active", s === "chat");
+    segCompanyBtn.classList.toggle("active", s === "company");
     segCodeBtn.classList.toggle("active", s === "code");
     scroll.style.display = s === "chat" ? "" : "none";
     composer.style.display = s === "chat" ? "" : "none";
     codePane.style.display = s === "code" ? "" : "none";
-    crumb.textContent = s === "chat" ? activeSession?.title || t("app.name") : t("surface.codeCrumb");
+    companyPane.style.display = s === "company" ? "" : "none";
+    crumb.textContent =
+      s === "chat"
+        ? activeSession?.title || t("app.name")
+        : s === "company"
+          ? t("surface.companyCrumb")
+          : t("surface.codeCrumb");
+    // Fetch on entry, not on mount: the Company surface costs two requests and
+    // most sessions never open it.
+    if (s === "company") void loadCompany();
   };
   segChatBtn.addEventListener("click", () => applySurface("chat"));
+  segCompanyBtn.addEventListener("click", () => applySurface("company"));
   segCodeBtn.addEventListener("click", () => applySurface("code"));
   applySurface(surface);
 
