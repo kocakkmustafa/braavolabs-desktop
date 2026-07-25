@@ -50,6 +50,14 @@ function tauriInvoke(): Invoke | null {
 export const ACTION_KINDS = [
   "probe.detect", // Lane-B: detect an installed vendor CLI (read-only)
   "local.dispatch", // Lane-A local Ollama (keyless, localhost)
+  // Server lanes (cascade / compare) — the tenant's own cloud spend via their
+  // own configured keys. AUTO-ALLOWED on purpose: an approval dialog on every
+  // chat message would be theatre, and the desktop is unattended precisely
+  // when a companion steer arrives. But it IS a governed kind so every
+  // dispatch (local or remote-initiated) leaves a ledger entry — the
+  // adversarial review's finding was the missing evidence, not a missing
+  // dialog. The detail summary carries the origin.
+  "server.dispatch",
   "direct.dispatch", // Lane-A BYOK egress to a provider API (secret leaves via header)
   "spawn.launch", // Lane-B: reveal/copy the vendor CLI launch command
   "command.run", // execute a command through the Rust choke point
@@ -85,7 +93,11 @@ export type Decision = "auto-allow" | "require-approval" | "deny";
  * effect (egress, launch, command, mcp, file-write) is NOT here, so it needs
  * approval. Adding a kind here is a conscious, reviewable widening of trust.
  */
-const AUTO_ALLOW: ReadonlySet<string> = new Set<string>(["probe.detect", "local.dispatch"]);
+const AUTO_ALLOW: ReadonlySet<string> = new Set<string>([
+  "probe.detect",
+  "local.dispatch",
+  "server.dispatch",
+]);
 
 /** Obviously destructive command shapes — hard-denied, never even surfaced for approval. */
 const DESTRUCTIVE: readonly RegExp[] = [

@@ -647,6 +647,15 @@ fn classify(kind: &str, argv: &[String], path: Option<&str>) -> (&'static str, &
     if kind == "probe.detect" || kind == "local.dispatch" {
         return ("auto-allow", "read-only / local-keyless");
     }
+    // Server lanes (cascade / compare): the tenant's own cloud spend on their
+    // own configured keys. Auto-allowed — a dialog on every chat message would
+    // be theatre, and the desktop is unattended exactly when a companion steer
+    // arrives — but it is a KNOWN governed kind so every dispatch lands in the
+    // audit ledger with its origin (the TS mirror is AUTO_ALLOW in
+    // governance.ts). Evidence, not a gate: that was the review's finding.
+    if kind == "server.dispatch" {
+        return ("auto-allow", "tenant's own cloud spend (audited)");
+    }
     // 3. FAIL-CLOSED default — unknown kinds land here too.
     // `pty.spawn` (Lane-B real-PTY) is an explicit, reasoned-about side-effecting
     // kind — it opens an interactive vendor CLI, so it requires approval. Listed
@@ -2959,6 +2968,14 @@ mod governance_tests {
     fn auto_allows_only_the_explicit_set() {
         assert_eq!(classify("probe.detect", &[], None).0, "auto-allow");
         assert_eq!(classify("local.dispatch", &[], None).0, "auto-allow");
+        // Server lanes: auto-allowed (see the comment at the call site) but a
+        // KNOWN kind, so the reason names the tenant's own spend rather than
+        // reading "unknown action (fail-closed)".
+        let (d, why) = classify("server.dispatch", &[], None);
+        assert_eq!(d, "auto-allow");
+        assert!(why.contains("audited"), "reason should name the audit: {why}");
+        // Guard against typo-drift widening the auto-allow set.
+        assert_eq!(classify("server.dispatchh", &[], None).0, "require-approval");
         assert_eq!(classify("direct.dispatch", &[], None).0, "require-approval");
         assert_eq!(classify("spawn.launch", &[], None).0, "require-approval");
         assert_eq!(classify("mcp.tool", &[], None).0, "require-approval");

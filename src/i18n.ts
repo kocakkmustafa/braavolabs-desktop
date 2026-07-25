@@ -196,6 +196,7 @@ const en: Dict = {
     kindSpawnLaunch: "Reveal launch command for {vendor}",
     kindDirectDispatch: "Send your prompt to {provider} with your BYOK key",
     kindLocalDispatch: "Run locally via Ollama",
+    kindServerDispatch: "Server {mode} dispatch ({origin}-initiated)",
     kindMcpTool: "Call MCP tool {tool} on {server}",
   },
 };
@@ -386,6 +387,7 @@ const tr: Dict = {
     kindSpawnLaunch: "{vendor} için başlatma komutunu göster",
     kindDirectDispatch: "Prompt'unu BYOK anahtarınla {provider} sağlayıcısına gönder",
     kindLocalDispatch: "Ollama ile yerelde çalıştır",
+    kindServerDispatch: "Sunucu {mode} çağrısı ({origin} başlattı)",
     kindMcpTool: "{server} üzerindeki {tool} MCP aracını çağır",
   },
 };

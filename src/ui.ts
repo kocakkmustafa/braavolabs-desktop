@@ -578,6 +578,7 @@ export function renderWorkspace(deps: UiDeps): void {
             return;
           }
           void b?.emitAudit(`steer: remote prompt accepted (${mode})`).catch(() => {});
+          nextDispatchRemote = true;
           record("user", `↯ ${m}`); // ↯ marks remote origin in the transcript
           ta.value = m;
           void run();
@@ -813,6 +814,8 @@ export function renderWorkspace(deps: UiDeps): void {
   // textarea is cleared first) but a remote steer SETS the textarea, so
   // without this a burst of relay frames would dispatch concurrently.
   let dispatching = false;
+  /** Set by onSteer for exactly one dispatch, so the audit line names the origin. */
+  let nextDispatchRemote = false;
 
   const record = (role: SessionRole, text: string) => {
     if (!text) return;
@@ -862,6 +865,25 @@ export function renderWorkspace(deps: UiDeps): void {
       // Inside the try: a storage failure here must not strand sendBtn
       // disabled with the user's text already cleared.
       record("user", text);
+      const origin = nextDispatchRemote ? "companion" : "local";
+      nextDispatchRemote = false;
+
+      if (mode === "cascade" || mode === "compare") {
+        // Governed (auto-allow) so the ledger has evidence of every server-lane
+        // dispatch — including one a companion steer initiated while nobody was
+        // at the desk. See ACTION_KINDS "server.dispatch" in governance.ts.
+        const serverDetail: ActionDetail = {
+          summary: t("gov.kindServerDispatch", { mode, origin }),
+        };
+        const gate = await gateAction(deps, "server.dispatch", serverDetail);
+        if (!gate.ok) {
+          renderErrorCard(scroll, gate.reason);
+          record("error", gate.reason);
+          bumpActivity();
+          return;
+        }
+      }
+
       if (mode === "cascade") {
         const thinking = el("div", "thinking");
         thinking.append(el("span", "spinner"), document.createTextNode(t("chat.thinking", { n: 1 })));
@@ -873,6 +895,9 @@ export function renderWorkspace(deps: UiDeps): void {
         renderCascadeAnswer(scroll, view, t);
         renderCascadeInspector(inspectorBody, view, t);
         record("assistant", view.answer);
+        await deps.gov.settle("server.dispatch", "success", {
+          summary: t("gov.kindServerDispatch", { mode, origin }),
+        });
       } else if (mode === "local") {
         // Lane-A local — governed (auto-allow), keyless, offline. Even an
         // auto-allowed action is audited so the ledger is a complete record.
@@ -980,6 +1005,9 @@ export function renderWorkspace(deps: UiDeps): void {
         renderCompareAnswer(scroll, view, t);
         renderCompareInspector(inspectorBody, view, t);
         record("assistant", view.finalAnswer || view.synthesis || view.error || view.status);
+        await deps.gov.settle("server.dispatch", "success", {
+          summary: t("gov.kindServerDispatch", { mode, origin }),
+        });
       }
       void refreshSavings();
     } catch (e) {
