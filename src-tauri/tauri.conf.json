@@ -31,11 +31,33 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "Braavolabs",
+    "copyright": "© 2026 Braavolabs",
+    "category": "DeveloperTool",
+    "shortDescription": "Native multi-model chat & cascade control.",
+    "longDescription": "Braavolabs Desktop — native multi-model chat and cascade control with a governance moat: OS-keychain secret storage, native approval gates, and an auditable spend ledger. BYOK and self-host friendly.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
-      "icons/icon.png"
-    ]
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "hardenedRuntime": true,
+      "dmg": {
+        "windowSize": { "width": 660, "height": 400 },
+        "appPosition": { "x": 180, "y": 170 },
+        "applicationFolderPosition": { "x": 480, "y": 170 }
+      }
+    },
+    "windows": {
+      "webviewInstallMode": { "type": "downloadBootstrapper" },
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "installMode": "currentUser"
+      }
+    }
   }
 }

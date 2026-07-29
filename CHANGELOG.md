@@ -11,6 +11,23 @@ append-only audit ledger. PR numbers refer to `kocakkmustafa/braavolabs-desktop`
 
 ## [Unreleased]
 
+- **Distribution groundwork** (branch `feat/desktop-distribution`): the repo can
+  now actually produce shippable native bundles. Previously `tauri:dev` was a
+  human-gate `echo`, there was no `@tauri-apps/cli`, no build script, and the
+  `bundle` block carried no per-platform sections — so no artifact had ever been
+  built. Added the CLI, real `tauri:build` scripts (incl. a
+  `universal-apple-darwin` target), and filled the macOS + Windows bundle
+  sections. macOS declares `hardenedRuntime` (a notarization precondition) and a
+  10.15 floor; Windows NSIS installs per-user so an unsigned build does not also
+  demand elevation. The Linux section is deliberately left empty — Tauri derives
+  `libwebkit2gtk-4.1-0, libgtk-3-0` correctly on its own, and hand-written
+  package names would be a guess.
+- **App icon was the Tauri placeholder.** `icon.png` was a plain orange square,
+  so every bundle would have shipped with it in the Dock, Finder and installers.
+  Regenerated the full icon set (`.icns` with a 1024px representation, `.ico`,
+  Windows Store logos) from the brand mark already used by the mobile app
+  (`mobile/assets/icon.png` — the Faceless Envoy). Signing is env-driven
+  (`APPLE_SIGNING_IDENTITY`), so no machine-specific identity enters the repo.
 - **R6 governed computer-use — host runtime** (branch `feat/r6-host-runtime`):
   the Rust host now *enforces* the pure-core contracts. Increment A wraps every
   `governed_command` spawn in a real OS sandbox (macOS `sandbox-exec` / Linux

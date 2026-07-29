@@ -10,14 +10,19 @@
     "lint": "tsc --noEmit",
     "test": "vitest run",
     "dev:ui": "vite",
-    "tauri:dev": "echo 'human gate: run `cargo tauri dev` from packages/desktop (needs a GUI session)'"
+    "tauri": "tauri",
+    "tauri:dev": "echo 'human gate: run `pnpm tauri dev` from ventures/braavolabs/desktop (needs a GUI session)'",
+    "tauri:build": "tauri build",
+    "tauri:build:mac": "tauri build --target universal-apple-darwin",
+    "tauri:build:mac:unsigned": "APPLE_SIGNING_IDENTITY=- tauri build --target universal-apple-darwin"
   },
   "dependencies": {
     "zod": "^3.24.0"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
+    "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
     "vite": "^6.0.0",
     "vitest": "^3.2.6"
   }
