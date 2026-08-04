@@ -1,0 +1,111 @@
+# Linux release artifacts — amd64 .deb + .AppImage on a REAL runner.
+#
+# SECURITY NOTE: this workflow consumes NO attacker-controllable input. There is
+# no `github.event.*` interpolation anywhere, so the workflow-injection class
+# does not apply. Keep it that way — if a step ever needs event data, pass it
+# through `env:` and quote it, never inline it into `run:`.
+#
+# WHY THIS EXISTS
+# Tauri cannot cross-compile. On 2026-07-29 the arm64 Linux bundles were built
+# in Docker (a container IS a real Linux machine, so that is not cross-compiling),
+# but the amd64 AppImage could not be produced that way: under QEMU emulation the
+# `linuxdeploy` GTK plugin dies. A native amd64 runner is the standard path, and
+# `ubuntu-22.04` is exactly that.
+#
+# WHY ubuntu-22.04 AND NOT ubuntu-latest
+# An AppImage links against the glibc of the machine that built it and only runs
+# on hosts with glibc >= that version. Building on the oldest supported runner
+# gives the widest compatibility; ubuntu-latest would silently narrow it every
+# time GitHub bumps the image.
+#
+# TRIGGERS — deliberately never on push.
+# `workflow_dispatch` so it can be run by hand, and `push: tags v*` so cutting a
+# release tag produces the artifacts. Merging code must NOT publish anything.
+#
+# SCOPE — Linux only, on purpose.
+# macOS needs a Developer ID certificate + notarization credentials and Windows
+# is built on the founder's physical PC (see the vault note on driving a Windows
+# build box over SSH). Adding jobs whose secrets do not exist would ship a
+# workflow nobody has ever run — an untested assumption wearing a green badge.
+# When those secrets land, add the jobs and prove them the same day.
+
+name: Release (Linux)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  linux-amd64:
+    name: amd64 .deb + .AppImage
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri v2 needs webkit2gtk 4.1 (v1 used 4.0 — a common copy-paste failure).
+      # patchelf and libfuse2 are what the AppImage bundler itself shells out to.
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libfuse2 \
+            build-essential \
+            curl wget file
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build bundles
+        run: pnpm tauri:build
+
+      # A green build step is not proof the artifacts exist — Tauri can succeed
+      # while a bundler silently produces nothing. Fail closed instead.
+      - name: Verify artifacts were actually produced
+        run: |
+          set -euo pipefail
+          BUNDLE=src-tauri/target/release/bundle
+          DEB=$(find "$BUNDLE/deb" -name '*.deb' 2>/dev/null | head -1 || true)
+          APPIMAGE=$(find "$BUNDLE/appimage" -name '*.AppImage' 2>/dev/null | head -1 || true)
+
+          echo "deb      = ${DEB:-<none>}"
+          echo "appimage = ${APPIMAGE:-<none>}"
+
+          [ -n "$DEB" ]      || { echo "::error::no .deb produced";      exit 1; }
+          [ -n "$APPIMAGE" ] || { echo "::error::no .AppImage produced"; exit 1; }
+
+          # Prove the AppImage is amd64 rather than trusting the runner label.
+          file "$APPIMAGE"
+          file "$APPIMAGE" | grep -q 'x86-64' || { echo "::error::AppImage is not x86-64"; exit 1; }
+
+          echo "--- sha256 ---"
+          sha256sum "$DEB" "$APPIMAGE"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: braavolabs-linux-amd64
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/appimage/*.AppImage
