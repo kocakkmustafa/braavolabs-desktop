@@ -672,6 +672,7 @@ fn classify(kind: &str, argv: &[String], path: Option<&str>) -> (&'static str, &
             | "spawn.launch"
             | "command.run"
             | "mcp.tool"
+            | "mcp.discover"
             | "file.write"
             | "pty.spawn"
             | "browser.navigate"
@@ -2632,14 +2633,59 @@ fn run_mcp_session(
 
 /// Discovery — spawn, handshake, tools/list. Read-only; NOT gated. Returns the
 /// tools array (or [] if the server reports none).
+/// THE GATED MCP DISCOVERY CALL. Starting a server just to ask its tools/list
+/// is still a native process launch, so it spends a one-time `mcp.discover`
+/// token BEFORE spawning — mirrors `mcp_call_tool`'s choke-point shape, plus
+/// binds the CURRENT resolved command+args (not just the server name), so
+/// editing the definition between approval and this call invalidates the
+/// token instead of silently running the swapped-in command.
 #[tauri::command]
-fn mcp_list_tools(app: AppHandle, server: String) -> Result<serde_json::Value, String> {
+fn mcp_list_tools(
+    app: AppHandle,
+    gov: State<'_, Governance>,
+    token: String,
+    server: String,
+    ts: Option<u64>,
+) -> Result<serde_json::Value, String> {
+    let ts = ts.unwrap_or(0);
     let map = read_mcp(&app)?;
     let def = map
         .get(server.trim())
-        .ok_or_else(|| format!("no MCP server named \"{}\"", server.trim()))?;
-    let result = run_mcp_session(def, "tools/list", serde_json::json!({}), MCP_TIMEOUT_MS)?;
-    Ok(result.get("tools").cloned().unwrap_or(serde_json::json!([])))
+        .ok_or_else(|| format!("no MCP server named \"{}\"", server.trim()))?
+        .clone();
+    let mut argv = vec![def.command.clone()];
+    argv.extend(def.args.clone());
+    let detail = ActionDetail {
+        server: Some(server.clone()),
+        argv: Some(argv),
+        ..Default::default()
+    };
+    {
+        let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+        let ok = matches!(
+            gate.tokens.get(&token).cloned(),
+            Some(rec) if rec.kind == "mcp.discover" && rec.binding == detail.binding("mcp.discover")
+        );
+        if !ok {
+            audit_append(&app, &mut gate, "mcp.discover", "-", "replay-rejected", "mcp.discover", ts);
+            return Err("invalid or already-spent token".into());
+        }
+        gate.tokens.remove(&token); // one-time
+        let summary = format!("mcp discover · {}", server.trim());
+        audit_append(&app, &mut gate, "mcp.discover", "-", "consumed", &summary, ts);
+    }
+    let run = run_mcp_session(&def, "tools/list", serde_json::json!({}), MCP_TIMEOUT_MS);
+    let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+    match run {
+        Ok(result) => {
+            audit_append(&app, &mut gate, "mcp.discover", "-", "success", "mcp.discover", ts);
+            Ok(result.get("tools").cloned().unwrap_or(serde_json::json!([])))
+        }
+        Err(e) => {
+            audit_append(&app, &mut gate, "mcp.discover", "-", "error", "mcp.discover", ts);
+            Err(e)
+        }
+    }
 }
 
 /// One tool-call result crossing back to the webview (camelCase → `isError`).
@@ -2788,6 +2834,37 @@ mod mcp_tests {
     #[test]
     fn mcp_tool_classifies_as_require_approval() {
         assert_eq!(classify("mcp.tool", &[], None).0, "require-approval");
+    }
+
+    #[test]
+    fn mcp_discover_classifies_as_require_approval() {
+        // Discovery starts a process too (tools/list spawns the server), so it
+        // must land on the same fail-closed require-approval path as mcp.tool,
+        // never auto-allow.
+        assert_eq!(classify("mcp.discover", &[], None).0, "require-approval");
+    }
+
+    #[test]
+    fn mcp_discover_binding_differs_by_server_and_by_definition() {
+        let a = ActionDetail {
+            server: Some("fs".into()),
+            argv: Some(vec!["npx".into(), "-y".into(), "srv".into()]),
+            ..Default::default()
+        };
+        let b = ActionDetail { server: Some("git".into()), ..a.clone() };
+        // Same server name, DIFFERENT resolved command — the definition-swap
+        // case: an approval minted against the old command must not bind to
+        // the new one.
+        let swapped = ActionDetail {
+            argv: Some(vec!["npx".into(), "-y".into(), "EVIL".into()]),
+            ..a.clone()
+        };
+        assert_ne!(a.binding("mcp.discover"), b.binding("mcp.discover"));
+        assert_ne!(a.binding("mcp.discover"), swapped.binding("mcp.discover"));
+        assert_eq!(a.binding("mcp.discover"), a.binding("mcp.discover"));
+        // mcp.tool and mcp.discover bindings for the same detail must not
+        // collide — a discover token must never authorize a tool call.
+        assert_ne!(a.binding("mcp.discover"), a.binding("mcp.tool"));
     }
 }
 

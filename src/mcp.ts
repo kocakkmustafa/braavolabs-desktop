@@ -15,13 +15,17 @@
  *     buffering, timeout→kill and "stderr is never parsed" contract are all
  *     unit-testable headlessly with a mock stdio server.
  *
- * THE MOAT APPLIES TO MCP TOO. A `tools/call` is a side effect, so it passes the
- * P-D4 governance gate: request('mcp.tool', {server, tool}) → approval → a
- * one-time token → callTool consumes it EXACTLY ONCE before the server is ever
- * spawned. Memory backend consumes via the injected Governance; the Tauri backend
- * hands the token to the Rust host, which consumes it host-side (a compromised
+ * THE MOAT APPLIES TO MCP TOO — to discovery as much as to the call. Starting
+ * an MCP server (even just to ask it tools/list) is a native process launch
+ * driven by a stored, mutable config entry, so BOTH listTools and callTool pass
+ * the gate: request('mcp.discover'|'mcp.tool', {server, ...}) → approval → a
+ * one-time token → the bridge consumes it EXACTLY ONCE — checked against the
+ * server's CURRENT resolved command+args, not just its name — before anything
+ * is spawned, so editing a server's definition between approval and use
+ * invalidates the token instead of silently running the swapped-in command.
+ * Memory backend consumes via the injected Governance; the Tauri backend hands
+ * the token to the Rust host, which consumes it host-side (a compromised
  * webview cannot forge a host token) — the same contract as `governed_command`.
- * `tools/list` is read-only discovery and is NOT gated.
  *
  * MCP stdio framing is line-delimited JSON-RPC 2.0: one JSON object per line,
  * terminated by "\n". Config lives as { name: {command, args[]} } with args as a
@@ -339,8 +343,14 @@ export interface McpBridge {
   listServers(): Promise<McpConfig>;
   addServer(name: string, command: string, args: string[]): Promise<void>;
   removeServer(name: string): Promise<void>;
-  /** Discovery — spawns + handshakes + tools/list. Read-only, NOT gated. */
-  listTools(server: string): Promise<McpTool[]>;
+  /**
+   * Discovery — spawns + handshakes + tools/list. GATED: starting the server
+   * is a native process launch, so it passes the same one-time-token gate as
+   * callTool. `token` must be a valid `mcp.discover` grant bound to {server,
+   * the server's CURRENT resolved command+args} — a definition edited after
+   * approval invalidates the token rather than silently running the new one.
+   */
+  listTools(server: string, token: string): Promise<McpTool[]>;
   /**
    * Side effect — GATED. `token` must be a valid one-time `mcp.tool` grant bound
    * to {server, tool}; it is consumed EXACTLY once before the server is spawned.
@@ -389,8 +399,15 @@ export function createMemoryMcpBridge(opts: MemoryMcpOpts): McpBridge {
     async removeServer(name) {
       cfg.delete(name.trim());
     },
-    async listTools(server) {
-      return listServerTools(def(server), opts.spawnImpl, withOpts);
+    async listTools(server, token) {
+      const d = def(server); // unknown server → McpError, before any gate check
+      // GATE — bind to the CURRENT resolved command+args (not just the name),
+      // so a definition swapped in after approval invalidates the token instead
+      // of silently spawning the new command.
+      const detail: ActionDetail = { server, argv: [d.command, ...d.args] };
+      const consumed = await opts.gov.consume(token, "mcp.discover", detail);
+      if (!consumed) throw new McpGateError();
+      return listServerTools(d, opts.spawnImpl, withOpts);
     },
     async callTool(server, tool, args, token) {
       const d = def(server);
@@ -440,8 +457,8 @@ export function createTauriMcpBridge(invoke: Invoke): McpBridge {
     async removeServer(name) {
       await invoke("mcp_remove_server", { name });
     },
-    async listTools(server) {
-      const raw = (await invoke("mcp_list_tools", { server })) as McpTool[] | null;
+    async listTools(server, token) {
+      const raw = (await invoke("mcp_list_tools", { token, server })) as McpTool[] | null;
       return Array.isArray(raw) ? raw : [];
     },
     async callTool(server, tool, args, token) {
