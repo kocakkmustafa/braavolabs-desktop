@@ -1879,7 +1879,25 @@ function renderMcpSection(deps: UiDeps): HTMLElement {
     toolsPanel.style.display = "block";
     toolsPanel.append(el("div", "mcp-tools-head mono", `${server} · ${t("mcp.loading")}`));
     try {
-      const tools = await mcp.listTools(server);
+      // GATE: discovery spawns the server too — a human approves first, bound
+      // to the server's CURRENT resolved command+args.
+      const cfg = await mcp.listServers();
+      const def = cfg[server];
+      const detail: ActionDetail = {
+        server,
+        argv: def ? [def.command, ...def.args] : undefined,
+        summary: t("gov.kindMcpDiscover", { server }),
+      };
+      const gate = await gateForToken(deps, "mcp.discover", detail);
+      if (!gate.ok) {
+        toolsPanel.innerHTML = "";
+        const err = el("div", "mcp-result");
+        err.style.borderLeftColor = "var(--molten)";
+        err.append(el("div", "msg-label", t("mcp.errorResult")), document.createTextNode(gate.reason));
+        toolsPanel.append(err);
+        return;
+      }
+      const tools = await mcp.listTools(server, gate.token);
       await showTools(server, tools);
     } catch (e) {
       toolsPanel.innerHTML = "";

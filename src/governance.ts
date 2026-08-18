@@ -62,6 +62,13 @@ export const ACTION_KINDS = [
   "spawn.launch", // Lane-B: reveal/copy the vendor CLI launch command
   "command.run", // execute a command through the Rust choke point
   "mcp.tool", // call an MCP tool
+  "mcp.discover", // spawn an MCP server to run its tools/list handshake — a
+  // config-driven process start (the registered command/args), so it passes
+  // the SAME gate as mcp.tool: request → approval → one-time token, consumed
+  // by the executor (Rust host / memory bridge) BEFORE anything is spawned.
+  // tools/list is a read-only MCP method, but the desktop-security question is
+  // "does this start a native process" — and it does — not whether the RPC
+  // verb itself mutates server state.
   "file.write", // write a file
   // ── Lane-C: governed computer-control (CDP browser driving). Every action
   // passes THIS gate before the driver touches a page — "governed computer use"

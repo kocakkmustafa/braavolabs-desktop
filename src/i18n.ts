@@ -231,6 +231,7 @@ const en: Dict = {
     kindLocalDispatch: "Run locally via Ollama",
     kindServerDispatch: "Server {mode} dispatch ({origin}-initiated)",
     kindMcpTool: "Call MCP tool {tool} on {server}",
+    kindMcpDiscover: "List tools on MCP server {server}",
   },
 };
 
@@ -455,6 +456,7 @@ const tr: Dict = {
     kindLocalDispatch: "Ollama ile yerelde çalıştır",
     kindServerDispatch: "Sunucu {mode} çağrısı ({origin} başlattı)",
     kindMcpTool: "{server} üzerindeki {tool} MCP aracını çağır",
+    kindMcpDiscover: "{server} MCP sunucusundaki araçları listele",
   },
 };
 
