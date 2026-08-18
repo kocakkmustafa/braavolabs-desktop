@@ -2398,8 +2398,10 @@ async fn browser_dispatch(
 //
 // THE MOAT APPLIES TO MCP TOO: `mcp_call_tool` is a side effect, so it spends a
 // one-time `mcp.tool` governance token (bound to {server, tool}) BEFORE it will
-// spawn the server — exactly like `governed_command`. `mcp_list_tools` is
-// read-only discovery and is not gated.
+// spawn the server — exactly like `governed_command`. `mcp_list_tools` is also
+// gated (one-time `mcp.discover` token, bound to the resolved command+args) —
+// starting a server just to ask its tools/list is still a native process
+// launch, so it passes the same choke point.
 
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 const MCP_TIMEOUT_MS: u64 = 10_000;
@@ -2631,8 +2633,6 @@ fn run_mcp_session(
     outcome
 }
 
-/// Discovery — spawn, handshake, tools/list. Read-only; NOT gated. Returns the
-/// tools array (or [] if the server reports none).
 /// THE GATED MCP DISCOVERY CALL. Starting a server just to ask its tools/list
 /// is still a native process launch, so it spends a one-time `mcp.discover`
 /// token BEFORE spawning — mirrors `mcp_call_tool`'s choke-point shape, plus
