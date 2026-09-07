@@ -99,6 +99,12 @@ import {
   resolveRejection,
 } from "./relay-bridge";
 import { createRelayTransport } from "./relay-transport";
+import {
+  answerMotion, compareMotion, createBrandMotion, notifyBrandMotionPreference,
+  watchBrandMotionPreference,
+  compareProgressMotion, createOwnedBrandMotion,
+  type BrandMotion, type MotionState,
+} from "./brand-motion";
 
 /** How an approval was settled. `token` is present only when the resolver
  *  ALREADY minted one (companion approve) — the local click mints its own. */
@@ -135,11 +141,14 @@ let activeRelayStopper: (() => Promise<void>) | null = null;
  * account's phone, which could still steer and kill.
  */
 let disposeWorkspace: (() => void) | null = null;
+let disposeMotionPreference: (() => void) | null = null;
 
 function runWorkspaceTeardown(): void {
   const dispose = disposeWorkspace;
   disposeWorkspace = null;
   dispose?.();
+  disposeMotionPreference?.();
+  disposeMotionPreference = null;
   settleAllApprovals({ approved: false });
 }
 
@@ -155,6 +164,7 @@ function osPrefersReducedMotion(): boolean {
 function initReducedMotion(): ReturnType<typeof resolvePrefs> {
   const prefs = resolvePrefs();
   applyReducedMotion(document.documentElement, effectiveReducedMotion(prefs, osPrefersReducedMotion()));
+  disposeMotionPreference = watchBrandMotionPreference(prefs);
   return prefs;
 }
 
@@ -352,6 +362,21 @@ export function renderWorkspace(deps: UiDeps): void {
   const prefs = initReducedMotion();
   root.innerHTML = "";
   let mode: Mode = "cascade";
+  let workspaceDisposed = false;
+  const motions = new Set<BrandMotion>();
+  const trackMotion = (motion: BrandMotion) => {
+    if (workspaceDisposed) motion.dispose();
+    else motions.add(motion);
+    return motion;
+  };
+  const thinkingMotions = new Map<HTMLElement, BrandMotion>();
+  const removeThinking = (row: HTMLElement) => {
+    const motion = thinkingMotions.get(row);
+    motion?.dispose();
+    if (motion) motions.delete(motion);
+    thinkingMotions.delete(row);
+    row.remove();
+  };
 
   const shell = el("div", "shell");
 
@@ -530,6 +555,17 @@ export function renderWorkspace(deps: UiDeps): void {
   const chat = el("div", "chat");
   const scroll = el("div", "chat-scroll");
   const composer = el("div", "composer");
+  const chatPresence = el("div", "chat-presence");
+  const chatMascot = trackMotion(createBrandMotion());
+  const chatPresenceLabel = el("span", "chat-presence-label", t("app.tagline"));
+  chatPresence.append(chatMascot.element, chatPresenceLabel);
+  let chatMotionVersion = 0;
+  const setChatMotion = (state: MotionState, label: string) => {
+    if (workspaceDisposed) return;
+    chatMascot.setState(state);
+    chatPresence.dataset.state = state;
+    chatPresenceLabel.textContent = label;
+  };
 
   const hint = el("div", "composer-hint");
   hint.style.display = "none";
@@ -589,7 +625,7 @@ export function renderWorkspace(deps: UiDeps): void {
   bottomRow.append(ta, enterHint, sendBtn);
 
   composer.append(hint, topRow, bottomRow);
-  chat.append(scroll, composer);
+  chat.append(chatPresence, scroll, composer);
 
   // --- right inspector (Inspector | Activity tabs) ---
   const inspector = el("aside", "inspector");
@@ -781,6 +817,7 @@ export function renderWorkspace(deps: UiDeps): void {
   rmToggle.addEventListener("click", () => {
     prefs.setReducedMotion(!prefs.reducedMotion());
     applyReducedMotion(document.documentElement, effectiveReducedMotion(prefs, osPrefersReducedMotion()));
+    notifyBrandMotionPreference();
     syncRm();
   });
   const secApp = el("div", "sheet-sec");
@@ -945,6 +982,9 @@ export function renderWorkspace(deps: UiDeps): void {
     segCodeBtn.classList.toggle("active", s === "code");
     scroll.style.display = s === "chat" ? "" : "none";
     composer.style.display = s === "chat" ? "" : "none";
+    chatPresence.style.display = s === "chat" ? "" : "none";
+    chatMascot.setVisible(s === "chat");
+    for (const motion of thinkingMotions.values()) motion.setVisible(s === "chat");
     codePane.style.display = s === "code" ? "" : "none";
     companyPane.style.display = s === "company" ? "" : "none";
     crumb.textContent =
@@ -1043,6 +1083,9 @@ export function renderWorkspace(deps: UiDeps): void {
   const loadSession = (id: string) => {
     const s = sessionStore.get(id);
     if (!s) return;
+    chatMotionVersion += 1;
+    setChatMotion("idle", t("app.tagline"));
+    for (const row of thinkingMotions.keys()) removeThinking(row);
     activeSession = s;
     scroll.replaceChildren();
     for (const e of s.entries) {
@@ -1056,6 +1099,9 @@ export function renderWorkspace(deps: UiDeps): void {
   };
 
   const startNewSession = () => {
+    chatMotionVersion += 1;
+    setChatMotion("idle", t("app.tagline"));
+    for (const row of thinkingMotions.keys()) removeThinking(row);
     activeSession = null; // created lazily on first send, so empty chats don't pile up
     scroll.replaceChildren();
     inspectorBody.replaceChildren(el("div", "inspector-empty", t("inspector.empty")));
@@ -1111,6 +1157,31 @@ export function renderWorkspace(deps: UiDeps): void {
     dispatching = true;
     sendBtn.disabled = true;
     ta.value = "";
+    const motionVersion = ++chatMotionVersion;
+    const ownsMotion = () => motionVersion === chatMotionVersion && !workspaceDisposed;
+    const setRunMotion = (state: MotionState, label: string) => {
+      if (ownsMotion()) setChatMotion(state, label);
+    };
+    setRunMotion("idle", t("app.tagline"));
+    const showAnswerMotion = (answer: string) => {
+      const state = answerMotion(answer);
+      setRunMotion(state, t(state === "success" ? "chat.finalAnswer" : "chat.empty"));
+    };
+    const runThinkingRows: HTMLElement[] = [];
+    const thinkingRow = (label: string | Text, state: MotionState = "thinking") => {
+      const row = el("div", "thinking");
+      const coin = createOwnedBrandMotion(ownsMotion, { kind: "coin", state });
+      if (coin) {
+        trackMotion(coin);
+        coin.setVisible(surface === "chat");
+        thinkingMotions.set(row, coin);
+        row.append(coin.element);
+      }
+      runThinkingRows.push(row);
+      row.append(typeof label === "string" ? document.createTextNode(label) : label);
+      setRunMotion(state, typeof label === "string" ? label : label.textContent ?? "");
+      return row;
+    };
 
     const userMsg = el("div", "msg-user", text);
     scroll.append(userMsg);
@@ -1132,6 +1203,7 @@ export function renderWorkspace(deps: UiDeps): void {
         };
         const gate = await gateAction(deps, "server.dispatch", serverDetail);
         if (!gate.ok) {
+          setRunMotion("error", gate.reason);
           renderErrorCard(scroll, gate.reason);
           record("error", gate.reason);
           bumpActivity();
@@ -1140,13 +1212,13 @@ export function renderWorkspace(deps: UiDeps): void {
       }
 
       if (mode === "cascade") {
-        const thinking = el("div", "thinking");
-        thinking.append(el("span", "spinner"), document.createTextNode(t("chat.thinking", { n: 1 })));
+        const thinking = thinkingRow(t("chat.thinking", { n: 1 }));
         scroll.append(thinking);
         scrollToEnd();
         const raw = await cascade(cfg, { prompt: text });
-        thinking.remove();
+        removeThinking(thinking);
         const view = toCascadeView(raw);
+        showAnswerMotion(view.answer);
         renderCascadeAnswer(scroll, view, t);
         renderCascadeInspector(inspectorBody, view, t);
         record("assistant", view.answer);
@@ -1159,24 +1231,27 @@ export function renderWorkspace(deps: UiDeps): void {
         const localDetail: ActionDetail = { summary: t("gov.kindLocalDispatch") };
         const gate = await gateAction(deps, "local.dispatch", localDetail);
         if (!gate.ok) {
+          setRunMotion("error", gate.reason);
           renderErrorCard(scroll, gate.reason);
           record("error", gate.reason);
         } else {
           const host = resolveOllamaHost();
-          const thinking = el("div", "thinking");
-          thinking.append(el("span", "spinner"), document.createTextNode(t("chat.localThinking")));
+          const thinking = thinkingRow(t("chat.localThinking"));
           scroll.append(thinking);
           scrollToEnd();
           try {
             const model = await resolveOllamaModel(host, localModelInput.value.trim() || undefined);
             const res = await ollamaChat(host, model, text);
-            thinking.remove();
+            removeThinking(thinking);
+            showAnswerMotion(res.content);
             renderPlainAnswer(scroll, res.content, t);
             renderSourceInspector(inspectorBody, t("chat.localSource"), res.model, t);
             record("assistant", res.content);
             await deps.gov.settle("local.dispatch", "success", localDetail);
           } catch (e) {
-            thinking.remove();
+            removeThinking(thinking);
+            setRunMotion("error", e instanceof OllamaUnreachableError
+              ? t("chat.localUnreachable", { host: e.host }) : String(e instanceof Error ? e.message : e));
             if (e instanceof OllamaUnreachableError) {
               renderErrorCard(scroll, t("chat.localUnreachable", { host: e.host }));
               record("error", t("chat.localUnreachable", { host: e.host }));
@@ -1194,6 +1269,7 @@ export function renderWorkspace(deps: UiDeps): void {
         // fetched one-time only AFTER approval, and never reaches the DOM/audit.
         const providerRaw = directProviderSel.value;
         if (!isDirectProvider(providerRaw)) {
+          setRunMotion("error", t("chat.empty"));
           renderErrorCard(scroll, t("chat.empty"));
           record("error", t("chat.empty"));
         } else {
@@ -1205,6 +1281,7 @@ export function renderWorkspace(deps: UiDeps): void {
           // the gate has no token, so key_get rejects it.
           const gate = await gateForToken(deps, "direct.dispatch", directDetail);
           if (!gate.ok) {
+            setRunMotion("error", gate.reason);
             renderErrorCard(scroll, gate.reason);
             record("error", gate.reason);
           } else {
@@ -1212,25 +1289,27 @@ export function renderWorkspace(deps: UiDeps): void {
             // The host consumes gate.token inside key_get before returning it.
             const apiKey = await deps.vault.get(provider, gate.token);
             if (!apiKey) {
+              setRunMotion("error", t("chat.noKey", { provider }));
               renderErrorCard(scroll, t("chat.noKey", { provider }));
               record("error", t("chat.noKey", { provider }));
               await deps.gov.settle("direct.dispatch", "error", directDetail);
             } else {
               const model = resolveDirectModel(provider, directModelInput.value.trim() || undefined);
-              const thinking = el("div", "thinking");
-              thinking.append(el("span", "spinner"), document.createTextNode(t("chat.directThinking", { provider })));
+              const thinking = thinkingRow(t("chat.directThinking", { provider }));
               scroll.append(thinking);
               scrollToEnd();
               try {
                 const res = await directChat(provider, apiKey, model, text);
-                thinking.remove();
+                removeThinking(thinking);
+                showAnswerMotion(res.content);
                 renderPlainAnswer(scroll, res.content, t);
                 renderSourceInspector(inspectorBody, t("chat.directSource", { provider }), res.model, t);
                 record("assistant", res.content);
                 await deps.gov.settle("direct.dispatch", "success", directDetail);
               } catch (e) {
-                thinking.remove();
+                removeThinking(thinking);
                 const msg = e instanceof DirectApiError ? `${e.status} · ${e.message}` : String(e instanceof Error ? e.message : e);
+                setRunMotion("error", msg);
                 renderErrorCard(scroll, msg);
                 record("error", msg);
                 await deps.gov.settle("direct.dispatch", "error", directDetail);
@@ -1242,21 +1321,25 @@ export function renderWorkspace(deps: UiDeps): void {
       } else {
         const companyId = companyInput.value.trim();
         const stub = await startCompare(cfg, { companyId, query: text });
-        const thinking = el("div", "thinking");
-        const label = document.createTextNode(t("chat.thinking", { n: 2 }));
-        thinking.append(el("span", "spinner"), label);
+        const progressLabel = (status: string) => status === "RUNNING"
+          ? t("chat.thinking", { n: 2 }) : t("chat.polling", { status });
+        const label = document.createTextNode(progressLabel(stub.status));
+        const thinking = thinkingRow(label, compareProgressMotion(stub.status));
         scroll.append(thinking);
         scrollToEnd();
         const session = await pollCompare(cfg, stub.id, {
           onTick: (status) => {
-            label.textContent =
-              status === "PENDING" || status === "RUNNING"
-                ? t("chat.thinking", { n: 2 })
-                : t("chat.polling", { status });
+            const progressMotion = compareProgressMotion(status);
+            label.textContent = progressLabel(status);
+            thinkingMotions.get(thinking)?.setState(progressMotion);
+            setRunMotion(progressMotion, label.textContent);
           },
         });
-        thinking.remove();
+        removeThinking(thinking);
         const view = toCompareView(session);
+        const resultMotion = compareMotion(view);
+        setRunMotion(resultMotion, resultMotion === "success" ? t("chat.finalAnswer")
+          : resultMotion === "error" ? view.error || t("chat.empty") : t("app.tagline"));
         renderCompareAnswer(scroll, view, t);
         renderCompareInspector(inspectorBody, view, t);
         record("assistant", view.finalAnswer || view.synthesis || view.error || view.status);
@@ -1267,12 +1350,14 @@ export function renderWorkspace(deps: UiDeps): void {
       void refreshSavings();
     } catch (e) {
       const msg = e instanceof ApiError ? `${e.status} · ${e.message}` : String(e);
+      setRunMotion("error", msg);
       record("error", msg);
       const errCard = el("div", "msg-final");
       errCard.style.borderLeftColor = "var(--molten)";
       errCard.append(el("div", "msg-label", "error"), document.createTextNode(msg));
       scroll.append(errCard);
     } finally {
+      for (const row of runThinkingRows) removeThinking(row);
       dispatching = false;
       sendBtn.disabled = false;
       scrollToEnd();
@@ -1296,6 +1381,10 @@ export function renderWorkspace(deps: UiDeps): void {
   // Everything this render owns beyond the DOM: the companion bridge + the
   // governance decorator installed with it, and the window key listener.
   disposeWorkspace = () => {
+    workspaceDisposed = true;
+    for (const motion of motions) motion.dispose();
+    motions.clear();
+    thinkingMotions.clear();
     window.removeEventListener("keydown", onWorkspaceKey);
     if (compBridge) void stopCompanion();
     else deps.gov = baseGov;
@@ -1486,8 +1575,9 @@ function showApprovalModal(
   return new Promise<ApprovalOutcome>((resolve) => {
     const overlay = el("div", "approve-overlay");
     const card = el("div", "approve-card");
-    const flip = el("div", "approve-flip"); // coin-flip micro-animation host
-    flip.append(el("span", "approve-coin"));
+    const flip = el("div", "approve-flip");
+    const approvalMotion = createBrandMotion({ state: "attention", size: 96 });
+    flip.append(approvalMotion.element);
     card.append(flip);
     card.append(el("h2", "approve-title", t("gov.approveTitle")));
     card.append(el("div", "approve-body", t("gov.approveBody")));
@@ -1507,6 +1597,7 @@ function showApprovalModal(
     card.append(btns);
 
     const close = (o: ApprovalOutcome) => {
+      approvalMotion.dispose();
       openApprovals.delete(actionId);
       overlay.remove();
       resolve(o);

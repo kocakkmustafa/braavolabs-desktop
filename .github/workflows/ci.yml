@@ -1,8 +1,14 @@
 name: CI
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
 jobs:
   ts:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -15,10 +21,14 @@ jobs:
       - run: pnpm test
   rust:
     runs-on: macos-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: src-tauri
     steps:
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
       - run: cargo check --locked
       - run: cargo test --locked

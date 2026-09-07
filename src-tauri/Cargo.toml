@@ -5,7 +5,7 @@
 # is the SERVER's job — there is no AI logic in this binary.
 [package]
 name = "braavolabs-desktop"
-version = "0.1.0"
+version = "0.1.1"
 description = "Braavolabs Desktop — native multi-model chat & cascade control."
 edition = "2021"
 rust-version = "1.77"
