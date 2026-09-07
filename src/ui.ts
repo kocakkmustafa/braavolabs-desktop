@@ -260,6 +260,8 @@ export function renderLogin(deps: UiDeps): void {
   const field = (labelKey: string, input: HTMLInputElement) => {
     const f = el("div", "field");
     const l = el("label", undefined, t(labelKey));
+    input.id = labelKey.replaceAll(".", "-");
+    l.htmlFor = input.id;
     f.append(l, input);
     return f;
   };

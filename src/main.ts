@@ -29,7 +29,9 @@ async function boot(): Promise<void> {
   };
   setPersist((c) => void persist(c));
 
-  const t = makeT(detectLocale());
+  const locale = detectLocale();
+  document.documentElement.lang = locale;
+  const t = makeT(locale);
   const gov = resolveGovernance();
   const deps: UiDeps = {
     root,
