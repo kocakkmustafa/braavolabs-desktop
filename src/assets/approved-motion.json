@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "approvedAt": "2026-09-07",
+  "atlas": "mascot-gestures-expressive-v1.png",
+  "sha256": "bded08adb94b029545b3e0a584a9efaa5d88b2b1ce00b60b1e1de84dd031fcc3",
+  "width": 1448,
+  "height": 1086,
+  "columns": 4,
+  "rows": 3,
+  "cell": 362,
+  "states": {
+    "idle": {
+      "frames": [
+        0
+      ],
+      "delays": []
+    },
+    "thinking": {
+      "frames": [
+        0,
+        2,
+        3
+      ],
+      "delays": [
+        450,
+        220
+      ]
+    },
+    "success": {
+      "frames": [
+        4,
+        5,
+        6,
+        7
+      ],
+      "delays": [
+        420,
+        160,
+        240
+      ]
+    },
+    "attention": {
+      "frames": [
+        8,
+        10,
+        11
+      ],
+      "delays": [
+        450,
+        240
+      ]
+    },
+    "error": {
+      "frames": [
+        0
+      ],
+      "delays": []
+    }
+  },
+  "runStates": {
+    "RUNNING": "thinking",
+    "COMPLETED": "success",
+    "WAITING_APPROVAL": "attention",
+    "FAILED": "error",
+    "PENDING": "idle",
+    "PAUSED": "idle",
+    "CANCELLED": "idle",
+    "ROLLED_BACK": "idle"
+  },
+  "excludedFrames": [
+    1,
+    9
+  ]
+}
