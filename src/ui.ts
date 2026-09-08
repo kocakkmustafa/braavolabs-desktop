@@ -266,6 +266,21 @@ export function renderLogin(deps: UiDeps): void {
   pwInput.type = "password";
   pwInput.autocomplete = "current-password";
   pwInput.required = true;
+  // Native validation runs before submit; translate its bubble without
+  // canceling it or replacing the browser's required/email constraints.
+  const localizeValidation = (input: HTMLInputElement, requiredKey: string) => {
+    const clear = () => input.setCustomValidity("");
+    input.addEventListener("input", clear);
+    input.addEventListener("change", clear);
+    input.addEventListener("invalid", () => {
+      clear();
+      if (input.validity.valueMissing) input.setCustomValidity(t(requiredKey));
+      else if (input.type === "email" && input.validity.typeMismatch)
+        input.setCustomValidity(t("login.invalidEmail"));
+    });
+  };
+  localizeValidation(emailInput, "login.requiredEmail");
+  localizeValidation(pwInput, "login.requiredPassword");
   const apiInput = el("input");
   apiInput.type = "text";
   apiInput.value = cfg.apiUrl;
