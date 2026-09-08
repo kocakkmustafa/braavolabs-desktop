@@ -22,10 +22,24 @@ class Element {
   children: Element[] = [];
   handlers = new Map<string, (event: { preventDefault(): void }) => void>();
   reportValidity = vi.fn(() => true);
+  // The browser owns these flags; tests supply states, not a second email policy.
+  validity = { valueMissing: false, typeMismatch: false, customError: false };
+  validationMessage = "";
+  setCustomValidity = vi.fn((message: string) => {
+    this.validationMessage = message;
+    this.validity.customError = message !== "";
+  });
   constructor(readonly tagName: string, readonly className = "") {}
   append(...children: Element[]) { this.children.push(...children); }
   setAttribute(name: string, value: string) { this.attributes[name] = value; }
   addEventListener(name: string, handler: (event: { preventDefault(): void }) => void) { this.handlers.set(name, handler); }
+  fire(name: string) {
+    const event = { preventDefault: vi.fn() };
+    const handler = this.handlers.get(name);
+    expect(handler, `actual input owns the ${name} handler`).toBeDefined();
+    handler!(event);
+    return event;
+  }
 }
 
 function fixture(locale: "en" | "tr" = "en") {
@@ -64,7 +78,93 @@ describe("actual desktop login UI source functions", () => {
     expect(f.error.attributes.role).toBe("alert");
     expect(f.button.handlers.has("click")).toBe(false);
     expect(f.field("login-password").handlers.has("keydown")).toBe(false);
+    expect(f.form.attributes).not.toHaveProperty("novalidate");
+    expect(f.form).not.toHaveProperty("noValidate", true);
+    expect(f.button).not.toHaveProperty("formNoValidate", true);
   });
+
+  it("does not create a custom error before native validation", () => {
+    const f = fixture();
+    expect(f.field("login-email").setCustomValidity).not.toHaveBeenCalled();
+    expect(f.field("login-password").setCustomValidity).not.toHaveBeenCalled();
+  });
+
+  for (const [locale, requiredEmail, requiredPassword, invalidEmail] of [
+    ["en", "Enter your email address.", "Enter your password.", "Enter a valid email address."],
+    ["tr", "E-posta adresinizi girin.", "Parolanızı girin.", "Geçerli bir e-posta adresi girin."],
+  ] as const) {
+    it(`${locale} provides all three localized native validation messages`, () => {
+      const t = makeT(locale);
+      expect(t("login.requiredEmail")).toBe(requiredEmail);
+      expect(t("login.requiredPassword")).toBe(requiredPassword);
+      expect(t("login.invalidEmail")).toBe(invalidEmail);
+    });
+
+    it.each([
+      ["login-email", "valueMissing", "requiredEmail", requiredEmail],
+      ["login-password", "valueMissing", "requiredPassword", requiredPassword],
+      ["login-email", "typeMismatch", "invalidEmail", invalidEmail],
+    ] as const)(`${locale} localizes native %s %s before a submit event`, (id, flag, key, message) => {
+      const f = fixture(locale); const input = f.field(id);
+      input.validity[flag] = true;
+      const event = input.fire("invalid");
+      expect(input.validationMessage).toBe(message);
+      expect(makeT(locale)(`login.${key}`)).toBe(message);
+      expect(input.validity.customError).toBe(true);
+      expect(event.preventDefault).not.toHaveBeenCalled();
+      expect(f.form.reportValidity).not.toHaveBeenCalled();
+      expect(f.login).not.toHaveBeenCalled(); expect(f.saveApiUrl).not.toHaveBeenCalled();
+    });
+
+    for (const id of ["login-email", "login-password"]) {
+      it.each(["input", "change"])(`${locale} clears stale ${id} custom error on %s without revalidating`, eventName => {
+        const f = fixture(locale); const input = f.field(id);
+        input.validity.valueMissing = true;
+        input.fire("invalid");
+        expect(input.validity.customError).toBe(true);
+        // Even while the native missing-value flag remains true, typing/change
+        // only clears the old message. A later invalid event chooses a new one.
+        input.fire(eventName);
+        expect(input.validationMessage).toBe("");
+        expect(input.validity.customError).toBe(false);
+        expect(f.form.reportValidity).not.toHaveBeenCalled();
+        expect(f.login).not.toHaveBeenCalled(); expect(f.saveApiUrl).not.toHaveBeenCalled();
+        input.fire("invalid");
+        expect(input.validationMessage).toBe(id === "login-email" ? requiredEmail : requiredPassword);
+        input.validity.valueMissing = false;
+        input.fire(eventName);
+        expect(input.validity.customError).toBe(false);
+        expect(input.validationMessage).toBe("");
+      });
+    }
+
+    it(`${locale} derives each email message from current native flags and clears a corrected value`, () => {
+      const f = fixture(locale); const input = f.field("login-email");
+      input.validity.valueMissing = true; input.fire("invalid");
+      expect(input.validationMessage).toBe(requiredEmail);
+      input.validity.valueMissing = false; input.validity.typeMismatch = true;
+      input.fire("input"); input.fire("invalid");
+      expect(input.validationMessage).toBe(invalidEmail);
+      input.validity.typeMismatch = false; input.fire("change");
+      expect(input.validationMessage).toBe("");
+      expect(input.validity.customError).toBe(false);
+      f.submit();
+      expect(f.form.reportValidity).toHaveBeenCalledOnce();
+      expect(f.login).toHaveBeenCalledOnce();
+    });
+
+    it(`${locale} does not invent constraints or retain an obsolete custom error`, () => {
+      const f = fixture(locale); const email = f.field("login-email");
+      email.setCustomValidity("STALE_MESSAGE");
+      email.fire("invalid");
+      expect(email.validationMessage).toBe("");
+      const password = f.field("login-password");
+      password.validity.typeMismatch = true;
+      password.fire("invalid");
+      expect(password.validationMessage).toBe("");
+      expect(f.login).not.toHaveBeenCalled(); expect(f.saveApiUrl).not.toHaveBeenCalled();
+    });
+  }
 
   it("does not dispatch or save API preferences when validity fails", () => {
     const f = fixture(); f.form.reportValidity.mockReturnValue(false); f.submit();
