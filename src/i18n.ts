@@ -109,6 +109,7 @@ const en: Dict = {
     errLocked: "Account temporarily locked. Try again later.",
     errRateLimited: "Too many attempts. Try again in a few minutes.",
     errUnavailable: "Authentication service is temporarily unavailable.",
+    errNetwork: "Cannot reach the sign-in service. Check your connection and API URL.",
     errUnknown: "Sign in failed.",
   },
   rail: {
@@ -334,6 +335,7 @@ const tr: Dict = {
     errLocked: "Hesap geçici olarak kilitlendi. Daha sonra tekrar deneyin.",
     errRateLimited: "Çok fazla deneme. Birkaç dakika sonra tekrar deneyin.",
     errUnavailable: "Kimlik doğrulama servisi geçici olarak kullanılamıyor.",
+    errNetwork: "Giriş servisine ulaşılamıyor. Bağlantınızı ve API adresini kontrol edin.",
     errUnknown: "Giriş başarısız.",
   },
   rail: {
