@@ -3,8 +3,8 @@
  * matters (what to render, honesty gates, error mapping) lives in the pure,
  * unit-tested modules (client.ts / render.ts / i18n.ts). This file only wires
  * those outputs into elements and forwards user intent back to the client.
- * It has no test of its own — driving it end-to-end is the `cargo tauri dev`
- * HUMAN GATE documented in the README.
+ * Login handlers have source-executing regression tests; real WebView paint,
+ * native validity bubbles and keyboard behavior still need native UI checks.
  */
 import type { Config } from "./config";
 import { saveApiUrl } from "./store";
@@ -247,7 +247,7 @@ export function renderLogin(deps: UiDeps): void {
   initReducedMotion();
   root.innerHTML = "";
   const wrap = el("div", "login-wrap");
-  const card = el("div", "login-card");
+  const card = el("form", "login-card");
 
   const h1 = el("h1");
   const dot = el("span", "brand-dot");
@@ -255,14 +255,17 @@ export function renderLogin(deps: UiDeps): void {
   const sub = el("div", "sub", t("app.tagline"));
 
   const errBox = el("div", "login-error");
+  errBox.setAttribute("role", "alert");
   errBox.style.display = "none";
 
   const emailInput = el("input");
   emailInput.type = "email";
   emailInput.autocomplete = "username";
+  emailInput.required = true;
   const pwInput = el("input");
   pwInput.type = "password";
   pwInput.autocomplete = "current-password";
+  pwInput.required = true;
   const apiInput = el("input");
   apiInput.type = "text";
   apiInput.value = cfg.apiUrl;
@@ -277,8 +280,10 @@ export function renderLogin(deps: UiDeps): void {
   };
 
   const btn = el("button", "login-btn", t("login.submit"));
+  btn.type = "submit";
 
   const submit = async () => {
+    if (btn.disabled || !card.reportValidity()) return;
     errBox.style.display = "none";
     btn.disabled = true;
     btn.textContent = t("login.signingIn");
@@ -320,9 +325,9 @@ export function renderLogin(deps: UiDeps): void {
     }
   };
 
-  btn.addEventListener("click", submit);
-  pwInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") void submit();
+  card.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void submit();
   });
 
   card.append(
@@ -340,6 +345,8 @@ export function renderLogin(deps: UiDeps): void {
 
 function mapLoginErrorText(t: Translator, view: ReturnType<typeof toLoginError>): string {
   switch (view?.kind) {
+    case "network":
+      return t("login.errNetwork");
     case "invalid":
       return t("login.errInvalid");
     case "locked":
@@ -349,7 +356,7 @@ function mapLoginErrorText(t: Translator, view: ReturnType<typeof toLoginError>)
     case "unavailable":
       return t("login.errUnavailable");
     default:
-      return view?.message || t("login.errUnknown");
+      return t("login.errUnknown");
   }
 }
 

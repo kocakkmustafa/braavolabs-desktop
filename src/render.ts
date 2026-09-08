@@ -173,18 +173,21 @@ export function toCompareView(session: any): CompareView {
 // ── login error mapping (raw-mode banner) ────────────────────────────────────
 
 export interface LoginErrorView {
-  kind: "invalid" | "locked" | "rate_limited" | "unavailable" | "unknown";
+  kind: "network" | "invalid" | "locked" | "rate_limited" | "unavailable" | "unknown";
   message: string;
 }
 
 /**
  * Turn a raw (non-throwing) login response into a specific banner. 401 → bad
- * creds; 429 → account lockout / IP rate-limit; 503 → auth service down (fail
+ * creds; 429 → account lockout / IP rate-limit; 5xx → auth service down (fail
  * closed — do NOT retry-loop, force a fresh login). Mirrors auth.service.ts.
  */
 export function toLoginError(raw: { status: number; body?: any }): LoginErrorView | null {
   if (raw.status >= 200 && raw.status < 300) return null;
   const serverMsg = String(raw.body?.error ?? raw.body?.message ?? "");
+  if (raw.status === 0) {
+    return { kind: "network", message: "Authentication service could not be reached" };
+  }
   if (raw.status === 401) {
     return { kind: "invalid", message: serverMsg || "Invalid email or password" };
   }
@@ -195,8 +198,8 @@ export function toLoginError(raw: { status: number; body?: any }): LoginErrorVie
       message: serverMsg || "Too many attempts. Try again later.",
     };
   }
-  if (raw.status === 503) {
+  if (raw.status >= 500 && raw.status < 600) {
     return { kind: "unavailable", message: serverMsg || "Authentication service temporarily unavailable" };
   }
-  return { kind: "unknown", message: serverMsg || `Login failed (${raw.status})` };
+  return { kind: "unknown", message: "Sign in failed" };
 }
