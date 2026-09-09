@@ -1,5 +1,56 @@
-import { describe, it, expect } from "vitest";
-import { makeT } from "../i18n";
+import { readFileSync } from "node:fs";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import { detectLocale, makeT } from "../i18n";
+
+describe("desktop bundle locale declaration", () => {
+  it("declares only English development language and EN/TR support", () => {
+    const plist = readFileSync(
+      new URL("../../src-tauri/Info.plist", import.meta.url),
+      "utf8",
+    ).trim();
+
+    // This deliberately narrow contract is not a general-purpose XML parser.
+    // Native artifact verification separately parses the generated plist.
+    const expectedElements = [
+      '<\\?xml version="1\\.0" encoding="UTF-8"\\?>',
+      '<plist version="1\\.0">',
+      "<dict>",
+      "<key>CFBundleDevelopmentRegion</key>",
+      "<string>en</string>",
+      "<key>CFBundleLocalizations</key>",
+      "<array>",
+      "<string>en</string>",
+      "<string>tr</string>",
+      "</array>",
+      "</dict>",
+      "</plist>",
+    ];
+    expect(plist).toMatch(new RegExp(`^${expectedElements.join("\\s*")}$`));
+  });
+});
+
+describe("desktop locale detection", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it.each([
+    ["tr", "tr"],
+    ["tr-TR", "tr"],
+    ["TR-tr", "tr"],
+    ["en", "en"],
+    ["en-US", "en"],
+    ["de-DE", "en"],
+    ["", "en"],
+    [undefined, "en"],
+  ])("maps navigator.language %s to %s", (language, expected) => {
+    vi.stubGlobal("navigator", { language });
+    expect(detectLocale()).toBe(expected);
+  });
+
+  it("falls back to English when navigator is absent", () => {
+    vi.stubGlobal("navigator", undefined);
+    expect(detectLocale()).toBe("en");
+  });
+});
 
 describe("i18n (single messages object, en+tr)", () => {
   it("resolves dotted keys for en", () => {
