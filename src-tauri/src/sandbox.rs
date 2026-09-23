@@ -970,10 +970,15 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     fn home_test_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
         use std::time::{SystemTime, UNIX_EPOCH};
+        static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
         let home = std::env::var("HOME").expect("HOME is set on macOS");
         let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let dir = PathBuf::from(home).join(format!("braavo-test-{n}-{}", std::process::id()));
+        // SystemTime can repeat across parallel tests on macOS. A process-local
+        // sequence prevents one test from deleting another test's write root.
+        let id = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
+        let dir = PathBuf::from(home).join(format!("braavo-test-{n}-{}-{id}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
