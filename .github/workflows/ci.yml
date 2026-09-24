@@ -32,3 +32,47 @@ jobs:
           workspaces: src-tauri
       - run: cargo check --locked
       - run: cargo test --locked
+  windows-build:
+    name: Windows x64 native tests + NSIS
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26.9.0"
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test
+      - name: Test Windows host code
+        run: cargo test --locked
+        working-directory: src-tauri
+      - name: Build Windows installer
+        run: pnpm exec tauri build --bundles nsis
+      - name: Verify installer and record signing state
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installers = @(Get-ChildItem 'src-tauri/target/release/bundle/nsis' -Filter '*.exe' -File)
+          if ($installers.Count -ne 1) { throw "Expected one NSIS installer; found $($installers.Count)" }
+          $installer = $installers[0]
+          if ($installer.Length -lt 1000000) { throw 'NSIS installer is unexpectedly small' }
+          $hash = (Get-FileHash -Algorithm SHA256 $installer.FullName).Hash.ToLowerInvariant()
+          "$hash  $($installer.Name)" | Set-Content -Encoding ascii 'windows-SHA256SUMS.txt'
+          $signature = Get-AuthenticodeSignature $installer.FullName
+          Write-Host "Installer: $($installer.Name) ($($installer.Length) bytes)"
+          Write-Host "SHA-256: $hash"
+          Write-Host "Authenticode: $($signature.Status)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: braavolabs-windows-x64-nsis
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            windows-SHA256SUMS.txt
