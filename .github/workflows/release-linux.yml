@@ -102,6 +102,14 @@ jobs:
           echo "--- sha256 ---"
           sha256sum "$DEB" "$APPIMAGE"
 
+      - name: Smoke installed desktop on native Linux
+        run: |
+          set -euo pipefail
+          DEB=$(find src-tauri/target/release/bundle/deb -name '*.deb' -print -quit)
+          test -n "$DEB"
+          sudo apt-get install -y xvfb xdotool dbus-x11 "./$DEB"
+          xvfb-run -a -s '-screen 0 1280x800x24' bash scripts/smoke-linux-desktop.sh
+
       - uses: actions/upload-artifact@v4
         with:
           name: braavolabs-linux-amd64
