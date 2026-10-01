@@ -264,6 +264,21 @@ export async function listCompanies(
 }
 
 /**
+ * GET /holding/overview — holding katmanının özeti (workflow/onay/sinyal/sensör).
+ *
+ * Ürün uçlarından ayrı: `/dashboard/*` şirket-hat-koşu dünyasını verir, bu uç
+ * holding'in yönetişim katmanını. Sunucu bu tenant'a holding'i açmadıysa 403
+ * döner — çağıran tarafın bunu "boş veri" ile karıştırmaması için hata olarak
+ * yüzeye çıkar.
+ */
+export async function getHoldingOverview(
+  cfg: Config,
+  o: { fetchImpl?: FetchLike; save?: (c: Config) => void } = {},
+): Promise<any> {
+  return apiFetch("/holding/overview", { cfg, fetchImpl: o.fetchImpl, save: o.save });
+}
+
+/**
  * GET /pipelines/scheduled — always-on jobs. The server joins each pipeline's
  * cron with the LIVE scheduler state, so `nextRunAt` is real (null when no
  * scheduler is registered) instead of something we guess client-side.

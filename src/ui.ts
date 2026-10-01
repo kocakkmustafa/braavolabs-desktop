@@ -15,6 +15,7 @@ import {
   pollCompare,
   cascade,
   savings as savingsCall,
+  getHoldingOverview,
   listCompanies,
   listScheduledPipelines,
   pauseCompany,
@@ -81,6 +82,7 @@ import {
   type CompanyView,
   type JobView,
 } from "./company";
+import { toHoldingView, headline, type HoldingView } from "./holding";
 import {
   resolveSessionStore,
   groupSessions,
@@ -371,7 +373,7 @@ export function renderWorkspace(deps: UiDeps): void {
   const seg = el("div", "seg");
   const segChatBtn = el("button", "seg-btn active", t("surface.chat"));
   const segCodeBtn = el("button", "seg-btn", t("surface.code"));
-  const segCompanyBtn = el("button", "seg-btn", t("surface.company"));
+  const segCompanyBtn = el("button", "seg-btn", t("surface.holding"));
   seg.append(segChatBtn, segCompanyBtn, segCodeBtn);
 
   const connSec = el("div");
@@ -809,6 +811,110 @@ export function renderWorkspace(deps: UiDeps): void {
   window.addEventListener("keydown", onWorkspaceKey);
 
   // --- company surface ---
+  // ── Holding yüzeyi ───────────────────────────────────────────────────────
+  // Ekranın sözleşmesi: sunucunun söylemediğini YAZMA, benzeyen ama farklı
+  // olanı AYIR. Üç ayrım bilinçli olarak görünür kılınır:
+  //   ETKİN ≠ KOŞMUŞ · İŞLENMEMİŞ ≠ TOPLAM · RUNTIME AJAN ≠ RUNBOOK
+  const holdingRow = (tone: string, baslik: string, alt: string) => {
+    const row = el("div", "company-row");
+    row.append(el("span", `dot dot-${tone}`));
+    const meta = el("div", "company-meta");
+    meta.append(el("div", "company-name", baslik));
+    meta.append(el("div", "company-sub mono", alt));
+    row.append(meta);
+    return row;
+  };
+
+  const renderHolding = (v: HoldingView | null, error?: string) => {
+    // NOT: companyPane'i TEMİZLEMEZ — şirket satırları zaten basıldı, holding
+    // bölümleri onların ALTINA eklenir. Tek yüzey, tek akış.
+    if (error) { companyPane.append(el("div", "company-error", error)); return; }
+    if (!v) return;
+    if (!v.enabled) { companyPane.append(el("div", "company-empty", t("holding.dormant"))); return; }
+
+    companyPane.append(el("div", "rail-section-label", t("holding.title")));
+    companyPane.append(el("div", "company-summary mono", headline(v)));
+
+    // ŞU AN ÇALIŞAN — ekranın orta boşluğunu dolduran asıl bilgi: hangi katman,
+    // hangi adım, hangi ajan. Boş dizi "hiçbir şey koşmuyor" ÖLÇÜMÜdür.
+    companyPane.append(el("div", "rail-section-label", t("holding.working")));
+    if (v.working.length === 0) {
+      companyPane.append(el("div", "company-empty", t("holding.idle")));
+    } else {
+      for (const w of v.working) {
+        const etiket = w.layer === "holding" ? t("holding.layerGov") : t("holding.layerProd");
+        companyPane.append(holdingRow("run", `${etiket} · ${w.step}`,
+          w.agent ? `${w.agent} · ${w.agentModel ?? ""}` : t("holding.noAgentStep")));
+      }
+    }
+
+    // KADRO — şirket bazında ajanlar; koşan ajanın noktası yanar.
+    for (const c of v.companies) {
+      if (c.agents.length === 0) continue;
+      companyPane.append(el("div", "rail-section-label", `${c.name.toUpperCase()} · ${t("holding.agents")}`));
+      for (const a of c.agents) {
+        companyPane.append(holdingRow(a.running ? "run" : "idle", `${a.name} — ${a.role}`, a.model));
+      }
+    }
+
+    // 1) Etkin ama hiç koşmamışlar — sessizce "çalışıyor" sanılan küme.
+    if (v.enabledNeverRan.length > 0) {
+      companyPane.append(el("div", "rail-section-label", t("holding.neverRan")));
+      for (const w of v.enabledNeverRan) {
+        companyPane.append(holdingRow("idle", w.name || w.key, `${w.riskClass} · ${w.key}`));
+      }
+    }
+
+    // 2) Bekleyen onaylar — kurucunun eylem kuyruğu.
+    companyPane.append(el("div", "rail-section-label", t("holding.approvals")));
+    if (v.approvals.length === 0) {
+      companyPane.append(el("div", "company-empty", t("holding.noApprovals")));
+    } else {
+      for (const a of v.approvals) companyPane.append(holdingRow("run", a.description, a.riskClass));
+    }
+
+    // 3) İşlenmemiş sinyaller (arşiv DEĞİL — soru "şu an ne bekliyor").
+    companyPane.append(el("div", "rail-section-label", t("holding.signals")));
+    if (v.signals.length === 0) {
+      companyPane.append(el("div", "company-empty", t("holding.noSignals", { total: String(v.signalsTotal) })));
+    } else {
+      for (const g of v.signals) {
+        const acil = g.severity === "SEV0" || g.severity === "SEV1";
+        companyPane.append(holdingRow(acil ? "risk" : "idle", `${g.severity} · ${g.kind}`, String(g.count)));
+      }
+    }
+
+    // 4) Son koşular.
+    companyPane.append(el("div", "rail-section-label", t("holding.runs")));
+    for (const r of v.runs.slice(0, 8)) {
+      const tone = r.tone === "arc" ? "done" : r.tone === "ember" ? "run" : r.tone === "molten" ? "risk" : "idle";
+      companyPane.append(holdingRow(tone, r.name || r.key, `${r.status}${r.venture ? " · " + r.venture : ""}`));
+    }
+
+    // 5) Sensörler — bayat varsa gözcü hattı körelmiş demektir.
+    companyPane.append(el("div", "rail-section-label", t("holding.sensors")));
+    for (const sn of v.sensors) {
+      companyPane.append(holdingRow(sn.stale ? "risk" : "done", sn.id,
+        sn.stale ? t("holding.sensorStale") : t("holding.sensorFresh")));
+    }
+
+    // 6) Kadro — "0 ajan" DEĞİL, "runtime'a girmedi" (DEFTER H-025).
+    companyPane.append(el("div", "rail-section-label", t("holding.crew")));
+    companyPane.append(el("div", "company-empty",
+      v.runtimeAgents === null ? t("holding.crewUnknown") : t("holding.crewNote", { n: String(v.runtimeAgents) })));
+  };
+
+  const loadHolding = async () => {
+    try {
+      renderHolding(toHoldingView(await getHoldingOverview(cfg, { save: deps.persist })));
+    } catch (e) {
+      // 403 = holding bu tenant'a açık değil. Bunu boş ekranla karıştırmak,
+      // "veri yok" ile "yetkin yok"u aynı şey sanmaktır.
+      const msg = e instanceof ApiError ? `${e.status} · ${e.message}` : String(e);
+      renderHolding(null, t("holding.loadFailed", { reason: msg }));
+    }
+  };
+
   let companyBusy = false;
   const renderCompany = (companies: CompanyView[], jobs: JobView[], error?: string) => {
     companyPane.replaceChildren();
@@ -928,6 +1034,9 @@ export function renderWorkspace(deps: UiDeps): void {
         listScheduledPipelines(cfg, { save: deps.persist }).catch(() => null),
       ]);
       renderCompany(toCompanyViews(rawCompanies), toJobViews(rawJobs));
+        // Holding katmanı şirket satırlarının ALTINA eklenir. Ayrı istek:
+        // biri düşse diğeri yine görünür — yüzeyin tamamı kararmaz.
+        await loadHolding();
     } catch (e) {
       const msg = e instanceof ApiError ? `${e.status} · ${e.message}` : String(e);
       renderCompany([], [], t("company.loadFailed", { reason: msg }));
@@ -949,7 +1058,7 @@ export function renderWorkspace(deps: UiDeps): void {
       s === "chat"
         ? activeSession?.title || t("app.name")
         : s === "company"
-          ? t("surface.companyCrumb")
+          ? t("surface.holdingCrumb")
           : t("surface.codeCrumb");
     // Fetch on entry, not on mount: the Company surface costs two requests and
     // most sessions never open it.
