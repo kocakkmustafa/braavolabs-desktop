@@ -5,7 +5,7 @@
  */
 import "./styles.css";
 import { type Config, DEFAULT_API, setPersist } from "./config";
-import { resolveStore, loadApiUrl, hydrateConfig } from "./store";
+import { resolveStore, loadApiUrl, hydrateConfig, createConfigPersister } from "./store";
 import { resolveKeyVault } from "./keyvault";
 import { resolveSpawnProbe } from "./spawn";
 import { resolveGovernance } from "./governance";
@@ -24,10 +24,8 @@ async function boot(): Promise<void> {
 
   // Route the client's post-refresh save through the secure store (never disk
   // in plaintext / never localStorage for the token).
-  const persist = async (c: Config) => {
-    await store.set({ token: c.token, refreshToken: c.refreshToken });
-  };
-  setPersist((c) => void persist(c));
+  const persist = createConfigPersister(store);
+  setPersist(persist);
 
   const locale = detectLocale();
   document.documentElement.lang = locale;
@@ -42,8 +40,25 @@ async function boot(): Promise<void> {
     gov,
     mcp: resolveMcpBridge(gov),
     persist,
+    onSignOutError: (message) => {
+      const warning = document.createElement("p");
+      warning.setAttribute("role", "alert");
+      warning.textContent = message;
+      const retry = document.createElement("button");
+      retry.textContent = "Retry clearing saved credentials";
+      retry.addEventListener("click", async () => {
+        if (cfg.token || cfg.refreshToken) return;
+        retry.disabled = true;
+        try {
+          await persist(cfg);
+          if (!cfg.token && !cfg.refreshToken) { warning.remove(); retry.remove(); }
+        } catch {
+          // Keep the sanitized warning and retry action; never display backend details.
+        } finally { retry.disabled = false; }
+      });
+      root.prepend(warning, retry);
+    },
     onSignedOut: () => {
-      void store.clear();
       // Transcripts + the cached account email are plain user content, but they
       // are THIS user's content — the next account on this machine must not
       // find them in the sidebar. renderLogin() also tears the workspace down
