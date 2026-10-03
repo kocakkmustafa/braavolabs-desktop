@@ -32,6 +32,8 @@
 //! mid-migration can only leave the old file behind (safe to retry), never lose
 //! a secret.
 
+mod auth_clear;
+
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{Read, Write};
@@ -140,13 +142,17 @@ impl FileBackend {
     fn read_map(&self) -> Result<BTreeMap<String, String>, String> {
         match fs::read(&self.path) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
-            Err(_) => Ok(BTreeMap::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+            Err(_) => Err("Could not read credential store.".into()),
         }
     }
     fn write_map(&self, map: &BTreeMap<String, String>) -> Result<(), String> {
         if map.is_empty() {
-            let _ = fs::remove_file(&self.path);
-            return Ok(());
+            return match fs::remove_file(&self.path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(_) => Err("Could not remove credential store.".into()),
+            };
         }
         let data = serde_json::to_vec(map).map_err(|e| e.to_string())?;
         write_private(&self.path, &data)
@@ -236,19 +242,21 @@ fn write_private(path: &Path, data: &[u8]) -> Result<(), String> {
 ///     permanent secret loss. Renaming keeps it recoverable without letting it
 ///     re-trigger migration on every call.
 fn migrate_legacy(backend: &dyn SecretBackend, config_dir: &Path) -> Result<(), String> {
-    let secrets_file = config_dir.join("secrets.json");
-    if let Ok(bytes) = fs::read(&secrets_file) {
-        match serde_json::from_slice::<Secrets>(&bytes) {
-            Ok(s) => {
-                if let Some(t) = s.token {
-                    backend.set(ACCT_TOKEN, &t)?; // file intact if this errors
+    if auth_clear::may_migrate_auth(config_dir)? {
+        let secrets_file = config_dir.join("secrets.json");
+        if let Ok(bytes) = fs::read(&secrets_file) {
+            match serde_json::from_slice::<Secrets>(&bytes) {
+                Ok(s) => {
+                    if let Some(t) = s.token {
+                        backend.set(ACCT_TOKEN, &t)?; // file intact if this errors
+                    }
+                    if let Some(r) = s.refresh_token {
+                        backend.set(ACCT_REFRESH, &r)?;
+                    }
+                    let _ = fs::remove_file(&secrets_file); // only after successful set(s)
                 }
-                if let Some(r) = s.refresh_token {
-                    backend.set(ACCT_REFRESH, &r)?;
-                }
-                let _ = fs::remove_file(&secrets_file); // only after successful set(s)
+                Err(_) => quarantine_corrupt(&secrets_file),
             }
-            Err(_) => quarantine_corrupt(&secrets_file),
         }
     }
 
@@ -291,6 +299,9 @@ fn config_dir(app: &AppHandle) -> Result<PathBuf, String> {
 fn secure_store_get(app: AppHandle) -> Result<Secrets, String> {
     let dir = config_dir(&app)?;
     let backend = make_backend(&dir);
+    if auth_clear::is_signed_out(&dir)? {
+        return Ok(Secrets { token: None, refresh_token: None });
+    }
     migrate_legacy(backend.as_ref(), &dir)?;
     Ok(Secrets {
         token: backend.get(ACCT_TOKEN)?,
@@ -306,12 +317,15 @@ fn secure_store_set(
 ) -> Result<(), String> {
     let dir = config_dir(&app)?;
     let backend = make_backend(&dir);
+    if token.is_none() && refresh_token.is_none() {
+        return auth_clear::clear_auth(&dir, [ACCT_TOKEN, ACCT_REFRESH], |account| backend.delete(account));
+    }
     // Per-account set/delete mirrors the old whole-struct write: a field passed
     // as None clears that account (the previous code stored a struct with the
     // field absent, i.e. logged out of that token).
     set_or_delete(backend.as_ref(), ACCT_TOKEN, token)?;
     set_or_delete(backend.as_ref(), ACCT_REFRESH, refresh_token)?;
-    Ok(())
+    auth_clear::allow_rehydrate(&dir)
 }
 
 fn set_or_delete(backend: &dyn SecretBackend, account: &str, value: Option<String>) -> Result<(), String> {
@@ -325,10 +339,7 @@ fn set_or_delete(backend: &dyn SecretBackend, account: &str, value: Option<Strin
 fn secure_store_clear(app: AppHandle) -> Result<(), String> {
     let dir = config_dir(&app)?;
     let backend = make_backend(&dir);
-    // Idempotent — clearing already-clear accounts is fine.
-    let _ = backend.delete(ACCT_TOKEN);
-    let _ = backend.delete(ACCT_REFRESH);
-    Ok(())
+    auth_clear::clear_auth(&dir, [ACCT_TOKEN, ACCT_REFRESH], |account| backend.delete(account))
 }
 
 /// Honest backend indicator for the UI ("OS keychain" vs "encrypted file").
@@ -2919,6 +2930,23 @@ mod secret_store_tests {
         p.push(format!("braavolabs-s010-{n}-{c}"));
         fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    #[test]
+    fn retained_legacy_auth_cannot_overwrite_login_after_logout() {
+        let dir = tmpdir();
+        let be = MockBackend::new(true);
+        fs::write(dir.join("secrets.json"), br#"{"token":"legacy-a","refreshToken":"legacy-r"}"#).unwrap();
+        auth_clear::clear_auth(&dir, [ACCT_TOKEN, ACCT_REFRESH], |a| be.delete(a)).unwrap();
+        be.set(ACCT_TOKEN, "new-b").unwrap();
+        be.set(ACCT_REFRESH, "new-r").unwrap();
+        auth_clear::allow_rehydrate(&dir).unwrap();
+        // Both secure_store_get and key_list use this shared migration function.
+        migrate_legacy(&be, &dir).unwrap();
+        assert_eq!(be.get(ACCT_TOKEN).unwrap(), Some("new-b".into()));
+        assert_eq!(be.get(ACCT_REFRESH).unwrap(), Some("new-r".into()));
+        assert!(dir.join("secrets.json").exists());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

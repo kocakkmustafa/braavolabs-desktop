@@ -10,6 +10,9 @@ import type { Config } from "./config";
 import { saveApiUrl } from "./store";
 import {
   ApiError,
+  captureSession,
+  invalidateSession,
+  isCurrentSession,
   login,
   startCompare,
   pollCompare,
@@ -224,6 +227,7 @@ export interface UiDeps {
   /** Persist secrets after login/refresh/logout. */
   persist: (c: Config) => Promise<void> | void;
   onSignedOut: () => void;
+  onSignOutError?: (message: string) => void;
 }
 
 /** Dispatch lane: server cascade/compare, local Ollama, or BYOK direct. */
@@ -243,6 +247,7 @@ const el = <K extends keyof HTMLElementTagNameMap>(
 // ── login view ────────────────────────────────────────────────────────────
 export function renderLogin(deps: UiDeps): void {
   const { root, cfg, t } = deps;
+  invalidateSession(cfg);
   runWorkspaceTeardown();
   initReducedMotion();
   root.innerHTML = "";
@@ -304,6 +309,7 @@ export function renderLogin(deps: UiDeps): void {
     btn.textContent = t("login.signingIn");
     cfg.apiUrl = apiInput.value.trim() || cfg.apiUrl;
     saveApiUrl(cfg.apiUrl);
+    const owner = captureSession(cfg);
     try {
       // raw mode → branch on status for a specific banner (401 vs 429 vs 503).
       const res = await login(
@@ -317,15 +323,19 @@ export function renderLogin(deps: UiDeps): void {
             : { ok: false as const, status: 0, message: String(e) },
         );
 
+      if (!isCurrentSession(cfg, owner)) return;
       if (!res.ok) {
         const view = toLoginError({ status: res.status, body: { error: res.message } });
         errBox.textContent = mapLoginErrorText(t, view);
         errBox.style.display = "block";
         return;
       }
+      invalidateSession(cfg);
       cfg.token = res.data.token;
       cfg.refreshToken = res.data.refreshToken;
+      const signedIn = captureSession(cfg);
       await deps.persist(cfg);
+      if (!isCurrentSession(cfg, signedIn)) return;
       // Email is identity, not a secret — localStorage (not the secure store)
       // so the account row can show who is signed in.
       try {
@@ -1106,6 +1116,8 @@ export function renderWorkspace(deps: UiDeps): void {
     const s = sessionStore.get(id);
     if (!s) return;
     chatMotionVersion += 1;
+    dispatching = false;
+    sendBtn.disabled = false;
     setChatMotion("idle", t("app.tagline"));
     for (const row of thinkingMotions.keys()) removeThinking(row);
     activeSession = s;
@@ -1122,6 +1134,8 @@ export function renderWorkspace(deps: UiDeps): void {
 
   const startNewSession = () => {
     chatMotionVersion += 1;
+    dispatching = false;
+    sendBtn.disabled = false;
     setChatMotion("idle", t("app.tagline"));
     for (const row of thinkingMotions.keys()) removeThinking(row);
     activeSession = null; // created lazily on first send, so empty chats don't pile up
@@ -1140,19 +1154,23 @@ export function renderWorkspace(deps: UiDeps): void {
   /** Set by onSteer for exactly one dispatch, so the audit line names the origin. */
   let nextDispatchRemote = false;
 
-  const record = (role: SessionRole, text: string) => {
-    if (!text) return;
+  const record = (role: SessionRole, text: string, entryMode: Mode = mode) => {
+    if (workspaceDisposed || !text) return;
     if (!activeSession) activeSession = sessionStore.create();
     const before = activeSession.title;
     activeSession =
-      sessionStore.append(activeSession.id, { role, mode, text, at: Date.now() }) ?? activeSession;
+      sessionStore.append(activeSession.id, { role, mode: entryMode, text, at: Date.now() }) ?? activeSession;
     if (activeSession.title !== before) syncCrumb();
     refreshSessionList();
   };
 
   const refreshSavings = async () => {
+    if (workspaceDisposed) return;
+    const owner = captureSession(cfg);
+    const current = () => !workspaceDisposed && isCurrentSession(cfg, owner);
     try {
       const raw = await savingsCall(cfg, { days: 30 });
+      if (!current()) return;
       const v = toSavingsView(raw);
       if (v.hasSavings) {
         savingsAmount.textContent = `$${v.savedUsd.toFixed(v.savedUsd < 1 ? 4 : 2)}`;
@@ -1162,25 +1180,33 @@ export function renderWorkspace(deps: UiDeps): void {
         savingsSub.textContent = t("rail.noSavings");
       }
     } catch {
+      if (!current()) return;
       savingsAmount.textContent = "—";
       savingsSub.textContent = t("rail.noSavings");
     }
   };
 
   const run = async () => {
+    if (workspaceDisposed || dispatching) return;
+    const runMode = mode;
     const text = ta.value.trim();
     if (!text) return;
-    if (mode === "compare" && !companyInput.value.trim()) {
+    if (runMode === "compare" && !companyInput.value.trim()) {
       hint.textContent = t("chat.companyNeeded");
       hint.style.display = "block";
       return;
     }
+    const owner = captureSession(cfg);
+    const motionVersion = ++chatMotionVersion;
+    const ownsRun = () => !workspaceDisposed && isCurrentSession(cfg, owner) && motionVersion === chatMotionVersion;
+    const recordRun = (role: SessionRole, text: string) => {
+      if (ownsRun()) record(role, text, runMode);
+    };
     hint.style.display = "none";
     dispatching = true;
     sendBtn.disabled = true;
     ta.value = "";
-    const motionVersion = ++chatMotionVersion;
-    const ownsMotion = () => motionVersion === chatMotionVersion && !workspaceDisposed;
+    const ownsMotion = ownsRun;
     const setRunMotion = (state: MotionState, label: string) => {
       if (ownsMotion()) setChatMotion(state, label);
     };
@@ -1212,50 +1238,53 @@ export function renderWorkspace(deps: UiDeps): void {
     try {
       // Inside the try: a storage failure here must not strand sendBtn
       // disabled with the user's text already cleared.
-      record("user", text);
+      recordRun("user", text);
       const origin = nextDispatchRemote ? "companion" : "local";
       nextDispatchRemote = false;
 
-      if (mode === "cascade" || mode === "compare") {
+      if (runMode === "cascade" || runMode === "compare") {
         // Governed (auto-allow) so the ledger has evidence of every server-lane
         // dispatch — including one a companion steer initiated while nobody was
         // at the desk. See ACTION_KINDS "server.dispatch" in governance.ts.
         const serverDetail: ActionDetail = {
-          summary: t("gov.kindServerDispatch", { mode, origin }),
+          summary: t("gov.kindServerDispatch", { mode: runMode, origin }),
         };
         const gate = await gateAction(deps, "server.dispatch", serverDetail);
+        if (!ownsRun()) return;
         if (!gate.ok) {
           setRunMotion("error", gate.reason);
           renderErrorCard(scroll, gate.reason);
-          record("error", gate.reason);
+          recordRun("error", gate.reason);
           bumpActivity();
           return;
         }
       }
 
-      if (mode === "cascade") {
+      if (runMode === "cascade") {
         const thinking = thinkingRow(t("chat.thinking", { n: 1 }));
         scroll.append(thinking);
         scrollToEnd();
         const raw = await cascade(cfg, { prompt: text });
+        if (!ownsRun()) return;
         removeThinking(thinking);
         const view = toCascadeView(raw);
         showAnswerMotion(view.answer);
         renderCascadeAnswer(scroll, view, t);
         renderCascadeInspector(inspectorBody, view, t);
-        record("assistant", view.answer);
+        recordRun("assistant", view.answer);
         await deps.gov.settle("server.dispatch", "success", {
-          summary: t("gov.kindServerDispatch", { mode, origin }),
+          summary: t("gov.kindServerDispatch", { mode: runMode, origin }),
         });
-      } else if (mode === "local") {
+      } else if (runMode === "local") {
         // Lane-A local — governed (auto-allow), keyless, offline. Even an
         // auto-allowed action is audited so the ledger is a complete record.
         const localDetail: ActionDetail = { summary: t("gov.kindLocalDispatch") };
         const gate = await gateAction(deps, "local.dispatch", localDetail);
+        if (!ownsRun()) return;
         if (!gate.ok) {
           setRunMotion("error", gate.reason);
           renderErrorCard(scroll, gate.reason);
-          record("error", gate.reason);
+          recordRun("error", gate.reason);
         } else {
           const host = resolveOllamaHost();
           const thinking = thinkingRow(t("chat.localThinking"));
@@ -1263,29 +1292,32 @@ export function renderWorkspace(deps: UiDeps): void {
           scrollToEnd();
           try {
             const model = await resolveOllamaModel(host, localModelInput.value.trim() || undefined);
+            if (!ownsRun()) return;
             const res = await ollamaChat(host, model, text);
+            if (!ownsRun()) return;
             removeThinking(thinking);
             showAnswerMotion(res.content);
             renderPlainAnswer(scroll, res.content, t);
             renderSourceInspector(inspectorBody, t("chat.localSource"), res.model, t);
-            record("assistant", res.content);
+            recordRun("assistant", res.content);
             await deps.gov.settle("local.dispatch", "success", localDetail);
           } catch (e) {
+            if (!ownsRun()) return;
             removeThinking(thinking);
             setRunMotion("error", e instanceof OllamaUnreachableError
               ? t("chat.localUnreachable", { host: e.host }) : String(e instanceof Error ? e.message : e));
             if (e instanceof OllamaUnreachableError) {
               renderErrorCard(scroll, t("chat.localUnreachable", { host: e.host }));
-              record("error", t("chat.localUnreachable", { host: e.host }));
+              recordRun("error", t("chat.localUnreachable", { host: e.host }));
             } else {
               renderErrorCard(scroll, String(e instanceof Error ? e.message : e));
-              record("error", String(e instanceof Error ? e.message : e));
+              recordRun("error", String(e instanceof Error ? e.message : e));
             }
             await deps.gov.settle("local.dispatch", "error", localDetail);
           }
         }
-        bumpActivity();
-      } else if (mode === "direct") {
+        if (ownsRun()) bumpActivity();
+      } else if (runMode === "direct") {
         // Lane-A direct — BYOK egress. GOVERNED: a human must approve before the
         // key leaves the box (the moat vs an allow-all host). The raw key is
         // fetched one-time only AFTER approval, and never reaches the DOM/audit.
@@ -1293,7 +1325,7 @@ export function renderWorkspace(deps: UiDeps): void {
         if (!isDirectProvider(providerRaw)) {
           setRunMotion("error", t("chat.empty"));
           renderErrorCard(scroll, t("chat.empty"));
-          record("error", t("chat.empty"));
+          recordRun("error", t("chat.empty"));
         } else {
           const provider: DirectProvider = providerRaw;
           const directDetail: ActionDetail = { provider, summary: t("gov.kindDirectDispatch", { provider }) };
@@ -1302,18 +1334,20 @@ export function renderWorkspace(deps: UiDeps): void {
           // host verifies this exact governance grant (R4). A webview that skips
           // the gate has no token, so key_get rejects it.
           const gate = await gateForToken(deps, "direct.dispatch", directDetail);
+          if (!ownsRun()) return;
           if (!gate.ok) {
             setRunMotion("error", gate.reason);
             renderErrorCard(scroll, gate.reason);
-            record("error", gate.reason);
+            recordRun("error", gate.reason);
           } else {
             // One-time raw key retrieval at dispatch — never rendered to the DOM.
             // The host consumes gate.token inside key_get before returning it.
             const apiKey = await deps.vault.get(provider, gate.token);
+            if (!ownsRun()) return;
             if (!apiKey) {
               setRunMotion("error", t("chat.noKey", { provider }));
               renderErrorCard(scroll, t("chat.noKey", { provider }));
-              record("error", t("chat.noKey", { provider }));
+              recordRun("error", t("chat.noKey", { provider }));
               await deps.gov.settle("direct.dispatch", "error", directDetail);
             } else {
               const model = resolveDirectModel(provider, directModelInput.value.trim() || undefined);
@@ -1322,27 +1356,30 @@ export function renderWorkspace(deps: UiDeps): void {
               scrollToEnd();
               try {
                 const res = await directChat(provider, apiKey, model, text);
+                if (!ownsRun()) return;
                 removeThinking(thinking);
                 showAnswerMotion(res.content);
                 renderPlainAnswer(scroll, res.content, t);
                 renderSourceInspector(inspectorBody, t("chat.directSource", { provider }), res.model, t);
-                record("assistant", res.content);
+                recordRun("assistant", res.content);
                 await deps.gov.settle("direct.dispatch", "success", directDetail);
               } catch (e) {
+                if (!ownsRun()) return;
                 removeThinking(thinking);
                 const msg = e instanceof DirectApiError ? `${e.status} · ${e.message}` : String(e instanceof Error ? e.message : e);
                 setRunMotion("error", msg);
                 renderErrorCard(scroll, msg);
-                record("error", msg);
+                recordRun("error", msg);
                 await deps.gov.settle("direct.dispatch", "error", directDetail);
               }
             }
           }
         }
-        bumpActivity();
+        if (ownsRun()) bumpActivity();
       } else {
         const companyId = companyInput.value.trim();
         const stub = await startCompare(cfg, { companyId, query: text });
+        if (!ownsRun()) return;
         const progressLabel = (status: string) => status === "RUNNING"
           ? t("chat.thinking", { n: 2 }) : t("chat.polling", { status });
         const label = document.createTextNode(progressLabel(stub.status));
@@ -1350,13 +1387,16 @@ export function renderWorkspace(deps: UiDeps): void {
         scroll.append(thinking);
         scrollToEnd();
         const session = await pollCompare(cfg, stub.id, {
+          isCurrent: ownsRun,
           onTick: (status) => {
+            if (!ownsRun()) return;
             const progressMotion = compareProgressMotion(status);
             label.textContent = progressLabel(status);
             thinkingMotions.get(thinking)?.setState(progressMotion);
             setRunMotion(progressMotion, label.textContent);
           },
         });
+        if (!ownsRun()) return;
         removeThinking(thinking);
         const view = toCompareView(session);
         const resultMotion = compareMotion(view);
@@ -1364,25 +1404,28 @@ export function renderWorkspace(deps: UiDeps): void {
           : resultMotion === "error" ? view.error || t("chat.empty") : t("app.tagline"));
         renderCompareAnswer(scroll, view, t);
         renderCompareInspector(inspectorBody, view, t);
-        record("assistant", view.finalAnswer || view.synthesis || view.error || view.status);
+        recordRun("assistant", view.finalAnswer || view.synthesis || view.error || view.status);
         await deps.gov.settle("server.dispatch", "success", {
-          summary: t("gov.kindServerDispatch", { mode, origin }),
+          summary: t("gov.kindServerDispatch", { mode: runMode, origin }),
         });
       }
-      void refreshSavings();
+      if (ownsRun()) void refreshSavings();
     } catch (e) {
+      if (!ownsRun()) return;
       const msg = e instanceof ApiError ? `${e.status} · ${e.message}` : String(e);
       setRunMotion("error", msg);
-      record("error", msg);
+      recordRun("error", msg);
       const errCard = el("div", "msg-final");
       errCard.style.borderLeftColor = "var(--molten)";
       errCard.append(el("div", "msg-label", "error"), document.createTextNode(msg));
       scroll.append(errCard);
     } finally {
       for (const row of runThinkingRows) removeThinking(row);
-      dispatching = false;
-      sendBtn.disabled = false;
-      scrollToEnd();
+      if (ownsRun()) {
+        dispatching = false;
+        sendBtn.disabled = false;
+        scrollToEnd();
+      }
     }
   };
 

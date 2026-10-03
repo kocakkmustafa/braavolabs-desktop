@@ -6,12 +6,12 @@
     <!--
       CSP is enforced authoritatively by src-tauri/tauri.conf.json (app.security.csp).
       This meta tag mirrors it so `vite build` / a plain browser preview behaves the
-      same: self plus the existing platform, local-model and BYOK connections.
+      same: selected HTTPS self-hosts plus loopback models/APIs; no remote HTTP.
       Script execution remains self only; no inline scripts.
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://braavolabs.com https://*.braavolabs.com http://localhost:11434 https://api.anthropic.com https://api.openai.com https://api.groq.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https: http://localhost:* http://127.0.0.1:* http://[::1]:*; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
     />
     <title>Braavolabs</title>
   </head>

@@ -3,6 +3,8 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import { ApiError } from "../client";
+import * as clientModule from "../client";
+import type { Config } from "../config";
 import { toLoginError } from "../render";
 import { makeT } from "../i18n";
 
@@ -49,13 +51,14 @@ function fixture(locale: "en" | "tr" = "en") {
   };
   const login = vi.fn().mockRejectedValue(new TypeError("PRIVATE_RAW_NETWORK_DETAIL"));
   const saveApiUrl = vi.fn(); const persist = vi.fn(); const renderWorkspace = vi.fn();
-  const accountStore = vi.fn(); const cfg = { apiUrl: "https://api.braavolabs.com/api/v1" };
+  const accountStore = vi.fn(); const cfg: Config = { apiUrl: "https://api.braavolabs.com/api/v1" };
   const ui = runInNewContext(`${compiled}\n({renderLogin,mapLoginErrorText});`, {
-    el, document: { createTextNode: (text: string) => el("text", "", text) },
+    ...clientModule, el, document: { createTextNode: (text: string) => el("text", "", text) },
     runWorkspaceTeardown() {}, initReducedMotion() {}, login, saveApiUrl,
     ApiError, toLoginError, renderWorkspace, localStorage: { setItem: accountStore },
   }) as { renderLogin(deps: unknown): void; mapLoginErrorText: (t: ReturnType<typeof makeT>, view: ReturnType<typeof toLoginError>) => string };
-  ui.renderLogin({ root: el("div"), cfg, t: makeT(locale), persist });
+  const deps = { root: el("div"), cfg, t: makeT(locale), persist };
+  ui.renderLogin(deps);
   const field = (id: string) => nodes.find(node => node.id === id)!;
   const form = nodes.find(node => node.className === "login-card")!;
   const button = nodes.find(node => node.className === "login-btn")!;
@@ -66,8 +69,48 @@ function fixture(locale: "en" | "tr" = "en") {
     expect(handler, "actual form owns the submit handler").toBeDefined();
     handler!(event); expect(event.preventDefault).toHaveBeenCalledOnce();
   };
-  return { ...ui, nodes, form, button, error, field, submit, login, saveApiUrl, persist, renderWorkspace, cfg, accountStore };
+  return { ...ui, deps, nodes, form, button, error, field, submit, login, saveApiUrl, persist, renderWorkspace, cfg, accountStore };
 }
+
+function delayed<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+describe("actual login UI session owner", () => {
+  it("discards an old login result after another account signs in", async () => {
+    const f = fixture(); const response = delayed<{ token: string; refreshToken: string }>();
+    f.login.mockImplementation(async () => response.promise);
+    f.submit(); f.cfg.token = "B-token"; f.cfg.refreshToken = "B-refresh";
+    response.resolve({ token: "A-token", refreshToken: "A-refresh" });
+    await vi.waitFor(() => expect(f.button.disabled).toBe(false));
+    expect(f.cfg.token).toBe("B-token"); expect(f.cfg.refreshToken).toBe("B-refresh");
+    expect(f.persist).not.toHaveBeenCalled(); expect(f.renderWorkspace).not.toHaveBeenCalled();
+    expect(f.accountStore).not.toHaveBeenCalled();
+  });
+
+  it("does not enter the workspace or store old identity after session changes during persistence", async () => {
+    const f = fixture(); const persistence = delayed<void>();
+    f.login.mockResolvedValue({ token: "A-token", refreshToken: "A-refresh" });
+    f.persist.mockImplementation(async () => persistence.promise);
+    f.submit(); await vi.waitFor(() => expect(f.persist).toHaveBeenCalledOnce());
+    f.cfg.token = "B-token"; f.cfg.refreshToken = "B-refresh"; persistence.resolve();
+    await vi.waitFor(() => expect(f.button.disabled).toBe(false));
+    expect(f.cfg.token).toBe("B-token"); expect(f.renderWorkspace).not.toHaveBeenCalled();
+    expect(f.accountStore).not.toHaveBeenCalled();
+  });
+
+  it("cancels the pending login when its view is mounted again", async () => {
+    const f = fixture(); const response = delayed<{ token: string; refreshToken: string }>();
+    f.login.mockImplementation(async () => response.promise); f.submit();
+    f.renderLogin(f.deps);
+    response.resolve({ token: "A-token", refreshToken: "A-refresh" });
+    await vi.waitFor(() => expect(f.button.disabled).toBe(false));
+    expect(f.cfg.token).toBeUndefined(); expect(f.persist).not.toHaveBeenCalled();
+    expect(f.renderWorkspace).not.toHaveBeenCalled();
+  });
+});
 
 describe("actual desktop login UI source functions", () => {
   it("uses native form validation, a submit button and an accessible error region", () => {

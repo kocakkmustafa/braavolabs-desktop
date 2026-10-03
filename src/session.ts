@@ -7,11 +7,12 @@
  * test instead of silently re-opening the hole.
  */
 import type { Config } from "./config";
-import { logout as apiLogout } from "./client";
+import { invalidateSession, logout as apiLogout } from "./client";
 
 type SignOutDeps = {
   persist: (c: Config) => Promise<void> | void;
   onSignedOut: () => void;
+  onSignOutError?: (message: string) => void;
 };
 
 // The logout call is injectable so session.test.ts can assert the ordering
@@ -28,22 +29,33 @@ type DoLogout = (c: Config, o?: { save?: (c: Config) => void }) => Promise<unkno
  *      must send (audit #2 — the ordering was previously untested).
  *   3. Local creds are cleared + persisted UNCONDITIONALLY, even if logout
  *      rejects or the network is offline — never a half-signed-in state.
- *   4. onSignedOut() always fires.
+ *   4. onSignedOut() always fires; failed storage clearing is reported honestly.
  */
 export function performSignOut(
   cfg: Config,
   deps: SignOutDeps,
   doLogout: DoLogout = apiLogout,
 ): void {
+  invalidateSession(cfg);
   if (cfg.token || cfg.refreshToken) {
     // Best-effort + fire-and-forget: apiFetch reads cfg.token/refreshToken
     // synchronously when invoked here, so it captures them before the clear
     // below runs. A rejection (offline / already-expired) must not block or
     // revert the local sign-out.
-    void doLogout(cfg, { save: deps.persist }).catch(() => {});
+    void doLogout({ ...cfg }, { save: deps.persist }).catch(() => {});
   }
   cfg.token = undefined;
   cfg.refreshToken = undefined;
-  void deps.persist(cfg);
+  const reportFailure = () => {
+    // Do not replace a newer signed-in account's UI with an old clear failure.
+    if (!cfg.token && !cfg.refreshToken) {
+      deps.onSignOutError?.("Saved credentials could not be cleared. They may remain on this device. Retry clearing saved credentials before reopening the app.");
+    }
+  };
+  try {
+    void Promise.resolve(deps.persist(cfg)).catch(reportFailure);
+  } catch {
+    queueMicrotask(reportFailure);
+  }
   deps.onSignedOut();
 }

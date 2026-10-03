@@ -20,11 +20,9 @@ describe("desktop CSP contract", () => {
     expect(metas[0]?.match(/\bcontent="([^"]*)"/)?.[1]).toBe(native);
   });
 
-  it("retains only the existing platform, local-model and BYOK endpoints", () => {
+  it("supports selected HTTPS selfhost and loopback while denying broad plaintext", () => {
     expect(directive("connect-src")).toEqual([
-      "'self'", "https://braavolabs.com", "https://*.braavolabs.com",
-      "http://localhost:11434", "https://api.anthropic.com",
-      "https://api.openai.com", "https://api.groq.com",
+      "'self'", "https:", "http://localhost:*", "http://127.0.0.1:*", "http://[::1]:*",
     ]);
   });
 

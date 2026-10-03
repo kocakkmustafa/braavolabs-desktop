@@ -1,8 +1,8 @@
 /**
- * Braavolabs API client — a VERBATIM port of packages/cli/src/forge/client.ts:
+ * Braavolabs API client — the shared CLI endpoint contract with a desktop URL boundary:
  * dependency-free `fetch`, a single transparent refresh-on-401, `ApiError` on
  * non-2xx, and `raw` mode for callers (login) that render their own banner.
- * Keeping the CLI's exact contract means server-side changes only have to be
+ * Keeping the CLI endpoint contract means server-side changes only have to be
  * reasoned about once. `fetchImpl`/`save` stay injectable so the desktop's
  * whole network layer is unit-testable with fakes (no disk, no sockets, no
  * Tauri).
@@ -29,6 +29,26 @@ export class ApiError extends Error {
   }
 }
 
+/** Bind every credential-bearing request to the explicitly selected API origin.
+ * HTTPS self-hosts are supported; plaintext is reserved for loopback fixtures.
+ * Redirects are separately rejected at fetch so a 307 cannot forward passwords.
+ */
+export function apiRequestUrl(apiUrl: string, path: string): string {
+  let base: URL;
+  try { base = new URL(apiUrl); } catch { throw new ApiError(0, "Invalid API URL"); }
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(base.hostname);
+  if ((base.protocol !== "https:" && !(base.protocol === "http:" && loopback)) ||
+      base.username || base.password || base.search || base.hash || apiUrl.includes("\\")) {
+    throw new ApiError(0, "API requires HTTPS or loopback, without credentials, query or fragment");
+  }
+  const prefix = base.pathname.replace(/\/$/, "");
+  const url = new URL(`${base.origin}${prefix}${path}`);
+  if (!path.startsWith("/") || url.origin !== base.origin || !url.pathname.startsWith(`${prefix}/`)) {
+    throw new ApiError(0, "Request must remain inside the selected API");
+  }
+  return url.href;
+}
+
 type FetchLike = (url: string, init?: any) => Promise<any>;
 
 export interface RequestOpts {
@@ -38,7 +58,7 @@ export interface RequestOpts {
   raw?: boolean;
   cfg: Config;
   /** Persist cfg after a refresh; defaults to the registered secure backend. */
-  save?: (c: Config) => void;
+  save?: (c: Config) => void | Promise<void>;
   /** Injectable for tests; defaults to global fetch. */
   fetchImpl?: FetchLike;
 }
@@ -49,6 +69,104 @@ export interface RawResult {
   body: any;
 }
 
+/** A logout/login transition must invalidate even an identical restored pair. */
+export class SessionChangedError extends Error {
+  constructor() {
+    super("Session changed while the request was pending");
+    this.name = "SessionChangedError";
+  }
+}
+export interface SessionSnapshot {
+  revision: number;
+  apiUrl: string;
+  token?: string;
+  refreshToken?: string;
+}
+const sessions = new WeakMap<Config, SessionSnapshot>();
+const refreshes = new WeakMap<Config, { owner: SessionSnapshot; promise: Promise<string | undefined> }>();
+
+function currentSession(cfg: Config): SessionSnapshot {
+  let state = sessions.get(cfg);
+  if (!state) {
+    state = { revision: 0, apiUrl: cfg.apiUrl, token: cfg.token, refreshToken: cfg.refreshToken };
+    sessions.set(cfg, state);
+  } else if (state.apiUrl !== cfg.apiUrl || state.token !== cfg.token || state.refreshToken !== cfg.refreshToken) {
+    state.revision++;
+    state.apiUrl = cfg.apiUrl; state.token = cfg.token; state.refreshToken = cfg.refreshToken;
+  }
+  return state;
+}
+export function captureSession(cfg: Config): SessionSnapshot {
+  return { ...currentSession(cfg) };
+}
+export function isCurrentSession(cfg: Config, owner: SessionSnapshot): boolean {
+  const state = currentSession(cfg);
+  return state.revision === owner.revision && state.apiUrl === owner.apiUrl;
+}
+export function invalidateSession(cfg: Config): void {
+  currentSession(cfg).revision++;
+}
+function assertSession(cfg: Config, owner: SessionSnapshot): void {
+  if (!isCurrentSession(cfg, owner)) throw new SessionChangedError();
+}
+
+/** One refresh per captured owner/pair. Rotation itself keeps that owner alive. */
+async function refreshSession(
+  cfg: Config,
+  owner: SessionSnapshot,
+  doFetch: FetchLike,
+  save: (c: Config) => void | Promise<void>,
+): Promise<string | undefined> {
+  assertSession(cfg, owner);
+  const pending = refreshes.get(cfg);
+  if (pending && pending.owner.revision === owner.revision && pending.owner.apiUrl === owner.apiUrl) {
+    // Rotation updates memory before async persistence finishes. Join that
+    // flight before reusing its pair so a late 401 cannot bypass a failed save.
+    const token = await pending.promise;
+    assertSession(cfg, owner);
+    return token === undefined ? undefined : cfg.token;
+  }
+  const current = currentSession(cfg);
+  if (current.token !== owner.token || current.refreshToken !== owner.refreshToken) {
+    return current.token; // A late 401 can reuse the already rotated pair.
+  }
+  if (!owner.refreshToken) return undefined;
+  let flight = refreshes.get(cfg);
+  if (!flight || flight.owner.revision !== owner.revision || flight.owner.apiUrl !== owner.apiUrl ||
+      flight.owner.token !== owner.token || flight.owner.refreshToken !== owner.refreshToken) {
+    const promise = (async () => {
+      const r = await doFetch(apiRequestUrl(owner.apiUrl, "/auth/refresh"), {
+        redirect: "error",
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refreshToken: owner.refreshToken }),
+      });
+      assertSession(cfg, owner);
+      if (!r.ok) return undefined;
+      const d = (await r.json()) as { token?: string; refreshToken?: string };
+      assertSession(cfg, owner);
+      if (typeof d?.token !== "string" || !d.token.trim() ||
+          (d.refreshToken !== undefined && (typeof d.refreshToken !== "string" || !d.refreshToken.trim()))) {
+        throw new ApiError(503, "Invalid authentication response");
+      }
+      cfg.token = d.token;
+      if (d.refreshToken !== undefined) cfg.refreshToken = d.refreshToken;
+      // These writes are our own rotation, not a new account/session.
+      current.token = cfg.token; current.refreshToken = cfg.refreshToken;
+      try { await save(cfg); } finally { assertSession(cfg, owner); }
+      return cfg.token;
+    })();
+    flight = { owner, promise };
+    refreshes.set(cfg, flight);
+    const cleanup = () => { if (refreshes.get(cfg) === flight) refreshes.delete(cfg); };
+    void promise.then(cleanup, cleanup);
+  }
+  const token = await flight.promise;
+  assertSession(cfg, owner);
+  return token === undefined ? undefined : cfg.token;
+}
+
+
 /**
  * JSON request against the configured API base. Bearer auth by default,
  * exactly one transparent refresh on 401 (never on `/auth/*` — guards the
@@ -57,12 +175,15 @@ export interface RawResult {
  */
 export async function apiFetch(path: string, opts: RequestOpts): Promise<any> {
   const { cfg } = opts;
+  const owner = captureSession(cfg);
   const authed = opts.auth !== false;
   const save = opts.save ?? saveConfig;
   const doFetch: FetchLike = opts.fetchImpl ?? (globalThis.fetch as FetchLike);
 
-  const req = (tok?: string) =>
-    doFetch(`${cfg.apiUrl}${path}`, {
+  const req = (tok?: string) => {
+    assertSession(cfg, owner);
+    return doFetch(apiRequestUrl(owner.apiUrl, path), {
+      redirect: "error",
       method: opts.method ?? "GET",
       headers: {
         "Content-Type": "application/json",
@@ -70,38 +191,33 @@ export async function apiFetch(path: string, opts: RequestOpts): Promise<any> {
       },
       ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
     });
+  };
 
-  let res = await req(authed ? cfg.token : undefined);
+  let res = await req(authed ? owner.token : undefined);
+  assertSession(cfg, owner);
 
   // Transparent single refresh on 401 (never on /auth/* to avoid loops).
-  if (res.status === 401 && authed && cfg.refreshToken && !path.startsWith("/auth/")) {
-    const r = await doFetch(`${cfg.apiUrl}/auth/refresh`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refreshToken: cfg.refreshToken }),
-    });
-    if (r.ok) {
-      const d = (await r.json()) as { token: string; refreshToken?: string };
-      cfg.token = d.token;
-      // The server ROTATES the refresh token on every refresh; the new one
-      // must overwrite the stored value or the next refresh 401s ("revoked").
-      if (d.refreshToken) cfg.refreshToken = d.refreshToken;
-      save(cfg);
-      res = await req(cfg.token);
-    }
+  if (res.status === 401 && authed && owner.refreshToken && !path.startsWith("/auth/")) {
+    const token = await refreshSession(cfg, owner, doFetch, save);
+    if (token) res = await req(token);
+    assertSession(cfg, owner);
   }
 
   if (opts.raw) {
     const body = res.status === 204 ? null : await res.json().catch(() => ({}));
+    assertSession(cfg, owner);
     return { status: res.status, statusText: res.statusText, body } satisfies RawResult;
   }
 
   if (!res.ok) {
     const b = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+    assertSession(cfg, owner);
     throw new ApiError(res.status, b.error ?? b.message ?? res.statusText);
   }
   if (res.status === 204) return null;
-  return res.json();
+  const body = await res.json();
+  assertSession(cfg, owner);
+  return body;
 }
 
 // ── typed command wrappers ──────────────────────────────────────────────────
@@ -175,14 +291,24 @@ export async function pollCompare(
     intervalMs?: number;
     maxAttempts?: number;
     onTick?: (status: string, attempt: number) => void;
+    /** A replaced UI must stop polling even if the same account remains. */
+    isCurrent?: () => boolean;
   } = {},
 ): Promise<any> {
+  const owner = captureSession(cfg);
+  const assertCurrent = () => {
+    assertSession(cfg, owner);
+    if (o.isCurrent && !o.isCurrent()) throw new SessionChangedError();
+  };
   const interval = o.intervalMs ?? 2000;
   const maxAttempts = o.maxAttempts ?? 150; // ~5 min at 2s
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    assertCurrent();
     const session = await getSession(cfg, id, { fetchImpl: o.fetchImpl, save: o.save });
+    assertCurrent();
     const status = String(session?.status ?? "");
     o.onTick?.(status, attempt);
+    assertCurrent();
     if (TERMINAL_STATES.has(status)) return session;
     await new Promise((r) => setTimeout(r, interval));
   }

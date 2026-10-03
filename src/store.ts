@@ -1,14 +1,13 @@
 /**
- * Secure-ish token storage for the desktop app.
+ * Platform-aware token storage for the desktop app.
  *
  * SECURITY NOTE: the bearer + refresh tokens are NEVER written to localStorage
  * or a plaintext file by this module. Under Tauri they are handed to a Rust
- * command (`secure_store_set`, src-tauri/src/lib.rs) that writes them to the
- * OS app-config dir with 0600 perms — an interim measure. Production hardening
- * to the real OS keychain (macOS Keychain / Windows Credential Manager via a
- * keyring/stronghold plugin) is a documented HUMAN GATE in the README, not
- * done here. Outside Tauri (vitest, a plain `vite dev` browser preview) this
- * falls back to an in-memory Map so a token never lands on disk in dev/test.
+ * command (`secure_store_set`, src-tauri/src/lib.rs). On macOS/Windows the
+ * Rust backend uses the OS Keychain/Credential Manager and fails closed on
+ * backend errors. Linux/other platforms use the explicitly insecure 0600-file
+ * fallback; `secret_backend_secure` reports this distinction. Outside Tauri
+ * (vitest or a plain browser preview) tokens remain only in memory.
  *
  * Only `apiUrl` (non-secret) is allowed in localStorage — see loadApiUrl.
  */
@@ -28,6 +27,18 @@ export interface SecretStore {
   get(): Promise<{ token?: string; refreshToken?: string }>;
   set(v: { token?: string; refreshToken?: string }): Promise<void>;
   clear(): Promise<void>;
+}
+
+/** Serialize snapshots so an earlier async token write cannot outlive logout. */
+export function createConfigPersister(store: SecretStore): (cfg: Config) => Promise<void> {
+  let pending = Promise.resolve();
+  return (cfg) => {
+    const snapshot = { token: cfg.token, refreshToken: cfg.refreshToken };
+    const operation = pending.catch(() => {}).then(() =>
+      snapshot.token || snapshot.refreshToken ? store.set(snapshot) : store.clear());
+    pending = operation;
+    return operation;
+  };
 }
 
 /** In-memory backend — the dev/test fallback. Exported for unit tests. */
