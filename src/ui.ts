@@ -1404,8 +1404,11 @@ export function renderWorkspace(deps: UiDeps): void {
           : resultMotion === "error" ? view.error || t("chat.empty") : t("app.tagline"));
         renderCompareAnswer(scroll, view, t);
         renderCompareInspector(inspectorBody, view, t);
-        recordRun("assistant", view.finalAnswer || view.synthesis || view.error || view.status);
-        await deps.gov.settle("server.dispatch", "success", {
+        const succeeded = resultMotion === "success";
+        recordRun(succeeded ? "assistant" : "error", succeeded
+          ? view.finalAnswer || view.synthesis
+          : view.error || view.status || t("chat.empty"));
+        await deps.gov.settle("server.dispatch", succeeded ? "success" : "error", {
           summary: t("gov.kindServerDispatch", { mode: runMode, origin }),
         });
       }
@@ -1495,6 +1498,14 @@ function renderCompareAnswer(scroll: HTMLElement, v: CompareView, t: Translator)
     grid.append(cardEl);
   }
   scroll.append(grid);
+
+  if (v.status !== "COMPLETED") {
+    const card = el("div", "msg-final");
+    card.style.borderLeftColor = "var(--molten)";
+    card.append(el("div", "msg-label", v.status), document.createTextNode(v.error || t("chat.empty")));
+    scroll.append(card);
+    return;
+  }
 
   const finalCard = el("div", "msg-final");
   finalCard.append(el("div", "msg-label", t("chat.finalAnswer")));
@@ -2175,6 +2186,6 @@ function renderCompareInspector(body: HTMLElement, v: CompareView, t: Translator
     kv(t("chat.perModel"), String(v.perModel.length)),
     kv(t("chat.failed"), String(v.failed.length), v.failed.length > 0),
     kv(t("inspector.cost"), `$${v.totalCostUsd.toFixed(4)}`),
-    kv(t("chat.synthesis"), v.synthesisParsed ? "parsed" : "raw", !v.synthesisParsed),
+    kv(t("chat.synthesis"), v.status !== "COMPLETED" ? v.status : v.synthesisParsed ? "parsed" : "raw", v.status !== "COMPLETED" || !v.synthesisParsed),
   );
 }

@@ -135,16 +135,20 @@ export interface CompareView {
  * hasResult gates whether the multi-card view renders.
  */
 export function toCompareView(session: any): CompareView {
-  const status = String(session?.status ?? "");
   const mm = session?.findings?.multiModel;
-  const has = mm != null && typeof mm === "object";
+  const has = mm != null && typeof mm === "object" && !Array.isArray(mm);
+  // The current server retains paid candidates after a malformed synthesis.
+  // That partial payload (including its candidate fallback) is not a final answer.
+  const invalidSynthesis = has && mm.synthesisStatus === "invalid_structured";
+  const status = invalidSynthesis ? "FAILED" : String(session?.status ?? "");
+  const completed = has && status === "COMPLETED";
   return {
     status,
     hasResult: has,
-    finalAnswer: has ? String(mm.finalAnswer ?? "") : "",
-    synthesis: has ? String(mm.synthesis ?? "") : "",
-    consensus: has && Array.isArray(mm.consensus) ? mm.consensus.map(String) : [],
-    disagreements: has && Array.isArray(mm.disagreements) ? mm.disagreements.map(String) : [],
+    finalAnswer: completed ? String(mm.finalAnswer ?? "") : "",
+    synthesis: completed ? String(mm.synthesis ?? "") : "",
+    consensus: completed && Array.isArray(mm.consensus) ? mm.consensus.map(String) : [],
+    disagreements: completed && Array.isArray(mm.disagreements) ? mm.disagreements.map(String) : [],
     perModel:
       has && Array.isArray(mm.perModel)
         ? mm.perModel.map(
@@ -166,7 +170,8 @@ export function toCompareView(session: any): CompareView {
         : [],
     synthesisParsed: has ? mm.synthesisParsed === true : false,
     totalCostUsd: has ? Number(mm.totalCostUsd ?? 0) : 0,
-    error: typeof session?.error === "string" ? session.error : undefined,
+    error: typeof session?.error === "string" && session.error.trim() ? session.error
+      : invalidSynthesis ? String(mm.synthesizerError || "Invalid structured synthesis") : undefined,
   };
 }
 

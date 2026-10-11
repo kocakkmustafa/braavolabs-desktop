@@ -9,6 +9,7 @@ import { createMemoryStore, createConfigPersister } from "../store";
 import { createSessionStore } from "../sessions";
 import { createTauriGovernance } from "../governance";
 import { toCascadeView, toCompareView } from "../render";
+import { compareMotion } from "../brand-motion";
 
 // Execute the actual UI closures. Only paint, native confirmation and provider
 // transport are synthetic; owner checks and transcript persistence are real.
@@ -51,7 +52,7 @@ function fixture(mode = "cascade") {
   const directChat = vi.fn(async () => localReply);
   const get = vi.fn(async () => "synthetic-key-placeholder");
   const startCompare = vi.fn(async () => ({ id: "synthetic-research", status: "PENDING" }));
-  const pollCompare = vi.fn(async () => ({ status: "COMPLETED", finalAnswer: "A-answer" }));
+  const pollCompare = vi.fn(async (): Promise<any> => ({ status: "COMPLETED", findings: { multiModel: { finalAnswer: "A-answer", synthesisParsed: true } } }));
   const renderCascadeAnswer = vi.fn(), renderPlainAnswer = vi.fn(), renderCompareAnswer = vi.fn();
   const refreshSavings = vi.fn(async () => {}), sendBtn = element();
   const deps = { cfg, gov, vault: { get }, persist, t: (key: string) => key };
@@ -62,7 +63,7 @@ function fixture(mode = "cascade") {
     hint: element(), sendBtn, scroll: element(), inspectorBody: element(), surface: "chat",
     document: { createTextNode: (text: string) => ({ textContent: text }) }, thinkingMotions: new Map(),
     el: element, scrollToEnd() {}, setChatMotion() {}, syncCrumb() {}, refreshSessionList() {}, trackMotion() {},
-    createOwnedBrandMotion: () => null, answerMotion: () => "success", compareMotion: () => "success", compareProgressMotion: () => "thinking",
+    createOwnedBrandMotion: () => null, answerMotion: () => "success", compareMotion, compareProgressMotion: () => "thinking",
     renderErrorCard() {}, renderCascadeAnswer, renderCascadeInspector() {}, renderPlainAnswer, renderCompareAnswer, renderCompareInspector() {}, renderSourceInspector() {},
     bumpActivity() {}, refreshSavings, removeThinking: (row: ReturnType<typeof element>) => row.remove(),
     toCascadeView, toCompareView, cascade, startCompare, pollCompare,
@@ -179,5 +180,85 @@ describe("compare polling owner continuity", () => {
     const save = vi.fn();
     await expect(client.pollCompare(cfg, "A-research", { fetchImpl, save, intervalMs: 0 })).resolves.toMatchObject({ status: "COMPLETED" });
     expect(cfg.token).toBe("A2"); expect(save).toHaveBeenCalledOnce(); expect(gets).toBe(3);
+  });
+});
+
+describe("current server Compare terminal outcomes in the actual workspace", () => {
+  const partial = {
+    finalAnswer: "paid candidate fallback", synthesis: "untrusted synthesis",
+    synthesisParsed: false, synthesisStatus: "invalid_structured",
+    synthesizerError: "Invalid structured synthesis: finalAnswer must be a string",
+    perModel: [{ provider: "synthetic", model: "candidate", answer: "paid candidate fallback", costUsd: 0.002 }],
+    consensus: ["untrusted consensus"], disagreements: ["untrusted disagreement"], totalCostUsd: 0.003,
+  };
+  it.each(["FAILED", "COMPLETED"])("never records malformed synthesis as an assistant answer or a successful spend (%s)", async status => {
+    const f = fixture("compare");
+    f.pollCompare.mockResolvedValue({ status, findings: { multiModel: partial } });
+    await f.run();
+    const entries = f.sessionStore.list()[0]!.entries;
+    expect(entries.map(e => e.role)).toEqual(["user", "error"]);
+    expect(entries[1]!.text).toBe(partial.synthesizerError);
+    const settled = f.native.mock.calls.filter(([command]) => command === "settle_action");
+    expect(settled).toHaveLength(1);
+    expect(settled[0]).toEqual(["settle_action", expect.objectContaining({ kind: "server.dispatch", outcome: "error" })]);
+    const view = f.renderCompareAnswer.mock.calls[0]![1];
+    expect(view).toMatchObject({ status: "FAILED", finalAnswer: "", synthesis: "", consensus: [], disagreements: [], totalCostUsd: 0.003 });
+    expect(view.perModel[0].answer).toBe(partial.perModel[0]!.answer);
+    expect(f.startCompare).toHaveBeenCalledOnce();
+    expect(f.pollCompare).toHaveBeenCalledOnce();
+    expect(f.sendBtn.disabled).toBe(false);
+  });
+
+  it.each(["FAILED", "CANCELLED"])("keeps a terminal %s without findings out of the assistant transcript", async status => {
+    const f = fixture("compare");
+    f.pollCompare.mockResolvedValue({ status, error: "synthetic terminal failure" });
+    await f.run();
+    expect(f.sessionStore.list()[0]!.entries[1]).toMatchObject({ role: "error", text: "synthetic terminal failure" });
+    expect(f.native.mock.calls.filter(([command]) => command === "settle_action")[0]).toEqual([
+      "settle_action", expect.objectContaining({ outcome: "error" }),
+    ]);
+  });
+
+  it.each(["structured", "plain_text", "budget_skipped", "unavailable"])("preserves the current server's usable %s answer", async synthesisStatus => {
+    const f = fixture("compare");
+    f.pollCompare.mockResolvedValue({ status: "COMPLETED", findings: { multiModel: {
+      finalAnswer: "usable answer", synthesisStatus, synthesisParsed: synthesisStatus === "structured",
+    } } });
+    await f.run();
+    expect(f.sessionStore.list()[0]!.entries[1]).toMatchObject({ role: "assistant", text: "usable answer" });
+    expect(f.native.mock.calls.filter(([command]) => command === "settle_action")[0]).toEqual([
+      "settle_action", expect.objectContaining({ outcome: "success" }),
+    ]);
+  });
+
+  it("does not audit an empty completed payload as a usable answer", async () => {
+    const f = fixture("compare");
+    f.pollCompare.mockResolvedValue({ status: "COMPLETED", findings: { multiModel: { finalAnswer: "  " } } });
+    await f.run();
+    expect(f.sessionStore.list()[0]!.entries[1]!.role).toBe("error");
+    expect(f.native.mock.calls.filter(([command]) => command === "settle_action")[0]).toEqual([
+      "settle_action", expect.objectContaining({ outcome: "error" }),
+    ]);
+  });
+
+  it("renders paid partial candidates with an explicit failure, without a final-answer or raw-fallback badge", () => {
+    const renderer = source.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === "renderCompareAnswer")!.getText(source);
+    const compiledRenderer = ts.transpileModule(`${renderer}\nrenderCompareAnswer;`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+    function node(_tag: string, _class?: string, text = "") {
+      return { text, children: [] as any[], style: {} as Record<string, string>, append(...children: any[]) { this.children.push(...children); } };
+    }
+    const render = runInNewContext(compiledRenderer, { el: node, document: { createTextNode: (text: string) => node("text", undefined, text) } });
+    const scroll = node("section");
+    render(scroll, toCompareView({ status: "FAILED", findings: { multiModel: partial } }), (key: string) => key);
+    const text = (n: ReturnType<typeof node>): string => [n.text, ...n.children.map(text)].join(" ");
+    const painted = text(scroll);
+    expect(painted).toContain("paid candidate fallback");
+    expect(painted).toContain("$0.0020");
+    expect(painted).toContain("FAILED");
+    expect(painted).toContain(partial.synthesizerError);
+    expect(painted).not.toContain("chat.finalAnswer");
+    expect(painted).not.toContain("chat.unparsed");
+    expect(painted).not.toContain("untrusted synthesis");
+    expect(painted).not.toContain("untrusted consensus");
   });
 });
