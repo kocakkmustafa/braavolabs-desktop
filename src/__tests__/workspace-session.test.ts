@@ -55,10 +55,13 @@ function fixture(mode = "cascade") {
   const pollCompare = vi.fn(async (): Promise<any> => ({ status: "COMPLETED", findings: { multiModel: { finalAnswer: "A-answer", synthesisParsed: true } } }));
   const renderCascadeAnswer = vi.fn(), renderPlainAnswer = vi.fn(), renderCompareAnswer = vi.fn();
   const refreshSavings = vi.fn(async () => {}), sendBtn = element();
+  const compareControls = { read: vi.fn((): client.CompareParams["selections"] => undefined) };
+  const companyInput = { value: "A-company" };
+  const ta = { value: "A-prompt", focus() {} };
   const deps = { cfg, gov, vault: { get }, persist, t: (key: string) => key };
   const ui = runInNewContext(compiled, {
     ...client, deps, cfg, sessionStore, t: deps.t,
-    ta: { value: "A-prompt", focus() {} }, companyInput: { value: "A-company" },
+    ta, companyInput, compareControls,
     localModelInput: { value: "synthetic-model" }, directProviderSel: { value: "synthetic-provider" }, directModelInput: { value: "synthetic-model" },
     hint: element(), sendBtn, scroll: element(), inspectorBody: element(), surface: "chat",
     document: { createTextNode: (text: string) => ({ textContent: text }) }, thinkingMotions: new Map(),
@@ -81,10 +84,26 @@ function fixture(mode = "cascade") {
       void persist(cfg);
     }
   };
-  return { ...ui, cfg, deps, native, grant, fetchImpl, cascade, resolveOllamaModel, ollamaChat, directChat, get, startCompare, pollCompare, renderCascadeAnswer, renderPlainAnswer, renderCompareAnswer, refreshSavings, sessionStore, sendBtn, switchOwner };
+  return { ...ui, cfg, deps, native, companyInput, compareControls, ta, grant, fetchImpl, cascade, resolveOllamaModel, ollamaChat, directChat, get, startCompare, pollCompare, renderCascadeAnswer, renderPlainAnswer, renderCompareAnswer, refreshSavings, sessionStore, sendBtn, switchOwner };
 }
 
 describe("actual workspace operation ownership", () => {
+  it("captures company/model/effort before confirmation and forwards the exact selection", async () => {
+    const f = fixture("compare"), gate = delayed<any>();
+    f.compareControls.read.mockReturnValue([{ provider: "CEREBRAS", model: "gpt-oss-120b", reasoningEffort: "high" }]);
+    f.native.mockImplementation(async command => command === "request_action" ? gate.promise : true);
+    const pending = f.run();
+    f.companyInput.value = "B-company";
+    f.compareControls.read.mockReturnValue([{ provider: "OPENAI", model: "other" }]);
+    gate.resolve(f.grant); await pending;
+    expect(f.startCompare).toHaveBeenCalledWith(f.cfg, { companyId: "A-company", query: "A-prompt",
+      selections: [{ provider: "CEREBRAS", model: "gpt-oss-120b", reasoningEffort: "high" }] });
+  });
+  it("blocks unready explicit choices before governance, network or clearing the draft", async () => {
+    const f = fixture("compare"); f.compareControls.read.mockImplementation(() => { throw Error("Load models"); });
+    await f.run(); expect(f.native).not.toHaveBeenCalled(); expect(f.startCompare).not.toHaveBeenCalled();
+    expect(f.ta.value).toBe("A-prompt"); expect(f.sessionStore.list()).toEqual([]);
+  });
   it.each(["cascade", "compare", "local", "direct"])("keeps the current %s operation working", async mode => {
     const f = fixture(mode); await f.run();
     expect(f.sessionStore.list()[0]?.entries.map(e => e.role)).toEqual(["user", "assistant"]);

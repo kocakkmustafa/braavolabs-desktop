@@ -1675,3 +1675,20 @@ textarea {
 .changes-error {
   color: var(--molten, #ff4d4d);
 }
+
+/* Server compare choices wrap independently of the prompt row. */
+.compare-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
+.compare-controls .composer-hint, .compare-models { flex-basis: 100%; }
+.compare-models { display: flex; flex-wrap: wrap; gap: 8px; }
+.compare-model { display: flex; align-items: center; gap: 8px; max-width: 100%; }
+.compare-model label { display: flex; align-items: center; gap: 6px; overflow-wrap: anywhere; }
+.compare-model .company-input { width: auto; }
+.compare-controls > button {
+  background: var(--steel-900);
+  border: 1px solid var(--steel-700);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.compare-controls > button:disabled { opacity: 0.6; cursor: wait; }
+.compare-controls .company-input { max-width: 100%; }

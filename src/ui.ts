@@ -7,6 +7,8 @@
  * native validity bubbles and keyboard behavior still need native UI checks.
  */
 import type { Config } from "./config";
+import type { ModelSelection } from "./compare-selection";
+import { createCompareControls } from "./compare-controls";
 import { saveApiUrl } from "./store";
 import {
   ApiError,
@@ -605,6 +607,10 @@ export function renderWorkspace(deps: UiDeps): void {
   const companyInput = el("input", "company-input") as HTMLInputElement;
   companyInput.placeholder = t("chat.companyId");
   companyInput.style.display = "none"; // only for compare mode
+  const compareControls = createCompareControls(cfg, t, () => companyInput.value.trim(), () => !workspaceDisposed);
+  compareControls.element.style.display = "none";
+  companyInput.addEventListener("input", compareControls.invalidate);
+  companyInput.addEventListener("change", compareControls.invalidate);
 
   // Local (Ollama): optional model override.
   const localModelInput = el("input", "company-input") as HTMLInputElement;
@@ -636,6 +642,8 @@ export function renderWorkspace(deps: UiDeps): void {
     localBtn.classList.toggle("active", m === "local");
     directBtn.classList.toggle("active", m === "direct");
     companyInput.style.display = m === "compare" ? "block" : "none";
+    compareControls.element.style.display = m === "compare" ? "" : "none";
+    if (m !== "compare") compareControls.invalidate();
     localModelInput.style.display = m === "local" ? "block" : "none";
     directProviderSel.style.display = m === "direct" ? "block" : "none";
     directModelInput.style.display = m === "direct" ? "block" : "none";
@@ -656,7 +664,7 @@ export function renderWorkspace(deps: UiDeps): void {
   const bottomRow = el("div", "composer-row");
   bottomRow.append(ta, enterHint, sendBtn);
 
-  composer.append(hint, topRow, bottomRow);
+  composer.append(hint, topRow, compareControls.element, bottomRow);
   chat.append(chatPresence, scroll, composer);
 
   // --- right inspector (Inspector | Activity tabs) ---
@@ -1196,6 +1204,16 @@ export function renderWorkspace(deps: UiDeps): void {
       hint.style.display = "block";
       return;
     }
+    const runCompanyId = companyInput.value.trim();
+    let runSelections: ModelSelection[] | undefined;
+    if (runMode === "compare") {
+      try { runSelections = compareControls.read(runCompanyId); }
+      catch (error) {
+        hint.textContent = error instanceof Error ? error.message : t("chat.modelsNeeded");
+        hint.style.display = "block";
+        return;
+      }
+    }
     const owner = captureSession(cfg);
     const motionVersion = ++chatMotionVersion;
     const ownsRun = () => !workspaceDisposed && isCurrentSession(cfg, owner) && motionVersion === chatMotionVersion;
@@ -1377,8 +1395,8 @@ export function renderWorkspace(deps: UiDeps): void {
         }
         if (ownsRun()) bumpActivity();
       } else {
-        const companyId = companyInput.value.trim();
-        const stub = await startCompare(cfg, { companyId, query: text });
+        const stub = await startCompare(cfg, { companyId: runCompanyId, query: text,
+          ...(runSelections !== undefined ? { selections: runSelections } : {}) });
         if (!ownsRun()) return;
         const progressLabel = (status: string) => status === "RUNNING"
           ? t("chat.thinking", { n: 2 }) : t("chat.polling", { status });
