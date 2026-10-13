@@ -8,7 +8,7 @@ permissions:
 jobs:
   ts:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -21,7 +21,7 @@ jobs:
       - run: pnpm test
   rust:
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 4
     defaults:
       run:
         working-directory: src-tauri
@@ -35,7 +35,7 @@ jobs:
   windows-build:
     name: Windows x64 native tests + NSIS
     runs-on: windows-2022
-    timeout-minutes: 60
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -63,6 +63,7 @@ jobs:
           if ($installers.Count -ne 1) { throw "Expected one NSIS installer; found $($installers.Count)" }
           $installer = $installers[0]
           if ($installer.Length -lt 1000000) { throw 'NSIS installer is unexpectedly small' }
+          if ($installer.Length -gt 524288000) { throw 'NSIS installer exceeds the 500 MiB CI artifact budget' }
           $hash = (Get-FileHash -Algorithm SHA256 $installer.FullName).Hash.ToLowerInvariant()
           "$hash  $($installer.Name)" | Set-Content -Encoding ascii 'windows-SHA256SUMS.txt'
           $signature = Get-AuthenticodeSignature $installer.FullName
@@ -73,6 +74,7 @@ jobs:
         with:
           name: braavolabs-windows-x64-nsis
           if-no-files-found: error
+          retention-days: 1
           path: |
             src-tauri/target/release/bundle/nsis/*.exe
             windows-SHA256SUMS.txt
