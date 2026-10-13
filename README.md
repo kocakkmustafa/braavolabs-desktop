@@ -18,9 +18,10 @@ packages/desktop/
 ├── index.html              webview entry (mirrors the Tauri CSP)
 ├── vite.config.ts          builds ui → dist/, hosts the vitest suite
 ├── src/                    frontend (TypeScript, no framework)
-│   ├── client.ts           API client — VERBATIM port of the CLI's
-│   │                       forge/client.ts (dep-free fetch, single-401
-│   │                       refresh, ApiError, raw mode). The contract.
+│   ├── client.ts           Shared API endpoints (single-401 refresh, ApiError,
+│   │                       raw mode) plus company-scoped compare discovery.
+│   ├── compare-selection.ts typed model/effort metadata validation.
+│   ├── compare-controls.ts  server-discovered exact model/effort controls.
 │   ├── config.ts           { apiUrl, token, refreshToken } — CLI-parity
 │   │                       field names; token persisted via the secure store.
 │   ├── store.ts            token storage: Tauri OS-scoped command under the
@@ -96,9 +97,24 @@ Palette: obsidian `#0A0B0F`, arc-blue `#3B82F6`/`#60A5FA`, ember `#F97316`
 | `POST /auth/login` | public | `{email,password}` → `{token,refreshToken,user,tenant}`. 401 bad creds, 429 lockout/rate-limit. |
 | `POST /auth/refresh` | token | rotates the refresh token (new one must overwrite the old). 503 = fail closed → re-login. |
 | `POST /research/compare` | async | company-scoped; returns `{id,status}`, poll `GET /research/:id`. Per-model answers land under `findings.multiModel`. |
+| `GET /research/compare/options?companyId=…` | token | available exact tenant-owned pairs, per-pair `reasoningEfforts`, `maxCandidates`; advisory metadata, no inference. |
+| `POST /research/compare/selected` | async | explicit `selections: [{provider,model,reasoningEffort?}]`; server revalidates before starting. Unsupported endpoint fails without automatic fallback. |
 | `POST /research/cascade` | sync | **no `companyId`** — tenant-scoped via JWT. |
 | `GET /billing/savings?days=N` | token | tenant-scoped tokens-saved report. |
 | `GET /memory?companyId=…` | token | company-scoped memory rows (needs an active company). |
+
+Compare defaults to automatic server routing. To choose models, enter the company
+ID, select **Select exact models**, and load available models. Choose 1–3 exact
+provider/model pairs. Effort appears only where discovery advertises support;
+**Provider default effort** omits `reasoningEffort`. Levels are server-defined
+controls, not measured reasoning or token budgets. Effort applies to each selected
+candidate; synthesis continues to use the server default. Company, account or lane
+changes invalidate the choices. Failed/empty discovery cannot start explicit
+compare; retry discovery or deliberately choose automatic mode.
+
+These controls apply only to server Compare. Cascade, Local and Direct keep their
+existing contracts. Mock transport/DOM tests and a frontend build do not establish
+live provider acceptance or native WebView behavior.
 
 Base URL: `VITE_BRAAVOLABS_API_URL` at build time, else `https://braavolabs.com/api/v1`
 (overridable on the login screen; remembered in localStorage — non-secret only).

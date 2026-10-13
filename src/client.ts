@@ -19,6 +19,7 @@
  *   GET  /memory?companyId=…  → company-scoped memory rows (right-inspector panel)
  */
 import { type Config, saveConfig } from "./config";
+import { parseCompareSelectionOptions, type CompareSelectionOptions, type ModelSelection } from "./compare-selection";
 
 export class ApiError extends Error {
   status: number;
@@ -250,6 +251,7 @@ export async function login(
 }
 
 export interface CompareParams {
+  selections?: ModelSelection[];
   companyId: string;
   query: string;
   maxCandidates?: number;
@@ -264,10 +266,24 @@ export async function startCompare(
   o: { fetchImpl?: FetchLike; save?: (c: Config) => void } = {},
 ): Promise<{ id: string; status: string }> {
   const body: Record<string, unknown> = { companyId: p.companyId, query: p.query };
+  if (p.selections !== undefined) body.selections = p.selections;
   if (p.maxCandidates !== undefined) body.maxCandidates = p.maxCandidates;
   if (p.maxTokensPerCandidate !== undefined) body.maxTokensPerCandidate = p.maxTokensPerCandidate;
   if (p.maxCostUsd !== undefined) body.maxCostUsd = p.maxCostUsd;
-  return apiFetch("/research/compare", { method: "POST", body, cfg, fetchImpl: o.fetchImpl, save: o.save });
+  // Explicit selections must never degrade to an automatic compare on an older server.
+  const path = p.selections === undefined ? "/research/compare" : "/research/compare/selected";
+  return apiFetch(path, { method: "POST", body, cfg, fetchImpl: o.fetchImpl, save: o.save });
+}
+
+/** Company-scoped discovery; no inference or provider probe. */
+export async function listCompareSelectionOptions(
+  cfg: Config, companyId: string,
+  o: { fetchImpl?: FetchLike; save?: (c: Config) => void } = {},
+): Promise<CompareSelectionOptions> {
+  const raw = await apiFetch(`/research/compare/options?companyId=${encodeURIComponent(companyId)}`, {
+    cfg, fetchImpl: o.fetchImpl, save: o.save,
+  });
+  return parseCompareSelectionOptions(raw, companyId);
 }
 
 const TERMINAL_STATES = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
