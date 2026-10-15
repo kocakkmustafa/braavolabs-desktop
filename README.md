@@ -427,15 +427,30 @@ today, but only after a real, provider-bound, human-approved grant).
   GUI/live-service gate.
 - **Signed build** — Apple Developer ID / Windows code-signing cert.
 - **Notarization** — Apple notary submission + stapling.
-- **Real OS credential storage on macOS and Windows** — the implementation has
-  mock-backed tests; `secret_store_tests::keychain_roundtrip` is `#[ignore]` and
-  ordinary `cargo test --locked` CI does not run it. Current native Keychain /
-  Credential Manager acceptance requires a separate, dated run in the intended
-  OS session; it is not established by the default suite or a signed bundle.
-  When separately authorized, from `src-tauri` the command is
-  `cargo test --locked keychain_roundtrip -- --ignored`. It creates, reads and
-  deletes the fixture account `test.s010.roundtrip` under service
-  `braavolabs-desktop`; it is not a read-only check.
+- **Real OS credential storage on macOS and Windows** — production storage has
+  mock-backed tests; default `cargo test --locked` does not establish live OS
+  acceptance. The test-only `keychain_fixture` module has standalone mock tests
+  (`rustc --edition 2021 --test src-tauri/src/keychain_fixture.rs`) and a macOS
+  live test that is both `#[ignore]` and guarded by an explicit opt-in.
+  When separately authorized, from `src-tauri`:
+  ```bash
+  BRAAVO_SYNTHETIC_KEYCHAIN_TEST=allow-one-owned-fixture \
+    cargo test --locked keychain_fixture::macos::keychain_roundtrip -- \
+    --ignored --exact --test-threads=1
+  ```
+  This creates one fresh account `test.s010.roundtrip.desktop-keychain-test.<nonce>`
+  under service `braavolabs-desktop`, using an atomic add that refuses collisions.
+  It reads only the newly owned item's synthetic value, deletes by that owned
+  native reference and verifies metadata-only absence. It never selects auth or
+  BYOK accounts. Errors, unwinding panics and cooperative SIGINT/SIGTERM requests
+  go through checked cleanup; cleanup failure fails acceptance and reports only
+  the fixture identifier. SIGKILL, abort or OS failure can still leave a fixture;
+  never delete an unknown/pre-existing item to recover it. This is OS primitive
+  acceptance, not app login/BYOK persistence or provider acceptance.
+  The live fixture is macOS-only: Windows needs a separately reviewed adapter
+  that can preserve existing credentials and a real Windows session. The former
+  fixed-name, overwriting Keychain/Credential Manager test was removed. Production
+  storage and its native permission policies are unchanged.
 - **Real OS sandbox** — wrapping the `governed_command` choke point in a
   platform sandbox (container / macOS seatbelt / Windows AppContainer). The
   governance enforcement points (policy, one-time tokens, audit, workdir

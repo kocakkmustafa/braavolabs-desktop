@@ -34,6 +34,10 @@
 
 mod auth_clear;
 
+// Test-only, add-only synthetic fixture; production credential paths are unchanged.
+#[cfg(test)]
+mod keychain_fixture;
+
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{Read, Write};
@@ -3136,23 +3140,7 @@ mod secret_store_tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Real OS-keychain round-trip. `#[ignore]` so the default `cargo test`
-    /// never touches the developer's login keychain; run explicitly with
-    /// `cargo test --ignored keychain_roundtrip` on macOS/Windows to verify.
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    #[test]
-    #[ignore]
-    fn keychain_roundtrip() {
-        let be = KeychainBackend;
-        assert!(be.secure());
-        let acct = "test.s010.roundtrip";
-        be.set(acct, "keychain-secret-xyz").unwrap();
-        assert_eq!(be.get(acct).unwrap(), Some("keychain-secret-xyz".into()));
-        be.delete(acct).unwrap();
-        assert_eq!(be.get(acct).unwrap(), None);
-        // Deleting an absent credential is a no-op, not an error.
-        be.delete(acct).unwrap();
-    }
+
 }
 
 #[cfg(test)]
