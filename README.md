@@ -14,7 +14,7 @@ the same Braavolabs server that powers the CLI, in an obsidian three-pane UI.
 ## Architecture
 
 ```
-packages/desktop/
+desktop/
 ├── index.html              webview entry (mirrors the Tauri CSP)
 ├── vite.config.ts          builds ui → dist/, hosts the vitest suite
 ├── src/                    frontend (TypeScript, no framework)
@@ -45,23 +45,22 @@ packages/desktop/
 │   │                       tools/call (JSON-RPC 2.0, partial-line, timeout→kill).
 │   │                       Rust-host session / memory-mirror fallback. Tested (21).
 │   ├── i18n.ts             single messages object, en + tr (i18n-ready).
-│   ├── ui.ts               thin DOM shell (3-pane + keys + Lane-B + approval
-│   │                       modal + Activity/audit tab) — not unit-tested.
+│   ├── ui.ts               DOM shell (3-pane + keys + Lane-B + approval modal);
+│   │                       source-executing handler regression tests.
 │   ├── main.ts             entry: hydrate → login or workspace.
 │   ├── styles.css          obsidian palette (arc-blue / ember / molten; NO green).
-│   └── __tests__/          115 tests (client / render / store / i18n / keyvault /
-│                           local / direct / identity / spawn / governance / mcp).
+│   └── __tests__/          client / UI handlers / render / store / i18n / keyvault /
+│                           local / direct / identity / spawn / governance / mcp.
 └── src-tauri/              Rust host (STANDALONE cargo package)
     ├── Cargo.toml          tauri = "2"; not part of any cargo workspace.
-    ├── tauri.conf.json      window + CSP (self + braavolabs.com + Ollama
-    │                        localhost + 3 BYOK provider API hosts).
+    ├── tauri.conf.json      window + CSP (self + HTTPS endpoints + loopback).
     ├── capabilities/default.json  core webview permissions for "main".
     ├── icons/              app icons (ember mark).
     └── src/{main,lib}.rs   window + token + BYOK-key OS-scoped commands +
                             Lane-B spawn_probe + the GOVERNANCE gate (policy
                             mirror, one-time tokens, 0600 audit log, command
                             choke point) + the MCP stdio client (mcp.json,
-                            spawn + JSON-RPC session, gated tools/call) + 16 Rust
+                            spawn + JSON-RPC session, gated tools/call) and Rust
                             unit tests. THIN on AI, but legitimately owns
                             permission/sandbox + host-side process enforcement.
 ```
@@ -158,12 +157,12 @@ composer's optional model field — the defaults above are pinned so a build nev
 silently changes behavior.
 
 **Key storage (OS keychain, S-010).** The Rust host stores BYOK keys — and the
-auth token/refresh — in the **OS keychain** on the platforms this app ships to:
-the **macOS Keychain** and the **Windows Credential Manager** (via the `keyring`
-crate), encrypted at rest and OS-gated. On any other platform, or if the keychain
-is unreachable, it falls back to a single owner-only `vault.json` (`0600` on
-unix); the `secret_backend_secure` command reports which backend is live so the
-UI never over-claims protection. The keychain isn't enumerable, so a
+auth token/refresh — in the **macOS Keychain** or **Windows Credential Manager**
+on those operating systems (via the `keyring`
+crate), encrypted at rest and OS-gated. On macOS/Windows, an unreachable keychain
+returns an error; there is no plaintext fallback. Other platforms use a single
+owner-only `vault.json` (`0600` on unix); `secret_backend_secure` reports the
+backend to the UI. The keychain isn't enumerable, so a
 `keys-index.json` holds provider → **masked** fingerprint (`first4…last4`) ONLY —
 never a secret — which is all Settings → **BYOK keys** ever reads for its list.
 The raw value leaves the store solely via `key_get`, retrieved **one-time at
@@ -171,9 +170,10 @@ dispatch** and passed straight into the provider's auth header — never rendere
 the DOM, never logged. Any legacy `keys.json` / `secrets.json` (the earlier 0600
 plaintext files) are migrated into the keychain and deleted on first access
 (backend write precedes file removal, so a mid-migration crash can only leave the
-old file, never lose a secret). Only the three provider API hosts above are added
-to the CSP `connect-src`; the closed `default-src 'self'` / `object-src 'none'` /
-`frame-ancestors 'none'` policy is otherwise preserved.
+old file, never lose a secret). The current Tauri `connect-src` permits HTTPS
+endpoints and loopback, including configured self-hosts. Direct provider request
+URLs remain defined in `src/direct.ts`; `default-src 'self'`, `object-src 'none'`
+and `frame-ancestors 'none'` are preserved.
 
 ---
 
@@ -275,9 +275,10 @@ the **trust anchor** — a webview can neither forge an OS click nor control wha
 dialog says. The Lane-A Direct, Lane-B launch, and Local lanes funnel through this
 gate.
 
-> **Human gate:** the native dialog's actual rendering + click flow is verified in
-> a GUI session (`cargo tauri dev`), like every other desktop runtime surface —
-> the host wiring, fail-closed timeout, and token logic are unit-/compile-verified.
+> **Human gate:** the native dialog's actual rendering and click flow require
+> verification in a GUI session (`cargo tauri dev`). Host wiring, fail-closed
+> timeout and token logic have headless tests; those do not establish current
+> native UI acceptance.
 
 ### 3. Append-only audit ledger (0600, secret-free)
 
@@ -363,32 +364,34 @@ steel — there is no green anywhere.
 ## Develop & verify (headless)
 
 ```bash
-pnpm --filter @braavolabs/desktop test    # vitest — 115 tests
-pnpm --filter @braavolabs/desktop build   # tsc --noEmit && vite build → dist/
-pnpm --filter @braavolabs/desktop lint    # tsc --noEmit
+# From this repository's root; use each run's report for current test counts.
+pnpm test                               # vitest
+pnpm build                              # tsc --noEmit && vite build → dist/
+pnpm lint                               # tsc --noEmit
 
 # Rust host (cargo/rustc live in ~/.cargo/bin — not on PATH by default):
 export PATH="$HOME/.cargo/bin:$PATH"
-cd packages/desktop/src-tauri && cargo check   # requires dist/ to exist first
-cargo test --lib                               # 16 governance + MCP unit tests
+cd src-tauri
+cargo check --locked                    # requires dist/ to exist first
+cargo test --locked --lib                # default suite skips real Keychain test
 ```
 
 `cargo check` compiles `tauri::generate_context!`, which reads
 `build.frontendDist = "../dist"` — run the frontend `build` first so `dist/`
 exists.
 
-## Secret storage (OS keychain, S-010 — DONE)
+## Secret storage (OS keychain, S-010 implementation)
 
 Two kinds of secret, same host-side backend:
 
 - **Auth token + refresh** → `secure_store_{get,set,clear}` (accounts `auth.token` / `auth.refreshToken`).
 - **BYOK provider keys** → `key_{add,list,remove,get}` (accounts `byok.<provider>`).
 
-Both live in the **OS keychain** on the shipping platforms — **macOS Keychain**
-and **Windows Credential Manager** (via the `keyring` crate) — encrypted at rest
+Both use the **macOS Keychain** or **Windows Credential Manager** on those
+operating systems (via the `keyring` crate), encrypted at rest
 and OS-gated. This is **fail-closed**: on macOS/Windows a keychain hiccup returns
-an error, it never silently writes plaintext. On non-shipping platforms
-(Linux/other) it falls back to a single `0600` `vault.json`; `secret_backend_secure`
+an error, it never silently writes plaintext. On Linux/other platforms it uses
+a single `0600` `vault.json`; `secret_backend_secure`
 reports which backend is live so the UI never over-claims. `key_list` reads only
 the masked `keys-index.json` (provider → `first4…last4`, never a secret); the raw
 value leaves the host solely via `key_get`, one-time at direct-dispatch. Legacy
@@ -397,9 +400,10 @@ value leaves the host solely via `key_get`, one-time at direct-dispatch. Legacy
 `.corrupt`, never deleted). Outside Tauri (vitest / `vite` browser preview) the TS
 store uses an in-memory map, so a secret never lands on disk in dev/test.
 
-**Threat-model scope (honest).** The keychain protects secrets **at rest** — from
-disk theft, other local processes, Time Machine/backups, and forensic recovery —
-which the old plaintext files did not.
+**Protection scope.** The native backend uses OS credential storage rather than
+plaintext application files on macOS/Windows. Actual access and backup protection
+depend on the OS policy and environment; source and mock tests do not establish
+blanket isolation from other processes or forensic recovery.
 
 **Runtime gate (R4 — closed).** `key_get` is **no longer un-gated**: it now consumes
 a one-time `direct.dispatch` governance token **bound to the requested provider**
@@ -423,10 +427,15 @@ today, but only after a real, provider-bound, human-approved grant).
   GUI/live-service gate.
 - **Signed build** — Apple Developer ID / Windows code-signing cert.
 - **Notarization** — Apple notary submission + stapling.
-- **OS-keychain on Windows** — the storage is DONE and unit-tested; the macOS
-  Keychain round-trip is verified locally (`cargo test --ignored keychain_roundtrip`).
-  The Windows Credential Manager path shares the same `keyring` API but its live
-  round-trip needs a Windows session to confirm.
+- **Real OS credential storage on macOS and Windows** — the implementation has
+  mock-backed tests; `secret_store_tests::keychain_roundtrip` is `#[ignore]` and
+  ordinary `cargo test --locked` CI does not run it. Current native Keychain /
+  Credential Manager acceptance requires a separate, dated run in the intended
+  OS session; it is not established by the default suite or a signed bundle.
+  When separately authorized, from `src-tauri` the command is
+  `cargo test --locked keychain_roundtrip -- --ignored`. It creates, reads and
+  deletes the fixture account `test.s010.roundtrip` under service
+  `braavolabs-desktop`; it is not a read-only check.
 - **Real OS sandbox** — wrapping the `governed_command` choke point in a
   platform sandbox (container / macOS seatbelt / Windows AppContainer). The
   governance enforcement points (policy, one-time tokens, audit, workdir
