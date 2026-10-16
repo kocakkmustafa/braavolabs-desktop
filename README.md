@@ -420,9 +420,10 @@ today, but only after a real, provider-bound, human-approved grant).
 
 ## Human gates (NOT done here — require a GUI session / signing identity / live services)
 
-- `cargo tauri dev` / `cargo tauri build` — launches the actual window; needs a
-  desktop session. (`pnpm --filter @braavolabs/desktop dev:ui` serves just
-  the frontend in a browser for UI iteration.)
+- `cargo tauri dev` launches the actual window and needs a desktop session.
+  `cargo tauri build` produces native artifacts; successful compilation does not
+  establish GUI or signed-distribution acceptance. (`pnpm --filter
+  @braavolabs/desktop dev:ui` serves just the frontend in a browser.)
 - **Live Lane-A dispatch** — driving a real Ollama daemon (Local) or a real BYOK
   key against a provider (Direct) needs those services present; the request
   shaping is unit-tested with injected fetch, but an end-to-end round-trip is a
@@ -458,3 +459,73 @@ today, but only after a real, provider-bound, human-approved grant).
   governance enforcement points (policy, one-time tokens, audit, workdir
   allowlist, argv arrays, env-clean, timeout) are in place today; OS-level
   isolation around them is the remaining hardening — see "Governance & sandbox".
+
+
+## Direct distribution outside app stores
+
+A local build, a signing identity, an OS credential fixture, notarization and a
+public release each provide different evidence. Authorize the exact action and
+artifact before signing, using credentials, uploading or running real accounts.
+Existing signed packages and installed apps remain protected; a valid old app
+signature does not identify a new build's source.
+
+### macOS app and DMG
+
+1. Freeze the source commit/tree and lockfile hashes. Confirm the version in
+   `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json` agrees.
+   Record the intended bundle ID `com.braavolabs.desktop`, architecture(s) and
+   current source assets. Use the canonical checkout and one bounded output
+   location; preserve any existing build cache and unique artifacts.
+2. Inspect existing identity metadata with `security find-identity -v -p
+   codesigning`. Select the intended team's **Developer ID Application** identity
+   for the app, rather than a development or installer identity. Metadata presence
+   does not prove permission to use its private key. Do not create/import a
+   certificate, unlock a keychain, export a key or change a profile to clear a
+   blocker. Apple describes the distinct certificate roles in its
+   [Developer ID guide](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/).
+3. After separate native-build/signing approval, the existing
+   `pnpm tauri:build:mac` script builds `universal-apple-darwin`. A deliberately
+   selected single architecture must have a separate acceptance label. Tauri
+   accepts an existing signing identity through `APPLE_SIGNING_IDENTITY`;
+   keep identity selection local and do not add credentials to the repo.
+   The build configuration already enables hardened runtime. Before running a
+   bundle command, establish whether existing notarization settings would also
+   cause an Apple upload; that upload needs its own approval. See
+   [Tauri's local signing guide](https://v2.tauri.app/distribute/sign/macos/).
+4. Bind each produced app/archive to the source receipt: SHA256, size, bundle ID,
+   version, architectures, signing team, hardened runtime and timestamp. Verify
+   the new app with `codesign --verify --deep --strict --all-architectures` and
+   inspect its non-secret signature metadata. A failed Apple system control
+   makes that execution context inconclusive; stop without changing trust or
+   re-signing an old installed app. Keep unsigned/ad-hoc and Developer ID
+   artifacts explicitly distinguishable.
+5. Notarization is an Apple upload. Use only a separately authorized, existing
+   Apple authentication path; do not create a key, password or keychain profile.
+   Record the exact submitted archive hash and submission result, then validate
+   the stapled ticket and Gatekeeper assessment of the final delivered artifact.
+   Follow [Apple's distribution guidance](https://developer.apple.com/developer-id/).
+   Missing notarization access remains a blocker even when identity metadata and
+   local signature checks pass. No Mac App Store upload is part of this path.
+6. Run separately approved native user acceptance on that exact artifact: launch,
+   error handling, account transition and companion reconnect/cancel behavior.
+   The one-owned-item synthetic Keychain fixture described above proves only an
+   OS primitive round trip. Real login/BYOK persistence and provider requests
+   need their own scope; provider costs require an explicit bound. Browser/mock
+   results and an old installed app cannot replace this artifact's acceptance.
+7. Approve the final artifact hashes and destination before public release.
+   Keep a source-to-artifact receipt and hash-check cleanup of this run's own
+   temporary output; retain unique signed packages and protected user data.
+
+### Windows and Linux
+
+| Target | Existing build evidence path | Additional distribution acceptance |
+| --- | --- | --- |
+| Windows x64 | `.github/workflows/ci.yml` defines native tests and NSIS build on `windows-2022`, with a SHA256 receipt and recorded Authenticode status. | Recording a status does not require it to be `Valid`. Verify the intended signer and final installer on Windows, then installation/launch/uninstall and real Credential Manager behavior. The macOS fixture does not cover Windows. |
+| Linux amd64 | `.github/workflows/release-linux.yml` builds `.deb` and AppImage, verifies files/architecture and runs a native Linux smoke. | Bind the selected source and final hashes to installation/launch on the supported host. Store and public-host uploads need a separate destination decision. |
+
+Remote workflows are not a prerequisite for local signing. This repository is
+private: confirm cost/authorization before dispatching CI, opening a PR or
+pushing a release tag. The Linux release workflow can run for `v*` tags or manual
+dispatch; do not use a tag as a harmless documentation check. A Windows CI build
+is not physical Windows distribution acceptance. Neither route authorizes store
+upload, profile changes or new signing credentials.
