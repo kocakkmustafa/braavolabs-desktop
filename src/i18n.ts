@@ -168,6 +168,11 @@ const en: Dict = {
   chat: {
     placeholder: "Ask across your models…",
     send: "Send",
+    cancel: "Cancel compare",
+    cancelling: "Cancelling…",
+    cancelled: "Compare cancelled. Work already in progress may still finish and incur costs.",
+    cancelTooLate: "Compare already finished. Loading its result…",
+    cancelFailed: "Could not cancel. The compare is still running; try again.",
     enterHint: "⇧⏎ newline",
     modeCompare: "Compare",
     modeCascade: "Cascade",
@@ -404,6 +409,11 @@ const tr: Dict = {
   chat: {
     placeholder: "Modellerine sor…",
     send: "Gönder",
+    cancel: "Karşılaştırmayı iptal et",
+    cancelling: "İptal ediliyor…",
+    cancelled: "Karşılaştırma iptal edildi. Başlamış işlemler yine de tamamlanabilir ve maliyet oluşturabilir.",
+    cancelTooLate: "Karşılaştırma zaten bitti. Sonuç yükleniyor…",
+    cancelFailed: "İptal edilemedi. Karşılaştırma sürüyor; yeniden deneyin.",
     enterHint: "⇧⏎ yeni satır",
     modeCompare: "Karşılaştır",
     modeCascade: "Kademeli",

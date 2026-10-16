@@ -18,6 +18,7 @@ import {
   login,
   startCompare,
   pollCompare,
+  cancelCompare,
   cascade,
   savings as savingsCall,
   listCompanies,
@@ -660,9 +661,22 @@ export function renderWorkspace(deps: UiDeps): void {
   const ta = el("textarea") as HTMLTextAreaElement;
   ta.placeholder = t("chat.placeholder");
   const sendBtn = el("button", "send-btn", t("chat.send"));
+  const cancelBtn = el("button", "set-btn cancel-btn", t("chat.cancel"));
+  cancelBtn.style.display = "none";
+  let compareOperation: { controller: AbortController; cancel(): Promise<void> } | null = null;
+  const clearCompareOperation = () => {
+    const operation = compareOperation;
+    compareOperation = null;
+    operation?.controller.abort();
+    cancelBtn.style.display = "none";
+    hint.textContent = "";
+    hint.style.display = "none";
+  };
+  const cancelCurrentCompare = () => { void compareOperation?.cancel(); };
+  cancelBtn.addEventListener("click", cancelCurrentCompare);
   const enterHint = el("span", "enter-hint mono", t("chat.enterHint"));
   const bottomRow = el("div", "composer-row");
-  bottomRow.append(ta, enterHint, sendBtn);
+  bottomRow.append(ta, enterHint, cancelBtn, sendBtn);
 
   composer.append(hint, topRow, compareControls.element, bottomRow);
   chat.append(chatPresence, scroll, composer);
@@ -739,6 +753,7 @@ export function renderWorkspace(deps: UiDeps): void {
   // on stop. NOTE: a companion approve still lands on the Rust NATIVE dialog
   // (R4) — remote approval without the native confirm is a founder decision.
   let compBridge: RelayBridge | null = null;
+  let startingCompanion: RelayBridge | null = null;
   const baseGov = deps.gov;
   const compToggle = el("button", "toggle");
   const compStatus = el("div", "set-sub mono", t("settings.companionOff"));
@@ -747,12 +762,20 @@ export function renderWorkspace(deps: UiDeps): void {
     deps.gov = baseGov;
     activeRelayStopper = null;
     const b = compBridge;
+    const pending = startingCompanion;
     compBridge = null;
+    startingCompanion = null;
+    compToggle.disabled = false;
     syncComp();
     compStatus.textContent = t("settings.companionOff");
     await b?.stop().catch(() => {});
+    await pending?.stop().catch(() => {});
   };
   const startCompanion = async () => {
+    if (workspaceDisposed || compToggle.disabled || compBridge || startingCompanion) return;
+    const owner = captureSession(cfg);
+    const current = () => !workspaceDisposed && isCurrentSession(cfg, owner);
+    let pending: RelayBridge | null = null;
     compToggle.disabled = true;
     try {
       const transport = createRelayTransport({ cfg });
@@ -766,6 +789,7 @@ export function renderWorkspace(deps: UiDeps): void {
          *     that THIS dispatch was remote-initiated, not typed here.
          */
         onSteer: (m) => {
+          if (!ownsBridge()) return;
           if (dispatching) {
             void b?.emitAudit("steer: refused — a dispatch is already running").catch(() => {});
             return;
@@ -777,11 +801,13 @@ export function renderWorkspace(deps: UiDeps): void {
           void run();
         },
         onApprove: async (id) => {
+          if (!ownsBridge()) return;
           // Hand the minted token to the modal that is still waiting locally,
           // otherwise the phone's "Allow" burns the pending record and the
           // local flow fails with "resolved elsewhere" — approving would
           // cancel the very action the user approved.
           const r = await resolveApproval(deps.gov, id);
+          if (!ownsBridge()) return;
           const settle = openApprovals.get(id);
           if (r.resolved && settle) settle({ approved: true, token: r.token });
           else if (r.resolved) {
@@ -791,27 +817,52 @@ export function renderWorkspace(deps: UiDeps): void {
           }
         },
         onReject: async (id) => {
+          if (!ownsBridge()) return;
           await resolveRejection(deps.gov, id);
+          if (!ownsBridge()) return;
           openApprovals.get(id)?.({ approved: false });
         },
         onKill: async () => {
+          if (!ownsBridge()) return;
           await killEverything();
         },
       });
+      const ownsBridge = () => current() && (compBridge === b || startingCompanion === b);
+      pending = b;
+      startingCompanion = b;
+      activeRelayStopper = stopCompanion;
       const { sessionId } = await b.start({
         surface: "desktop",
         label: (activeSession?.title || t("app.name")).slice(0, 200),
       });
+      if (!current() || startingCompanion !== b) {
+        if (startingCompanion === b) {
+          startingCompanion = null;
+          if (!compBridge && activeRelayStopper === stopCompanion) activeRelayStopper = null;
+        }
+        await b.stop().catch(() => {});
+        return;
+      }
+      startingCompanion = null;
       compBridge = b;
       deps.gov = bridgeGovernance(baseGov, b);
       activeRelayStopper = stopCompanion;
       compStatus.textContent = t("settings.companionOn", { id: sessionId.slice(0, 12) });
     } catch {
-      compStatus.textContent = t("settings.companionErr");
+      if (pending && startingCompanion !== pending) return;
+      if (!current()) {
+        startingCompanion = null;
+        if (!compBridge && activeRelayStopper === stopCompanion) activeRelayStopper = null;
+        await pending?.stop().catch(() => {});
+        return;
+      }
       await stopCompanion();
+      if (current() && !startingCompanion && !compBridge) compStatus.textContent = t("settings.companionErr");
     } finally {
-      compToggle.disabled = false;
-      syncComp();
+      if (current() && (!startingCompanion || startingCompanion === pending)) {
+        compToggle.disabled = false;
+        syncComp();
+      }
     }
   };
   compToggle.addEventListener("click", () => (compBridge ? void stopCompanion() : void startCompanion()));
@@ -1124,6 +1175,7 @@ export function renderWorkspace(deps: UiDeps): void {
     const s = sessionStore.get(id);
     if (!s) return;
     chatMotionVersion += 1;
+    clearCompareOperation();
     dispatching = false;
     sendBtn.disabled = false;
     setChatMotion("idle", t("app.tagline"));
@@ -1142,6 +1194,7 @@ export function renderWorkspace(deps: UiDeps): void {
 
   const startNewSession = () => {
     chatMotionVersion += 1;
+    clearCompareOperation();
     dispatching = false;
     sendBtn.disabled = false;
     setChatMotion("idle", t("app.tagline"));
@@ -1398,13 +1451,54 @@ export function renderWorkspace(deps: UiDeps): void {
         const stub = await startCompare(cfg, { companyId: runCompanyId, query: text,
           ...(runSelections !== undefined ? { selections: runSelections } : {}) });
         if (!ownsRun()) return;
+        const controller = new AbortController();
+        let finishCancellation!: (result: { status: "CANCELLED"; error: string }) => void;
+        const cancelled = new Promise<{ status: "CANCELLED"; error: string }>(resolve => { finishCancellation = resolve; });
+        let cancelling = false;
+        const operation = {
+          controller,
+          cancel: async () => {
+            const current = () => ownsRun() && compareOperation === operation;
+            if (!current() || cancelling) return;
+            hint.textContent = "";
+            hint.style.display = "none";
+            cancelling = true;
+            cancelBtn.disabled = true;
+            cancelBtn.textContent = t("chat.cancelling");
+            try {
+              const result = await cancelCompare(cfg, stub.id, { save: deps.persist, signal: controller.signal });
+              if (!current()) return;
+              if (result.status === "CANCELLED") {
+                finishCancellation({ status: "CANCELLED", error: t("chat.cancelled") });
+              } else {
+                // Completion can race the cancel request. Poll the real result
+                // and preserve its findings instead of reporting cancellation.
+                hint.textContent = t("chat.cancelTooLate");
+                hint.style.display = "block";
+              }
+            } catch {
+              if (!current()) return;
+              hint.textContent = t("chat.cancelFailed");
+              hint.style.display = "block";
+              cancelling = false;
+              cancelBtn.disabled = false;
+            } finally {
+              if (current()) cancelBtn.textContent = t("chat.cancel");
+            }
+          },
+        };
+        compareOperation = operation;
+        cancelBtn.disabled = false;
+        cancelBtn.textContent = t("chat.cancel");
+        cancelBtn.style.display = "";
         const progressLabel = (status: string) => status === "RUNNING"
           ? t("chat.thinking", { n: 2 }) : t("chat.polling", { status });
         const label = document.createTextNode(progressLabel(stub.status));
         const thinking = thinkingRow(label, compareProgressMotion(stub.status));
         scroll.append(thinking);
         scrollToEnd();
-        const session = await pollCompare(cfg, stub.id, {
+        const session = await Promise.race([pollCompare(cfg, stub.id, {
+          signal: controller.signal,
           isCurrent: ownsRun,
           onTick: (status) => {
             if (!ownsRun()) return;
@@ -1413,10 +1507,14 @@ export function renderWorkspace(deps: UiDeps): void {
             thinkingMotions.get(thinking)?.setState(progressMotion);
             setRunMotion(progressMotion, label.textContent);
           },
-        });
+        }), cancelled]);
         if (!ownsRun()) return;
+        clearCompareOperation();
         removeThinking(thinking);
-        const view = toCompareView(session);
+        // Polling may observe cancellation before the POST acknowledgement.
+        // Both terminal paths must explain its soft-cancel/cost semantics.
+        const view = toCompareView(session?.status === "CANCELLED"
+          ? { ...session, error: t("chat.cancelled") } : session);
         const resultMotion = compareMotion(view);
         setRunMotion(resultMotion, resultMotion === "success" ? t("chat.finalAnswer")
           : resultMotion === "error" ? view.error || t("chat.empty") : t("app.tagline"));
@@ -1443,6 +1541,7 @@ export function renderWorkspace(deps: UiDeps): void {
     } finally {
       for (const row of runThinkingRows) removeThinking(row);
       if (ownsRun()) {
+        clearCompareOperation();
         dispatching = false;
         sendBtn.disabled = false;
         scrollToEnd();
@@ -1468,11 +1567,12 @@ export function renderWorkspace(deps: UiDeps): void {
   // governance decorator installed with it, and the window key listener.
   disposeWorkspace = () => {
     workspaceDisposed = true;
+    clearCompareOperation();
     for (const motion of motions) motion.dispose();
     motions.clear();
     thinkingMotions.clear();
     window.removeEventListener("keydown", onWorkspaceKey);
-    if (compBridge) void stopCompanion();
+    if (compBridge || startingCompanion) void stopCompanion();
     else deps.gov = baseGov;
   };
 

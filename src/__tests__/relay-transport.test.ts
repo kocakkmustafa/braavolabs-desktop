@@ -116,7 +116,7 @@ describe("createRelayTransport — subscribeCommands (fetch+SSE)", () => {
     const calls: any[] = [];
     const fetchImpl = vi.fn(async (url: string, init: any) => {
       calls.push({ url, init });
-      return { body: fakeBody([]) };
+      return { ...resp(200, {}), body: fakeBody([]) };
     });
     const transport = createRelayTransport({ cfg: baseCfg(), fetchImpl });
     const unsubscribe = transport.subscribeCommands("sess_1", () => {});
@@ -130,11 +130,11 @@ describe("createRelayTransport — subscribeCommands (fetch+SSE)", () => {
 
   it("parses each data: frame and calls onCmd, skipping keepalive comments", async () => {
     const chunks = [
-      "id: 1\ndata: {\"type\":\"steer\",\"message\":\"hi\"}\n\n",
+      "id: 1\ndata: {\"type\":\"steer\",\"message\":\"hi\",\"sessionId\":\"sess_1\",\"seq\":1,\"ts\":\"now\"}\n\n",
       ": keepalive 123\n\n",
-      "id: 2\ndata: {\"type\":\"kill\"}\n\n",
+      "id: 2\ndata: {\"type\":\"kill\",\"sessionId\":\"sess_1\",\"seq\":2,\"ts\":\"now\"}\n\n",
     ];
-    const fetchImpl = vi.fn(async () => ({ body: fakeBody(chunks) }));
+    const fetchImpl = vi.fn(async () => ({ ...resp(200, {}), body: fakeBody(chunks) }));
     const transport = createRelayTransport({ cfg: baseCfg(), fetchImpl });
     const received: unknown[] = [];
     const unsubscribe = transport.subscribeCommands("sess_1", (raw) => received.push(raw));
@@ -147,7 +147,9 @@ describe("createRelayTransport — subscribeCommands (fetch+SSE)", () => {
     let capturedSignal: AbortSignal | undefined;
     const fetchImpl = vi.fn(async (_url: string, init: any) => {
       capturedSignal = init.signal;
-      return { body: fakeBody([]) };
+      return { ...resp(200, {}), body: { getReader: () => ({
+        read: () => new Promise(resolve => capturedSignal?.addEventListener("abort", () => resolve({ done: true }), { once: true })),
+      }) } };
     });
     const transport = createRelayTransport({ cfg: baseCfg(), fetchImpl });
     const unsubscribe = transport.subscribeCommands("sess_1", () => {});
@@ -158,10 +160,11 @@ describe("createRelayTransport — subscribeCommands (fetch+SSE)", () => {
   });
 
   it("a body without a stream reader is a harmless no-op (never throws)", async () => {
-    const fetchImpl = vi.fn(async () => ({ body: null }));
+    const fetchImpl = vi.fn(async () => ({ ...resp(200, {}), body: null }));
     const transport = createRelayTransport({ cfg: baseCfg(), fetchImpl });
-    expect(() => transport.subscribeCommands("sess_1", () => {})).not.toThrow();
+    const unsubscribe = transport.subscribeCommands("sess_1", () => {});
     await new Promise((r) => setTimeout(r, 10));
+    unsubscribe();
   });
 });
 

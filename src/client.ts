@@ -30,6 +30,12 @@ export class ApiError extends Error {
   }
 }
 
+// A temporary refresh HTTP failure remains retryable. Invalid rotation data or
+// failed persistence must stop automatic reconnect before credentials are reused.
+class TransientRefreshError extends ApiError {}
+export class AuthenticationPersistenceError extends ApiError {}
+export class AuthenticationProtocolError extends ApiError {}
+
 /** Bind every credential-bearing request to the explicitly selected API origin.
  * HTTPS self-hosts are supported; plaintext is reserved for loopback fixtures.
  * Redirects are separately rejected at fetch so a 307 cannot forward passwords.
@@ -57,6 +63,10 @@ export interface RequestOpts {
   body?: unknown;
   auth?: boolean;
   raw?: boolean;
+  /** Return a successful response without consuming its streaming body. */
+  stream?: boolean;
+  /** Cancel this request, including its replay after a shared refresh. */
+  signal?: AbortSignal;
   cfg: Config;
   /** Persist cfg after a refresh; defaults to the registered secure backend. */
   save?: (c: Config) => void | Promise<void>;
@@ -143,18 +153,31 @@ async function refreshSession(
         body: JSON.stringify({ refreshToken: owner.refreshToken }),
       });
       assertSession(cfg, owner);
-      if (!r.ok) return undefined;
-      const d = (await r.json()) as { token?: string; refreshToken?: string };
+      if (!r.ok) {
+        if (r.status === 408 || r.status === 429 || (r.status >= 500 && r.status < 600)) {
+          throw new TransientRefreshError(r.status, "Authentication refresh temporarily unavailable");
+        }
+        return undefined;
+      }
+      let d: { token?: string; refreshToken?: string };
+      try { d = await r.json(); }
+      catch (error) {
+        assertSession(cfg, owner);
+        if (error instanceof SyntaxError) throw new AuthenticationProtocolError(503, "Invalid authentication response");
+        throw error; // A body-read network failure remains retryable.
+      }
       assertSession(cfg, owner);
       if (typeof d?.token !== "string" || !d.token.trim() ||
           (d.refreshToken !== undefined && (typeof d.refreshToken !== "string" || !d.refreshToken.trim()))) {
-        throw new ApiError(503, "Invalid authentication response");
+        throw new AuthenticationProtocolError(503, "Invalid authentication response");
       }
       cfg.token = d.token;
       if (d.refreshToken !== undefined) cfg.refreshToken = d.refreshToken;
       // These writes are our own rotation, not a new account/session.
       current.token = cfg.token; current.refreshToken = cfg.refreshToken;
-      try { await save(cfg); } finally { assertSession(cfg, owner); }
+      try { await save(cfg); }
+      catch { throw new AuthenticationPersistenceError(503, "Unable to persist refreshed session"); }
+      finally { assertSession(cfg, owner); }
       return cfg.token;
     })();
     flight = { owner, promise };
@@ -183,14 +206,17 @@ export async function apiFetch(path: string, opts: RequestOpts): Promise<any> {
 
   const req = (tok?: string) => {
     assertSession(cfg, owner);
+    if (opts.signal?.aborted) throw opts.signal.reason ?? new Error("Request aborted");
     return doFetch(apiRequestUrl(owner.apiUrl, path), {
       redirect: "error",
       method: opts.method ?? "GET",
       headers: {
         "Content-Type": "application/json",
+        ...(opts.stream ? { Accept: "text/event-stream" } : {}),
         ...(tok ? { Authorization: `Bearer ${tok}` } : {}),
       },
       ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
+      ...(opts.signal ? { signal: opts.signal } : {}),
     });
   };
 
@@ -199,7 +225,16 @@ export async function apiFetch(path: string, opts: RequestOpts): Promise<any> {
 
   // Transparent single refresh on 401 (never on /auth/* to avoid loops).
   if (res.status === 401 && authed && owner.refreshToken && !path.startsWith("/auth/")) {
-    const token = await refreshSession(cfg, owner, doFetch, save);
+    let token: string | undefined;
+    try {
+      token = await refreshSession(cfg, owner, doFetch, save);
+    } catch (error) {
+      assertSession(cfg, owner);
+      if (opts.raw && error instanceof TransientRefreshError) {
+        return { status: error.status, statusText: error.message, body: { error: error.message } } satisfies RawResult;
+      }
+      throw error;
+    }
     if (token) res = await req(token);
     assertSession(cfg, owner);
   }
@@ -215,6 +250,7 @@ export async function apiFetch(path: string, opts: RequestOpts): Promise<any> {
     assertSession(cfg, owner);
     throw new ApiError(res.status, b.error ?? b.message ?? res.statusText);
   }
+  if (opts.stream) return res;
   if (res.status === 204) return null;
   const body = await res.json();
   assertSession(cfg, owner);
@@ -292,9 +328,40 @@ const TERMINAL_STATES = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
 export async function getSession(
   cfg: Config,
   id: string,
-  o: { fetchImpl?: FetchLike; save?: (c: Config) => void } = {},
+  o: { fetchImpl?: FetchLike; save?: (c: Config) => void | Promise<void>; signal?: AbortSignal } = {},
 ): Promise<any> {
-  return apiFetch(`/research/${encodeURIComponent(id)}`, { cfg, fetchImpl: o.fetchImpl, save: o.save });
+  return apiFetch(`/research/${encodeURIComponent(id)}`, { cfg, fetchImpl: o.fetchImpl, save: o.save, signal: o.signal });
+}
+
+/** Soft-cancel prevents subsequent server rounds; in-flight provider work may finish. */
+export async function cancelCompare(
+  cfg: Config,
+  id: string,
+  o: { fetchImpl?: FetchLike; save?: (c: Config) => void | Promise<void>; signal?: AbortSignal } = {},
+): Promise<{ success: true; status: "CANCELLED" | "COMPLETED" | "FAILED" }> {
+  const result = await apiFetch(`/research/${encodeURIComponent(id)}/cancel`, {
+    method: "POST", cfg, fetchImpl: o.fetchImpl, save: o.save, signal: o.signal,
+  });
+  if (result?.success !== true || !TERMINAL_STATES.has(result?.status)) {
+    throw new ApiError(502, "Invalid research cancellation response");
+  }
+  return result;
+}
+
+/** Cancel the polling delay as well as an in-flight fetch. */
+function waitForPoll(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const finish = (aborted = false) => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      if (aborted) reject(signal?.reason ?? new Error("Request aborted"));
+      else resolve();
+    };
+    const abort = () => finish(true);
+    const timer = setTimeout(() => finish(), ms);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+  });
 }
 
 /** Poll GET /research/:id until it reaches a terminal state (~5 min default). */
@@ -307,6 +374,7 @@ export async function pollCompare(
     intervalMs?: number;
     maxAttempts?: number;
     onTick?: (status: string, attempt: number) => void;
+    signal?: AbortSignal;
     /** A replaced UI must stop polling even if the same account remains. */
     isCurrent?: () => boolean;
   } = {},
@@ -315,18 +383,19 @@ export async function pollCompare(
   const assertCurrent = () => {
     assertSession(cfg, owner);
     if (o.isCurrent && !o.isCurrent()) throw new SessionChangedError();
+    if (o.signal?.aborted) throw o.signal.reason ?? new Error("Request aborted");
   };
   const interval = o.intervalMs ?? 2000;
   const maxAttempts = o.maxAttempts ?? 150; // ~5 min at 2s
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     assertCurrent();
-    const session = await getSession(cfg, id, { fetchImpl: o.fetchImpl, save: o.save });
+    const session = await getSession(cfg, id, { fetchImpl: o.fetchImpl, save: o.save, signal: o.signal });
     assertCurrent();
     const status = String(session?.status ?? "");
     o.onTick?.(status, attempt);
     assertCurrent();
     if (TERMINAL_STATES.has(status)) return session;
-    await new Promise((r) => setTimeout(r, interval));
+    await waitForPoll(interval, o.signal);
   }
   throw new ApiError(408, `Timed out polling research session ${id}`);
 }
