@@ -3,6 +3,8 @@
 Native desktop app (Tauri v2) for multi-model chat, cascade, and savings —
 the same Braavolabs server that powers the CLI, in an obsidian three-pane UI.
 
+Support: [support@yulalab.com](mailto:support@yulalab.com).
+
 > **Server = orchestration.** The Braavolabs server owns multi-model routing,
 > cascade, and savings. The desktop adds two **Lane-A** side-channels that do
 > NOT touch the server — **Local (Ollama)** and **BYOK Direct** — but even these
