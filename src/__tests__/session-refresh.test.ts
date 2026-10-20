@@ -38,7 +38,7 @@ async function bootFixture(blockRotationWrite = false) {
   const boot = runInNewContext(`${compiled}\nboot;`, {
     ...storeModule, DEFAULT_API, setPersist,
     document: { getElementById: () => ({}), documentElement: {} },
-    resolveStore: () => store, loadApiUrl: (fallback: string) => fallback,
+    resolveTheme: vi.fn(), resolveStore: () => store, loadApiUrl: (fallback: string) => fallback,
     resolveKeyVault: () => ({}), resolveSpawnProbe: () => ({}), resolveGovernance: () => ({}),
     resolveMcpBridge: () => ({}), applyLocale: vi.fn(), detectLocale: () => "en", makeT: () => (key: string) => key,
     renderWorkspace: (value: typeof deps) => { deps = value; }, renderLogin,

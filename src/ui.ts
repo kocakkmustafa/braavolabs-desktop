@@ -6,6 +6,7 @@
  * Login handlers have source-executing regression tests; real WebView paint,
  * native validity bubbles and keyboard behavior still need native UI checks.
  */
+import { resolveTheme, THEMES } from "./theme";
 import type { Config } from "./config";
 import type { ModelSelection } from "./compare-selection";
 import { createCompareControls } from "./compare-controls";
@@ -261,11 +262,12 @@ function containDialog(card: HTMLElement, dismiss: () => void): () => void {
   const onKey = (event: KeyboardEvent) => {
     if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); dismiss(); return; }
     if (event.key !== "Tab") return;
-    const focusable = [...card.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),a[href],[tabindex="0"]')].filter(node => node.getAttribute("aria-hidden") !== "true");
+    const focusable = [...card.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),a[href],[tabindex="0"]')].filter(node => !node.hidden && node.tabIndex >= 0 && !node.closest('[hidden],[inert],[aria-hidden="true"]') && node.getClientRects().length > 0);
     if (!focusable.length) { event.preventDefault(); card.focus(); return; }
     const first = focusable[0], last = focusable[focusable.length - 1];
-    if (event.shiftKey && (document.activeElement === first || document.activeElement === card)) { event.preventDefault(); last.focus(); }
-    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    const outside = !focusable.includes(document.activeElement as HTMLElement);
+    if (event.shiftKey && (document.activeElement === first || outside)) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && (document.activeElement === last || outside)) { event.preventDefault(); first.focus(); }
   };
   card.addEventListener("keydown", onKey);
   return () => { card.removeEventListener("keydown", onKey); if (previous?.isConnected) previous.focus(); };
@@ -276,13 +278,32 @@ function languageSelector(deps: UiDeps): HTMLElement {
   const select = el("select"); select.setAttribute("aria-label", deps.t("settings.language"));
   for (const locale of LOCALES) { const option = el("option", undefined, LOCALE_NAMES[locale]); option.value = locale; select.append(option); }
   select.value = getLocale();
+  const notice = el("span", "storage-notice"); notice.setAttribute("role", "status");
   select.addEventListener("change", async () => {
     const locale = LOCALES.find(value => value === select.value); if (!locale) return;
     select.disabled = true; activeDispatchStopper?.();
-    try { await deps.gov.invalidate(); saveLocale(locale); location.reload(); }
-    catch { select.disabled = false; select.value = getLocale(); }
+    try { await deps.gov.invalidate(); if (!saveLocale(locale)) throw new Error("preference unavailable"); location.reload(); }
+    catch { select.disabled = false; select.value = getLocale(); notice.textContent = deps.t("settings.languageFailed"); }
   });
-  label.append(select); return label;
+  label.append(select, notice); return label;
+}
+
+function themeSelector(deps: UiDeps): HTMLElement {
+  const wrapper = el("div", "theme-picker");
+  const label = el("label", "locale-picker", deps.t("settings.theme"));
+  const select = el("select"); select.setAttribute("aria-label", deps.t("settings.theme"));
+  const theme = resolveTheme();
+  for (const value of THEMES) {
+    const option = el("option", undefined, deps.t(`theme.${value}`)); option.value = value; select.append(option);
+  }
+  select.value = theme.choice();
+  const notice = el("div", "storage-notice"); notice.setAttribute("role", "status");
+  select.addEventListener("change", () => {
+    const value = THEMES.find(value => value === select.value); if (!value) return;
+    notice.textContent = theme.set(value) ? "" : deps.t("settings.preferenceUnsaved");
+  });
+  label.append(select); wrapper.append(label, el("div", "set-sub", deps.t("settings.themeSub")), notice);
+  return wrapper;
 }
 
 // ── login view ────────────────────────────────────────────────────────────
@@ -402,6 +423,7 @@ export function renderLogin(deps: UiDeps): void {
     h1,
     sub,
     languageSelector(deps),
+    themeSelector(deps),
     errBox,
     field("login.email", emailInput),
     field("login.password", pwInput),
@@ -658,10 +680,11 @@ export function renderWorkspace(deps: UiDeps): void {
     chatPresenceLabel.textContent = label;
   };
 
-  const hint = el("div", "composer-hint");
+  const hint = el("div", "composer-hint"); hint.setAttribute("role", "status");
   hint.style.display = "none";
 
   const companyInput = el("input", "company-input") as HTMLInputElement;
+  companyInput.dir = "ltr";
   companyInput.placeholder = t("chat.companyId");
   companyInput.setAttribute("aria-label", t("chat.companyId"));
   companyInput.style.display = "none"; // only for compare mode
@@ -672,7 +695,9 @@ export function renderWorkspace(deps: UiDeps): void {
 
   // Local (Ollama): optional model override.
   const localModelInput = el("input", "company-input") as HTMLInputElement;
+  localModelInput.dir = "ltr";
   localModelInput.placeholder = t("chat.localModel");
+  localModelInput.setAttribute("aria-label", t("chat.localModel"));
   localModelInput.style.display = "none";
 
   // Direct (BYOK): provider select + optional model override.
@@ -682,9 +707,12 @@ export function renderWorkspace(deps: UiDeps): void {
     opt.value = p;
     directProviderSel.append(opt);
   }
+  directProviderSel.setAttribute("aria-label", t("keys.provider")); directProviderSel.dir = "ltr";
   directProviderSel.style.display = "none";
   const directModelInput = el("input", "company-input") as HTMLInputElement;
+  directModelInput.dir = "ltr";
   directModelInput.placeholder = t("chat.directModel");
+  directModelInput.setAttribute("aria-label", t("chat.directModel"));
   directModelInput.style.display = "none";
 
   const modeToggle = el("div", "mode-toggle");
@@ -693,8 +721,10 @@ export function renderWorkspace(deps: UiDeps): void {
   const localBtn = el("button", undefined, t("chat.modeLocal"));
   const directBtn = el("button", undefined, t("chat.modeDirect"));
   cascadeBtn.classList.add("active");
+  for (const button of [cascadeBtn, compareBtn, localBtn, directBtn]) button.setAttribute("aria-pressed", String(button === cascadeBtn));
   const applyMode = (m: Mode) => {
     mode = m;
+    for (const [button, value] of [[cascadeBtn, "cascade"], [compareBtn, "compare"], [localBtn, "local"], [directBtn, "direct"]] as const) button.setAttribute("aria-pressed", String(value === m));
     cascadeBtn.classList.toggle("active", m === "cascade");
     compareBtn.classList.toggle("active", m === "compare");
     localBtn.classList.toggle("active", m === "local");
@@ -755,6 +785,7 @@ export function renderWorkspace(deps: UiDeps): void {
   const inspTabs = el("div", "insp-tabs");
   const inspTabDetail = el("button", "insp-tab active", t("gov.inspectorTab"));
   const inspTabActivity = el("button", "insp-tab", t("gov.activity"));
+  inspTabDetail.setAttribute("aria-pressed", "true"); inspTabActivity.setAttribute("aria-pressed", "false");
   inspTabs.append(inspTabDetail, inspTabActivity);
   const inspectorBody = el("div", "insp-detail");
   inspectorBody.append(el("div", "inspector-empty", t("inspector.empty")));
@@ -782,7 +813,7 @@ export function renderWorkspace(deps: UiDeps): void {
   const sheetClose = el("button", "sheet-close mono", t("settings.close"));
   sheetHead.append(sheetClose);
   const sheetBody = el("div", "sheet-body");
-  sheetBody.append(languageSelector(deps));
+  sheetBody.append(languageSelector(deps), themeSelector(deps));
 
   // Design-v3 settings IA: four labelled sections. Rows are thin wiring —
   // anything with behavior delegates to tested modules (vault/mcp/gov/prefs).
@@ -973,10 +1004,12 @@ export function renderWorkspace(deps: UiDeps): void {
 
   // APP & DATA — a WORKING reduced-motion toggle + the honest telemetry line.
   const rmToggle = el("button", "toggle");
+  const rmNotice = el("div", "storage-notice"); rmNotice.setAttribute("role", "status");
   const syncRm = () => { rmToggle.classList.toggle("on", prefs.reducedMotion()); rmToggle.setAttribute("aria-label", t("settings.reducedMotion")); rmToggle.setAttribute("aria-pressed", String(prefs.reducedMotion())); };
   syncRm();
   rmToggle.addEventListener("click", () => {
-    prefs.setReducedMotion(!prefs.reducedMotion());
+    const persisted = prefs.setReducedMotion(!prefs.reducedMotion());
+    rmNotice.textContent = persisted ? "" : t("settings.preferenceUnsaved");
     applyReducedMotion(document.documentElement, effectiveReducedMotion(prefs, osPrefersReducedMotion()));
     notifyBrandMotionPreference();
     syncRm();
@@ -985,6 +1018,7 @@ export function renderWorkspace(deps: UiDeps): void {
   secApp.append(
     el("div", "sheet-sec-label mono", t("settings.secApp")),
     setRow(t("settings.reducedMotion"), t("settings.reducedMotionSub"), rmToggle),
+    rmNotice,
     setRow(t("settings.telemetry"), t("settings.telemetrySub")),
   );
 
@@ -1029,10 +1063,10 @@ export function renderWorkspace(deps: UiDeps): void {
         "div",
         "company-summary mono",
         t("company.summary", {
-          total: String(sum.total),
-          active: String(sum.active),
-          jobs: String(sum.jobs),
-          scheduled: String(sum.scheduled),
+          total: sum.total,
+          active: sum.active,
+          jobs: sum.jobs,
+          scheduled: sum.scheduled,
         }),
       ),
     );
@@ -1052,11 +1086,12 @@ export function renderWorkspace(deps: UiDeps): void {
         el(
           "div",
           "company-sub mono",
-          t("company.counts", { agents: c.agentCount, pipelines: c.pipelineCount }),
+          t("company.counts", { agents: c.agentCount ?? t("common.unknown"), pipelines: c.pipelineCount ?? t("common.unknown") }),
         ),
       );
       row.append(meta);
-      row.append(el("span", "company-status mono", c.status.toLowerCase()));
+      const statusKey = ({ ACTIVE: "company.statusActive", PAUSED: "company.statusPaused", DRAFT: "company.statusDraft", ARCHIVED: "company.statusArchived" } as Record<string, string>)[c.status.toUpperCase()];
+      row.append(el("span", "company-status mono", statusKey ? t(statusKey) : c.status || t("common.unknown")));
 
       // Only render an action the server will actually accept (pause 404s on a
       // non-ACTIVE company, resume on a non-PAUSED one) — a button that always
@@ -1142,6 +1177,7 @@ export function renderWorkspace(deps: UiDeps): void {
   let surface: "chat" | "company" | "code" = "chat";
   const applySurface = (s: "chat" | "company" | "code") => {
     surface = s;
+    for (const [button, value] of [[segChatBtn, "chat"], [segCompanyBtn, "company"], [segCodeBtn, "code"]] as const) button.setAttribute("aria-pressed", String(value === s));
     segChatBtn.classList.toggle("active", s === "chat");
     segCompanyBtn.classList.toggle("active", s === "company");
     segCodeBtn.classList.toggle("active", s === "code");
@@ -1200,6 +1236,8 @@ export function renderWorkspace(deps: UiDeps): void {
   };
   const showTab = (tab: "detail" | "activity") => {
     activeTab = tab;
+    inspTabDetail.setAttribute("aria-pressed", String(tab === "detail"));
+    inspTabActivity.setAttribute("aria-pressed", String(tab === "activity"));
     inspTabDetail.classList.toggle("active", tab === "detail");
     inspTabActivity.classList.toggle("active", tab === "activity");
     inspectorBody.style.display = tab === "detail" ? "block" : "none";
@@ -1569,7 +1607,7 @@ export function renderWorkspace(deps: UiDeps): void {
         cancelBtn.textContent = t("chat.cancel");
         cancelBtn.style.display = "";
         const progressLabel = (status: string) => status === "RUNNING"
-          ? t("chat.thinking", { n: 2 }) : t("chat.polling", { status });
+          ? runSelections ? t("chat.thinking", { n: runSelections.length }) : t("chat.modelsWorking") : t("chat.polling", { status });
         const label = document.createTextNode(progressLabel(stub.status));
         const thinking = thinkingRow(label, compareProgressMotion(stub.status));
         scroll.append(thinking);
@@ -1667,7 +1705,7 @@ function renderCascadeAnswer(scroll: HTMLElement, v: CascadeView, t: Translator)
   card.append(el("div", "msg-label", t("chat.finalAnswer")));
   card.append(document.createTextNode(v.answer || t("chat.empty")));
   scroll.append(card);
-  if (v.totalCostUsd > 0) {
+  if (v.totalCostUsd !== null && v.totalCostUsd > 0) {
     scroll.append(el("div", "saved-footer", `${v.provider} · ${v.model} · ${formatUsd(v.totalCostUsd)}`));
   }
 }
@@ -1913,7 +1951,7 @@ function showKillDialog(deps: UiDeps): Promise<void> {
     card.append(el("h2", "approve-title", t("kill.title")));
     card.append(el("div", "approve-body", t("kill.body")));
 
-    const scope = el("div", "kill-scope mono");
+    const scope = el("div", "kill-scope mono"); scope.setAttribute("role", "status");
     scope.append(
       el("div", undefined, `• ${t("kill.scopeApprovals")}`),
       el("div", undefined, `• ${t("kill.scopeRelay")}`),
@@ -2196,7 +2234,7 @@ function renderMcpSection(deps: UiDeps): HTMLElement {
   const showTools = async (server: string, tools: McpTool[]) => {
     toolsPanel.innerHTML = "";
     toolsPanel.style.display = "block";
-    toolsPanel.append(el("div", "mcp-tools-head mono", `${server} · ${t("mcp.tools")} (${tools.length})`));
+    toolsPanel.append(el("div", "mcp-tools-head mono", `${server} · ${t("mcp.tools")} (${formatNumber(tools.length)})`));
     if (!tools.length) {
       toolsPanel.append(el("div", "mcp-empty", t("mcp.noTools")));
       return;
@@ -2341,10 +2379,15 @@ function renderMcpSection(deps: UiDeps): HTMLElement {
   // --- add-server form ---
   const nameInput = el("input", "key-input") as HTMLInputElement;
   nameInput.placeholder = t("mcp.name");
+  nameInput.setAttribute("aria-label", t("mcp.name"));
   const cmdInput = el("input", "key-input") as HTMLInputElement;
+  cmdInput.dir = "ltr";
   cmdInput.placeholder = t("mcp.command");
+  cmdInput.setAttribute("aria-label", t("mcp.command"));
   const argsInput = el("input", "key-input") as HTMLInputElement;
+  argsInput.dir = "ltr";
   argsInput.placeholder = t("mcp.args");
+  argsInput.setAttribute("aria-label", t("mcp.args"));
   const addBtn = el("button", "key-add-btn", t("mcp.add"));
   const doAdd = async () => {
     const name = nameInput.value.trim();
@@ -2388,7 +2431,7 @@ function renderCascadeInspector(body: HTMLElement, v: CascadeView, t: Translator
     kv(t("inspector.model"), v.model || "—"),
     kv(t("inspector.tier"), v.tier || "—"),
     kv(t("inspector.confidence"), formatNumber(v.confidence, { maximumFractionDigits: 2 })),
-    kv(t("inspector.escalated"), v.escalated ? "yes" : "no", v.escalated),
+    kv(t("inspector.escalated"), v.escalated === null ? t("common.unknown") : t(v.escalated ? "common.yes" : "common.no"), v.escalated === true),
     kv(t("inspector.cost"), formatUsd(v.totalCostUsd)),
     kv(t("inspector.stoppedReason"), v.stoppedReason || "—"),
   );
@@ -2411,9 +2454,9 @@ function renderCompareInspector(body: HTMLElement, v: CompareView, t: Translator
     return;
   }
   body.append(
-    kv(t("chat.perModel"), String(v.perModel.length)),
-    kv(t("chat.failed"), String(v.failed.length), v.failed.length > 0),
+    kv(t("chat.perModel"), formatNumber(v.perModel.length)),
+    kv(t("chat.failed"), formatNumber(v.failed.length), v.failed.length > 0),
     kv(t("inspector.cost"), formatUsd(v.totalCostUsd)),
-    kv(t("chat.synthesis"), v.status !== "COMPLETED" ? v.status : v.synthesisParsed ? "parsed" : "raw", v.status !== "COMPLETED" || !v.synthesisParsed),
+    kv(t("chat.synthesis"), v.status !== "COMPLETED" ? v.status : t(v.synthesisParsed ? "chat.parsed" : "chat.raw"), v.status !== "COMPLETED" || !v.synthesisParsed),
   );
 }

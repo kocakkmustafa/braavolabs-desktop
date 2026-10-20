@@ -105,3 +105,11 @@ describe("companySummary", () => {
     expect(companySummary(companies, jobs)).toEqual({ total: 3, active: 2, jobs: 2, scheduled: 1 });
   });
 });
+
+it("does not invent counts/status or replace an explicit zero with a nested nonzero", () => {
+  const [unknown, zero] = toCompanyViews([{ id: "u", agentCount: "0", pipelineCount: -1 },
+    { id: "z", agentCount: 0, pipelineCount: 0, _count: { agents: 5, pipelines: 2 } }]);
+  expect(unknown).toMatchObject({ agentCount: null, pipelineCount: null, status: "", canPause: false, canResume: false });
+  expect(zero).toMatchObject({ agentCount: 0, pipelineCount: 0 });
+  expect(toCompanyViews([{ id: "i", agentCount: Infinity, pipelineCount: 1.5 }])[0]).toMatchObject({ agentCount: null, pipelineCount: null });
+});

@@ -25,7 +25,7 @@ describe("toSavingsView (honesty gate)", () => {
     const v = toSavingsView(undefined);
     expect(v.hasSavings).toBe(false);
     expect(v.label).toBe("");
-    expect(v.savedUsd).toBe(0);
+    expect(v.savedUsd).toBeNull();
   });
 
   it("uses 2 decimals for amounts >= $1", () => {
@@ -62,8 +62,8 @@ describe("toCascadeView", () => {
   it("coerces a missing/garbage payload to safe defaults", () => {
     const v = toCascadeView(null);
     expect(v.answer).toBe("");
-    expect(v.confidence).toBe(0);
-    expect(v.escalated).toBe(false);
+    expect(v.confidence).toBeNull();
+    expect(v.escalated).toBeNull();
     expect(v.attempts).toEqual([]);
   });
 });
@@ -123,4 +123,28 @@ describe("toLoginError (raw-mode banner mapping)", () => {
   it("503 → unavailable (fail closed)", () => {
     expect(toLoginError({ status: 503, body: {} })?.kind).toBe("unavailable");
   });
+});
+
+it("keeps unknown financial/confidence observations separate from explicit zero", () => {
+  for (const invalid of [undefined, null, "", "0", false, NaN, Infinity, -1]) {
+    expect(toSavingsView({ report: { actualUsd: invalid } }).actualUsd).toBeNull();
+    expect(toCascadeView({ confidence: invalid, totalCostUsd: invalid }).confidence).toBeNull();
+    expect(toCascadeView({ totalCostUsd: invalid }).totalCostUsd).toBeNull();
+    const view = toCompareView({ status: "COMPLETED", findings: { multiModel: { totalCostUsd: invalid, perModel: [{ costUsd: invalid }] } } });
+    expect(view.totalCostUsd).toBeNull(); expect(view.perModel[0].costUsd).toBeNull();
+  }
+  expect(toCascadeView({ confidence: 2 }).confidence).toBeNull();
+  expect(toCascadeView({ confidence: 0, totalCostUsd: 0, escalated: false })).toMatchObject({ confidence: 0, totalCostUsd: 0, escalated: false });
+  expect(toSavingsView({ report: { actualUsd: 0 } }).actualUsd).toBe(0);
+});
+
+it("preserves measured signed savings without displaying a positive savings label for losses", () => {
+  const view = toSavingsView({ report: { actualUsd: 5, baselineUsd: 4, savedUsd: -1, savedPct: -25 } });
+  expect(view).toMatchObject({ actualUsd: 5, baselineUsd: 4, savedUsd: -1, savedPct: -25, hasSavings: false, label: "" });
+  for (const invalid of [null, undefined, "-1", "", NaN, Infinity, -Infinity]) {
+    expect(toSavingsView({ report: { savedUsd: invalid, savedPct: invalid } })).toMatchObject({ savedUsd: null, savedPct: null, hasSavings: false });
+  }
+  expect(toSavingsView({ report: { savedUsd: 0, savedPct: 0 } })).toMatchObject({ savedUsd: 0, savedPct: 0, hasSavings: false });
+  // Nonnegative cost fields retain their distinct validation contract.
+  expect(toSavingsView({ report: { actualUsd: -1, baselineUsd: -1 } })).toMatchObject({ actualUsd: null, baselineUsd: null });
 });

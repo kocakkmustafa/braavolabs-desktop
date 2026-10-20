@@ -19,8 +19,8 @@ export interface CompanyView {
   status: string;
   /** idle = steel, running = ember, done = arc — matches the StatusDot rule. */
   tone: "steel" | "ember" | "arc" | "molten";
-  agentCount: number;
-  pipelineCount: number;
+  agentCount: number | null;
+  pipelineCount: number | null;
   /** True only when a pause action can succeed (server 404s otherwise). */
   canPause: boolean;
   /** True only when a resume action can succeed. */
@@ -46,7 +46,7 @@ export interface JobView {
 }
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
-const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+const count = (v: unknown): number | null => typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null;
 
 function toneFor(status: string): CompanyView["tone"] {
   switch (status.toUpperCase()) {
@@ -70,7 +70,7 @@ export function toCompanyViews(raw: unknown): CompanyView[] {
     const c = r as Record<string, unknown>;
     const id = str(c.id);
     if (!id) continue;
-    const status = str(c.status) || "DRAFT";
+    const status = str(c.status);
     // The list endpoint returns counts under `_count` (Prisma) on some shapes
     // and flattened on others — accept both rather than showing 0 for a company
     // that clearly has agents.
@@ -80,8 +80,8 @@ export function toCompanyViews(raw: unknown): CompanyView[] {
       name: str(c.name) || id,
       status,
       tone: toneFor(status),
-      agentCount: num(c.agentCount) || num(counts.agents),
-      pipelineCount: num(c.pipelineCount) || num(counts.pipelines),
+      agentCount: count(c.agentCount) ?? count(counts.agents),
+      pipelineCount: count(c.pipelineCount) ?? count(counts.pipelines),
       canPause: status.toUpperCase() === "ACTIVE",
       canResume: status.toUpperCase() === "PAUSED",
     });

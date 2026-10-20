@@ -16,6 +16,16 @@ describe("prefs — reduced motion", () => {
     expect(p.reducedMotion()).toBe(false);
   });
 
+  it("keeps a session preference when storage becomes unavailable after startup", () => {
+    let blocked = false;
+    const p = createPrefs({ getItem: () => { if (blocked) throw new Error("blocked"); return "0"; },
+      setItem: () => { if (blocked) throw new Error("quota"); } });
+    expect(p.reducedMotion()).toBe(false);
+    blocked = true;
+    expect(() => p.setReducedMotion(true)).not.toThrow();
+    expect(p.reducedMotion()).toBe(true);
+  });
+
   it("app toggle OR the OS preference reduces motion — OS can never be overridden off", () => {
     const p = createPrefs(memStorage());
     expect(effectiveReducedMotion(p, false)).toBe(false);
@@ -24,4 +34,8 @@ describe("prefs — reduced motion", () => {
     expect(effectiveReducedMotion(p, false)).toBe(true);
     expect(effectiveReducedMotion(p, true)).toBe(true);
   });
+});
+
+it("does not acknowledge persistent storage when only session memory is available", () => {
+  const p = createPrefs(undefined); expect(p.setReducedMotion(true)).toBe(false); expect(p.reducedMotion()).toBe(true);
 });

@@ -4,6 +4,7 @@
  * lifting is delegated to the tested modules; this file is glue.
  */
 import "./styles.css";
+import { resolveTheme } from "./theme";
 import { type Config, DEFAULT_API, setPersist } from "./config";
 import { resolveStore, loadApiUrl, hydrateConfig, createConfigPersister } from "./store";
 import { resolveKeyVault } from "./keyvault";
@@ -16,6 +17,7 @@ import { verifyHistoryIdentity } from "./client";
 import { clearAllSessions } from "./sessions";
 
 async function boot(): Promise<void> {
+  resolveTheme();
   const root = document.getElementById("app");
   if (!root) return;
 
