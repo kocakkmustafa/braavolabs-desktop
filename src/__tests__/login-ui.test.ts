@@ -1,3 +1,4 @@
+import { rememberHistoryIdentity } from "../sessions";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
@@ -54,7 +55,7 @@ function fixture(locale: "en" | "tr" = "en") {
   const accountStore = vi.fn(); const cfg: Config = { apiUrl: "https://api.braavolabs.com/api/v1" };
   const ui = runInNewContext(`${compiled}\n({renderLogin,mapLoginErrorText});`, {
     ...clientModule, el, document: { createTextNode: (text: string) => el("text", "", text) },
-    runWorkspaceTeardown() {}, initReducedMotion() {}, login, saveApiUrl,
+    rememberHistoryIdentity, runWorkspaceTeardown() {}, initReducedMotion() {}, languageSelector: () => el("select"), login, saveApiUrl,
     ApiError, toLoginError, renderWorkspace, localStorage: { setItem: accountStore },
   }) as { renderLogin(deps: unknown): void; mapLoginErrorText: (t: ReturnType<typeof makeT>, view: ReturnType<typeof toLoginError>) => string };
   const deps = { root: el("div"), cfg, t: makeT(locale), persist };

@@ -1,6 +1,7 @@
+import { withinRequestBudget, boundedJson } from "./request-budget";
 /**
  * Lane-A local — talk directly to a local Ollama server from the webview. No
- * keys, no Braavolabs-server round-trip, works fully offline. A VERBATIM port of the
+ * keys, no Braavolabs-server round-trip, works offline after the initial account sign-in and local model installation. A VERBATIM port of the
  * CLI's forge/local.ts, adapted only where the runtime differs: the base URL
  * override comes from `import.meta.env.VITE_OLLAMA_HOST` (there is no
  * `process.env` in a Tauri webview) or an explicit argument.
@@ -43,7 +44,8 @@ export class OllamaUnreachableError extends Error {
 async function doFetch(fetchImpl: FetchLike, host: string, path: string, init?: any): Promise<any> {
   try {
     return await fetchImpl(`${host}${path}`, init);
-  } catch {
+  } catch (error) {
+    if (init?.signal?.aborted) throw error;
     // Network-level failure (connection refused, DNS, CSP) — Ollama isn't up.
     throw new OllamaUnreachableError(host);
   }
@@ -54,13 +56,16 @@ export interface OllamaModel {
 }
 
 /** GET /api/tags — installed local models. */
-export async function listOllamaModels(host: string, o: { fetchImpl?: FetchLike } = {}): Promise<string[]> {
+export async function listOllamaModels(host: string, o: { fetchImpl?: FetchLike; signal?: AbortSignal; timeoutMs?: number } = {}): Promise<string[]> {
   const fetchImpl = o.fetchImpl ?? (globalThis.fetch as FetchLike);
-  const res = await doFetch(fetchImpl, host, "/api/tags");
+  return withinRequestBudget(async signal => {
+  const res = await doFetch(fetchImpl, host, "/api/tags", { signal });
   if (!res.ok) throw new OllamaUnreachableError(host);
-  const body = await res.json();
+  const body = await boundedJson(res, signal);
   const models: OllamaModel[] = Array.isArray(body?.models) ? body.models : [];
+  signal.throwIfAborted();
   return models.map((m) => m.name).filter(Boolean);
+  }, o);
 }
 
 export interface OllamaChatResult {
@@ -73,10 +78,12 @@ export async function ollamaChat(
   host: string,
   model: string,
   question: string,
-  o: { fetchImpl?: FetchLike } = {},
+  o: { fetchImpl?: FetchLike; signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<OllamaChatResult> {
   const fetchImpl = o.fetchImpl ?? (globalThis.fetch as FetchLike);
+  return withinRequestBudget(async signal => {
   const res = await doFetch(fetchImpl, host, "/api/chat", {
+    signal,
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -86,12 +93,14 @@ export async function ollamaChat(
     }),
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
+    const body = await boundedJson(res, signal);
     throw new Error(body?.error ?? `Ollama request failed (${res.status})`);
   }
-  const body = await res.json();
+  const body = await boundedJson(res, signal);
   const content = body?.message?.content ?? "";
+  signal.throwIfAborted();
   return { content: String(content), model: String(body?.model ?? model) };
+  }, o);
 }
 
 /**
@@ -102,7 +111,7 @@ export async function ollamaChat(
 export async function resolveOllamaModel(
   host: string,
   explicit: string | undefined,
-  o: { fetchImpl?: FetchLike } = {},
+  o: { fetchImpl?: FetchLike; signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<string> {
   if (explicit) return explicit;
   const models = await listOllamaModels(host, o);

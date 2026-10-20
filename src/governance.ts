@@ -402,6 +402,8 @@ export interface GateResult {
 export interface Governance {
   /** Classify + audit an action. Returns a token immediately iff auto-allowed. */
   request(kind: string, detail?: ActionDetail): Promise<GateResult>;
+  /** Observe an existing host-prepared decision; must not create another grant. */
+  observePrepared?(result: GateResult, detail?: ActionDetail): void;
   /** Resolve a pending approval → mint a one-time token. */
   approve(actionId: string): Promise<{ token: string }>;
   /** Resolve a pending approval as rejected — no token is ever minted. */
@@ -412,6 +414,8 @@ export interface Governance {
   settle(kind: string, outcome: "success" | "error", detail?: ActionDetail): Promise<void>;
   /** Last n audit entries, oldest→newest. Never contains a secret. */
   recent(n?: number): Promise<AuditEntry[]>;
+  /** Revoke pending/granted actions, including a native dialog already open. */
+  invalidate(): Promise<void>;
   /** Static policy table for the Settings visibility panel (pure, no host call). */
   policy(): PolicyRow[];
 }
@@ -476,6 +480,7 @@ export function createMemoryGovernance(ledger: AuditLedger = createMemoryLedger(
   const tokens = new Map<string, Bound>(); // token → bound action (spent on consume)
 
   return {
+    async invalidate() { pending.clear(); tokens.clear(); },
     async request(kind, detail = {}) {
       const { decision, reason } = classifyAction(kind, detail);
       const actionId = rid("act");
@@ -571,6 +576,7 @@ interface RawAuditEntry {
  */
 export function createTauriGovernance(invoke: Invoke): Governance {
   return {
+    async invalidate() { await invoke("invalidate_actions"); },
     async request(kind, detail = {}) {
       const raw = (await invoke("request_action", {
         kind,

@@ -80,7 +80,7 @@ textarea {
 /* ── left rail ───────────────────────────────────────────────────────── */
 .rail {
   background: var(--obsidian-inset);
-  border-right: 1px solid var(--steel-800);
+  border-inline-end: 1px solid var(--steel-800);
   display: flex;
   flex-direction: column;
   padding: 16px 14px;
@@ -126,7 +126,7 @@ textarea {
 }
 .rail-btn {
   width: 100%;
-  text-align: left;
+  text-align: start;
   background: var(--steel-800);
   border: 1px solid var(--steel-700);
   color: var(--text);
@@ -298,7 +298,7 @@ textarea {
   border-radius: var(--radius-sm);
   cursor: pointer;
   font-size: 12px;
-  text-align: left;
+  text-align: start;
 }
 .laneb-btn:hover {
   background: var(--steel-700);
@@ -441,7 +441,7 @@ textarea {
   max-width: 88%;
   background: var(--steel-900);
   border: 1px solid var(--steel-700);
-  border-left: 2px solid var(--arc-blue-lit);
+  border-inline-start: 2px solid var(--arc-blue-lit);
   border-radius: var(--radius);
   padding: 13px 15px;
   white-space: pre-wrap;
@@ -539,7 +539,7 @@ textarea {
 .chip {
   font-size: 12px;
   color: var(--text-muted);
-  padding-left: 12px;
+  padding-inline-start: 12px;
   position: relative;
   user-select: text;
 }
@@ -641,7 +641,7 @@ textarea {
 /* ── right inspector ─────────────────────────────────────────────────── */
 .inspector {
   background: var(--obsidian-inset);
-  border-left: 1px solid var(--steel-800);
+  border-inline-start: 1px solid var(--steel-800);
   padding: 16px 15px;
   overflow-y: auto;
 }
@@ -666,7 +666,7 @@ textarea {
 .kv .v {
   font-family: var(--mono);
   color: var(--text);
-  text-align: right;
+  text-align: end;
 }
 .kv .v.escalated {
   color: var(--ember);
@@ -879,7 +879,7 @@ textarea {
 
 /* governed badge on Lane-B copy button */
 .laneb-gov-badge {
-  margin-left: 7px;
+  margin-inline-start: 7px;
   font-size: 9.5px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -954,7 +954,7 @@ textarea {
 .approve-detail {
   background: var(--obsidian-inset);
   border: 1px solid var(--steel-800);
-  border-left: 2px solid var(--ember);
+  border-inline-start: 2px solid var(--ember);
   border-radius: var(--radius-sm);
   padding: 10px 12px;
   margin-bottom: 16px;
@@ -1132,7 +1132,7 @@ textarea {
   line-height: 1.5;
   color: var(--text);
   background: var(--obsidian-inset);
-  border-left: 3px solid var(--steel-600);
+  border-inline-start: 3px solid var(--steel-600);
   border-radius: var(--radius-sm);
   padding: 7px 9px;
   white-space: pre-wrap;
@@ -1178,7 +1178,7 @@ textarea {
 .tb-crumb {
   font-size: 11.5px;
   color: #69718a;
-  margin-left: 6px;
+  margin-inline-start: 6px;
 }
 .tb-spacer { flex: 1; }
 .tb-settings {
@@ -1307,7 +1307,7 @@ textarea {
 .session-item {
   display: flex;
   align-items: center;
-  text-align: left;
+  text-align: start;
   font: inherit;
   font-size: 12.5px;
   color: var(--muted, #8b93a7);
@@ -1486,7 +1486,7 @@ textarea {
   border-radius: 10px;
   padding: 12px 14px;
   margin-top: 10px;
-  text-align: left;
+  text-align: start;
 }
 .kill-scope-note {
   color: #69718a;
@@ -1692,3 +1692,14 @@ textarea {
 }
 .compare-controls > button:disabled { opacity: 0.6; cursor: wait; }
 .compare-controls .company-input { max-width: 100%; }
+
+/* Locale direction, keyboard visibility and bounded recovery messages. */
+:focus-visible { outline: 2px solid var(--arc-blue-lit); outline-offset: 3px; }
+.locale-picker { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.locale-picker select { max-width: 100%; background: var(--obsidian); color: inherit; padding: 6px; }
+.storage-notice { font-size: 11px; color: var(--steel-400); padding: 6px; overflow-wrap: anywhere; }
+.storage-notice button { margin-inline-start: 8px; }
+pre, code, .mcp-args, .changes-path { direction: ltr; unicode-bidi: isolate; text-align: start; }
+[dir="rtl"] .approve-card, [dir="rtl"] .sheet { text-align: start; }
+button, select, input { min-block-size: 32px; }
+@media (max-width: 850px) { .inspector { display: none; } .rail { max-width: 180px; } .composer-row { flex-wrap: wrap; } }

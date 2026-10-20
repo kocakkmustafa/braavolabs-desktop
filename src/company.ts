@@ -1,3 +1,4 @@
+import { getLocale } from "./i18n";
 /**
  * Company surface — pure view mappers (design v3 "Company" mode).
  *
@@ -119,11 +120,9 @@ export function relativeAge(iso: string | null, now: number): string {
   const then = Date.parse(iso);
   if (!Number.isFinite(then)) return "";
   const mins = Math.floor(Math.abs(now - then) / 60000);
-  if (mins < 1) return "now";
-  if (mins < 60) return `${mins}m`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h`;
-  return `${Math.floor(hours / 24)}d`;
+  const unit = mins < 60 ? "minute" : mins < 1440 ? "hour" : "day";
+  const value = mins < 60 ? mins : mins < 1440 ? Math.floor(mins / 60) : Math.floor(mins / 1440);
+  return new Intl.NumberFormat(getLocale(), { style: "unit", unit, unitDisplay: "narrow" }).format(value);
 }
 
 /** One-line summary for the header: "3 companies · 2 active · 7 jobs". */

@@ -40,9 +40,9 @@ async function bootFixture(blockRotationWrite = false) {
     document: { getElementById: () => ({}), documentElement: {} },
     resolveStore: () => store, loadApiUrl: (fallback: string) => fallback,
     resolveKeyVault: () => ({}), resolveSpawnProbe: () => ({}), resolveGovernance: () => ({}),
-    resolveMcpBridge: () => ({}), detectLocale: () => "en", makeT: () => (key: string) => key,
+    resolveMcpBridge: () => ({}), applyLocale: vi.fn(), detectLocale: () => "en", makeT: () => (key: string) => key,
     renderWorkspace: (value: typeof deps) => { deps = value; }, renderLogin,
-    clearAllSessions: vi.fn(),
+    clearAllSessions: vi.fn(() => true), verifyHistoryIdentity: vi.fn(async () => false),
   }) as () => Promise<void>;
   await boot();
   return { deps, state: () => ({ ...state }), writeStarted, writeRelease, renderLogin };

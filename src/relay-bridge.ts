@@ -262,15 +262,24 @@ function toBase64(s: string): string {
  * is not.
  */
 export function bridgeGovernance(gov: Governance, bridge: RelayBridge): Governance {
+  const mirrored = new Set<string>();
+  const observePrepared: NonNullable<Governance["observePrepared"]> = (result, detail) => {
+    if (result.decision !== "require-approval" || mirrored.has(result.actionId)) return;
+    mirrored.add(result.actionId);
+    if (mirrored.size > 512) mirrored.delete(mirrored.values().next().value!);
+    // Only action identity/kind and the existing sanitized summary are mirrored.
+    // No renderer args/environment and no second governance request or grant.
+    void bridge.emitApprovalRequest(result.actionId, result.kind, detail?.summary ?? `${result.kind} requires approval`).catch(() => {});
+  };
   return {
     ...gov,
+    observePrepared(result, detail) {
+      try { gov.observePrepared?.(result, detail); } catch { /* observation cannot block local authority */ }
+      observePrepared(result, detail);
+    },
     async request(kind, detail) {
       const result = await gov.request(kind, detail);
-      if (result.decision === "require-approval") {
-        void bridge
-          .emitApprovalRequest(result.actionId, result.kind, detail?.summary ?? `${kind} requires approval`)
-          .catch(() => {});
-      }
+      observePrepared(result, detail);
       return result;
     },
     async settle(kind, outcome, detail) {

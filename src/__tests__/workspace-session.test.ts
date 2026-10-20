@@ -1,3 +1,4 @@
+import { formatUsd } from "../i18n";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
@@ -26,7 +27,9 @@ function local(name: string) {
   return found;
 }
 const gates = ["gateAction", "gateForToken"].map(name => source.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === name)!.getText(source)).join("\n");
-const compiled = ts.transpileModule(`${gates}\nlet mode='cascade', dispatching=false, chatMotionVersion=0, workspaceDisposed=false, activeSession=null, nextDispatchRemote=false;\n${local("compareOperation")}\n${local("clearCompareOperation")}\n${local("cancelCurrentCompare")}\n${local("record")}\n${local("startNewSession")}\n${local("loadSession")}\n${local("run")}\n({ run, cancel:cancelCurrentCompare, newChat:startNewSession, load:loadSession, dispose:()=>{workspaceDisposed=true;clearCompareOperation()}, setMode:(value)=>{mode=value} });`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+const compiled = ts.transpileModule(`${gates}\nlet mode='cascade', dispatching=false, chatMotionVersion=0, workspaceDisposed=false, activeSession=null, nextDispatchRemote=false;\n${local("dispatchController")}
+${local("compareOperation")}\n${local("clearCompareOperation")}\n${local("stopDispatch")}
+${local("cancelCurrentCompare")}\n${local("record")}\n${local("startNewSession")}\n${local("loadSession")}\n${local("run")}\n({ run, cancel:cancelCurrentCompare, newChat:startNewSession, load:loadSession, stop:stopDispatch, dispose:()=>{workspaceDisposed=true;clearCompareOperation()}, setMode:(value)=>{mode=value} });`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function delayed<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -65,6 +68,7 @@ function fixture(mode = "cascade") {
     ...client, deps, cfg, sessionStore, t: deps.t,
     ta, companyInput, compareControls,
     localModelInput: { value: "synthetic-model" }, directProviderSel: { value: "synthetic-provider" }, directModelInput: { value: "synthetic-model" },
+    updateStorageNotice() {}, redactSummary: (value: string) => value,
     AbortController, hint, sendBtn, cancelBtn, scroll: element(), inspectorBody: element(), surface: "chat",
     document: { createTextNode: (text: string) => ({ textContent: text }) }, thinkingMotions: new Map(),
     el: element, scrollToEnd() {}, setChatMotion() {}, syncCrumb() {}, refreshSessionList() {}, trackMotion() {},
@@ -75,12 +79,12 @@ function fixture(mode = "cascade") {
     resolveOllamaHost: () => "http://localhost:11434", resolveOllamaModel, ollamaChat,
     isDirectProvider: () => true, resolveDirectModel: () => "synthetic-model", directChat,
     OllamaUnreachableError: class extends Error {}, DirectApiError: class extends Error {},
-  }) as { run(): Promise<void>; cancel(): void; newChat(): void; load(id: string): void; dispose(): void; setMode(mode: string): void };
+  }) as { run(): Promise<void>; cancel(): void; newChat(): void; load(id: string): void; stop(): void; dispose(): void; setMode(mode: string): void };
   ui.setMode(mode);
   const switchOwner = (boundary: "logout" | "B" | "base" | "dispose" | "same-pair") => {
     if (boundary === "dispose") { ui.dispose(); return; }
     if (boundary === "base") { cfg.apiUrl = "https://other.example.invalid/api/v1"; return; }
-    performSignOut(cfg, { persist, onSignedOut: () => { ui.dispose(); values.clear(); } }, async () => {});
+    performSignOut(cfg, { persist, onSignedOut: () => { ui.dispose(); sessionStore.clearMemory(); values.clear(); } }, async () => {});
     if (boundary === "B" || boundary === "same-pair") {
       client.invalidateSession(cfg); cfg.token = boundary === "B" ? "B-token" : "A-token"; cfg.refreshToken = boundary === "B" ? "B-refresh" : "A-refresh";
       void persist(cfg);
@@ -90,6 +94,18 @@ function fixture(mode = "cascade") {
 }
 
 describe("actual workspace operation ownership", () => {
+  it.each(["cascade", "local", "direct", "compare"])("Kill aborts %s and ignores its late result", async mode => {
+    const f = fixture(mode), response = delayed<any>();
+    const work = mode === "cascade" ? f.cascade : mode === "local" ? f.ollamaChat : mode === "direct" ? f.directChat : f.startCompare;
+    work.mockImplementation(() => response.promise);
+    const pending = f.run(); await vi.waitFor(() => expect(work).toHaveBeenCalled());
+    const args = work.mock.calls[0] as unknown[];
+    const options = args[args.length - 1] as { signal: AbortSignal };
+    expect(options.signal.aborted).toBe(false); f.stop(); expect(options.signal.aborted).toBe(true);
+    response.resolve(mode === "compare" ? { id: "late", status: "PENDING" } : { content: "late", answer: "late", model: "test" });
+    await pending; expect(f.sessionStore.list()[0]?.entries.map(entry => entry.role)).toEqual(["user"]);
+    expect(f.sendBtn.disabled).toBe(false);
+  });
   it("captures company/model/effort before confirmation and forwards the exact selection", async () => {
     const f = fixture("compare"), gate = delayed<any>();
     f.compareControls.read.mockReturnValue([{ provider: "CEREBRAS", model: "gpt-oss-120b", reasoningEffort: "high" }]);
@@ -99,7 +115,7 @@ describe("actual workspace operation ownership", () => {
     f.compareControls.read.mockReturnValue([{ provider: "OPENAI", model: "other" }]);
     gate.resolve(f.grant); await pending;
     expect(f.startCompare).toHaveBeenCalledWith(f.cfg, { companyId: "A-company", query: "A-prompt",
-      selections: [{ provider: "CEREBRAS", model: "gpt-oss-120b", reasoningEffort: "high" }] });
+      selections: [{ provider: "CEREBRAS", model: "gpt-oss-120b", reasoningEffort: "high" }] }, { signal: expect.any(AbortSignal) });
   });
   it("blocks unready explicit choices before governance, network or clearing the draft", async () => {
     const f = fixture("compare"); f.compareControls.read.mockImplementation(() => { throw Error("Load models"); });
@@ -268,13 +284,13 @@ describe("current server Compare terminal outcomes in the actual workspace", () 
     function node(_tag: string, _class?: string, text = "") {
       return { text, children: [] as any[], style: {} as Record<string, string>, append(...children: any[]) { this.children.push(...children); } };
     }
-    const render = runInNewContext(compiledRenderer, { el: node, document: { createTextNode: (text: string) => node("text", undefined, text) } });
+    const render = runInNewContext(compiledRenderer, { formatUsd, el: node, document: { createTextNode: (text: string) => node("text", undefined, text) } });
     const scroll = node("section");
     render(scroll, toCompareView({ status: "FAILED", findings: { multiModel: partial } }), (key: string) => key);
     const text = (n: ReturnType<typeof node>): string => [n.text, ...n.children.map(text)].join(" ");
     const painted = text(scroll);
     expect(painted).toContain("paid candidate fallback");
-    expect(painted).toContain("$0.0020");
+    expect(painted).toContain(formatUsd(0.002));
     expect(painted).toContain("FAILED");
     expect(painted).toContain(partial.synthesizerError);
     expect(painted).not.toContain("chat.finalAnswer");

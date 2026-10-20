@@ -43,6 +43,7 @@ describe("directChat auth-header shape per provider", () => {
     const out = await directChat("anthropic", "sk-ant-KEY", "claude-3-5-sonnet-20241022", "hello", { fetchImpl });
     expect(out).toEqual({ content: "claude says hi", model: "claude-3-5-sonnet-20241022", provider: "anthropic" });
     expect(calls[0].url).toBe("https://api.anthropic.com/v1/messages");
+    expect(calls[0].init.redirect).toBe("error");
     expect(calls[0].init.headers["x-api-key"]).toBe("sk-ant-KEY");
     expect(calls[0].init.headers.Authorization).toBeUndefined();
     expect(calls[0].init.headers["anthropic-version"]).toBe("2023-06-01");

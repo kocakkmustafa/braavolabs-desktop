@@ -62,6 +62,7 @@ import {
   type Governance,
   type ActionDetail,
   type AuditEntry,
+  redactSummary,
 } from "./governance";
 import {
   type McpBridge,
@@ -72,7 +73,7 @@ import {
   resultBorderColor,
   McpGateError,
 } from "./mcp";
-import type { Translator } from "./i18n";
+import { type Translator, LOCALES, LOCALE_NAMES, makeT, getLocale, saveLocale, formatUsd, formatNumber, formatTime } from "./i18n";
 import {
   toChangeViews,
   changeSummary,
@@ -89,6 +90,7 @@ import {
 } from "./company";
 import {
   resolveSessionStore,
+  rememberHistoryIdentity,
   groupSessions,
   type ChatSession,
   type SessionRole,
@@ -137,6 +139,7 @@ function settleAllApprovals(outcome: ApprovalOutcome): number {
 }
 
 /** Set while the companion broadcast is live so the kill switch can stop it. */
+let activeDispatchStopper: (() => void) | null = null;
 let activeRelayStopper: (() => Promise<void>) | null = null;
 
 /**
@@ -176,13 +179,16 @@ function initReducedMotion(): ReturnType<typeof resolvePrefs> {
 
 /**
  * Stop everything this UI can actually reach today — honest scope:
- * open approval requests (rejected, fail-closed) and the governed browser
- * connection (host audits the disconnect). PTY/relay sessions are not yet
- * launchable from this UI, so there is nothing of theirs to stop here; the
- * scope grows with those surfaces.
+ * approvals, local HTTP requests, managed native children, companion broadcast
+ * and governed browser connection. Remote completion and descendants remain
+ * unknown, and each independent cleanup proceeds even if another fails.
  */
-async function killEverything(): Promise<{ approvals: number; relay: "stopped" | "failed" | "inactive" }> {
+async function killEverything(gov: Governance): Promise<{ approvals: number; native: boolean; relay: "stopped" | "failed" | "inactive" }> {
   const approvals = settleAllApprovals({ approved: false });
+  // This host fence also cancels a native dialog already awaiting Allow.
+  activeDispatchStopper?.();
+  let native = true;
+  try { await gov.invalidate(); } catch { native = false; }
 
   let relay: "stopped" | "failed" | "inactive" = "inactive";
   if (activeRelayStopper) {
@@ -212,7 +218,7 @@ async function killEverything(): Promise<{ approvals: number; relay: "stopped" |
     /* no host / nothing connected */
   }
 
-  return { approvals, relay };
+  return { approvals, native, relay };
 }
 
 export interface UiDeps {
@@ -247,6 +253,38 @@ const el = <K extends keyof HTMLElementTagNameMap>(
   return n;
 };
 
+/** Keyboard containment and restoration for in-app dialogs. Native confirmation
+ * remains the separate host authority; this only improves navigation. */
+function containDialog(card: HTMLElement, dismiss: () => void): () => void {
+  const previous = document.activeElement as HTMLElement | null;
+  card.setAttribute("role", "dialog"); card.setAttribute("aria-modal", "true"); card.tabIndex = -1;
+  const onKey = (event: KeyboardEvent) => {
+    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); dismiss(); return; }
+    if (event.key !== "Tab") return;
+    const focusable = [...card.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),a[href],[tabindex="0"]')].filter(node => node.getAttribute("aria-hidden") !== "true");
+    if (!focusable.length) { event.preventDefault(); card.focus(); return; }
+    const first = focusable[0], last = focusable[focusable.length - 1];
+    if (event.shiftKey && (document.activeElement === first || document.activeElement === card)) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  };
+  card.addEventListener("keydown", onKey);
+  return () => { card.removeEventListener("keydown", onKey); if (previous?.isConnected) previous.focus(); };
+}
+
+function languageSelector(deps: UiDeps): HTMLElement {
+  const label = el("label", "locale-picker", deps.t("settings.language"));
+  const select = el("select"); select.setAttribute("aria-label", deps.t("settings.language"));
+  for (const locale of LOCALES) { const option = el("option", undefined, LOCALE_NAMES[locale]); option.value = locale; select.append(option); }
+  select.value = getLocale();
+  select.addEventListener("change", async () => {
+    const locale = LOCALES.find(value => value === select.value); if (!locale) return;
+    select.disabled = true; activeDispatchStopper?.();
+    try { await deps.gov.invalidate(); saveLocale(locale); location.reload(); }
+    catch { select.disabled = false; select.value = getLocale(); }
+  });
+  label.append(select); return label;
+}
+
 // ── login view ────────────────────────────────────────────────────────────
 export function renderLogin(deps: UiDeps): void {
   const { root, cfg, t } = deps;
@@ -260,7 +298,7 @@ export function renderLogin(deps: UiDeps): void {
   const h1 = el("h1");
   const dot = el("span", "brand-dot");
   h1.append(dot, document.createTextNode(t("login.title")));
-  const sub = el("div", "sub", t("app.tagline"));
+  const sub = el("div", "sub", t("login.localPrerequisite"));
 
   const errBox = el("div", "login-error");
   errBox.setAttribute("role", "alert");
@@ -290,7 +328,8 @@ export function renderLogin(deps: UiDeps): void {
   localizeValidation(emailInput, "login.requiredEmail");
   localizeValidation(pwInput, "login.requiredPassword");
   const apiInput = el("input");
-  apiInput.type = "text";
+  apiInput.type = "text"; apiInput.dir = "ltr";
+  emailInput.dir = "ltr";
   apiInput.value = cfg.apiUrl;
 
   const field = (labelKey: string, input: HTMLInputElement) => {
@@ -339,6 +378,7 @@ export function renderLogin(deps: UiDeps): void {
       const signedIn = captureSession(cfg);
       await deps.persist(cfg);
       if (!isCurrentSession(cfg, signedIn)) return;
+      rememberHistoryIdentity(cfg, res.data);
       // Email is identity, not a secret — localStorage (not the secure store)
       // so the account row can show who is signed in.
       try {
@@ -361,6 +401,7 @@ export function renderLogin(deps: UiDeps): void {
   card.append(
     h1,
     sub,
+    languageSelector(deps),
     errBox,
     field("login.email", emailInput),
     field("login.password", pwInput),
@@ -447,7 +488,22 @@ export function renderWorkspace(deps: UiDeps): void {
 
   // Chat sessions (design v3 TODAY / EARLIER). List + switching live here;
   // the store itself is the pure, tested module in sessions.ts.
-  const sessionStore = resolveSessionStore();
+  const sessionStore = resolveSessionStore(cfg);
+  const storageNotice = el("div", "storage-notice");
+  storageNotice.setAttribute("role", "status");
+  const exportHistory = el("button", "set-btn", t("sessions.export"));
+  exportHistory.addEventListener("click", () => {
+    const url = URL.createObjectURL(new Blob([sessionStore.export()], { type: "application/json" }));
+    const link = document.createElement("a"); link.href = url; link.download = "braavolabs-transcript.json"; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  const updateStorageNotice = () => {
+    const status = sessionStore.status();
+    storageNotice.textContent = t(status.persistence === "corrupt" ? "sessions.corrupt"
+      : status.persistence === "failed" ? "sessions.unsaved" : status.persistence === "volatile" ? "sessions.volatile" : status.truncated ? "sessions.truncated" : "sessions.limits");
+    if (status.legacy) storageNotice.append(el("span", undefined, t("sessions.legacy")));
+    storageNotice.append(exportHistory);
+  };
   let activeSession: ChatSession | null = null;
   const sessionsSec = el("div", "sessions-sec");
 
@@ -503,9 +559,9 @@ export function renderWorkspace(deps: UiDeps): void {
         "div",
         "changes-summary mono",
         t("changes.summary", {
-          files: String(sum.files),
-          added: String(sum.added),
-          removed: String(sum.removed),
+          files: sum.files,
+          added: sum.added,
+          removed: sum.removed,
         }),
       ),
     );
@@ -607,6 +663,7 @@ export function renderWorkspace(deps: UiDeps): void {
 
   const companyInput = el("input", "company-input") as HTMLInputElement;
   companyInput.placeholder = t("chat.companyId");
+  companyInput.setAttribute("aria-label", t("chat.companyId"));
   companyInput.style.display = "none"; // only for compare mode
   const compareControls = createCompareControls(cfg, t, () => companyInput.value.trim(), () => !workspaceDisposed);
   compareControls.element.style.display = "none";
@@ -660,9 +717,13 @@ export function renderWorkspace(deps: UiDeps): void {
 
   const ta = el("textarea") as HTMLTextAreaElement;
   ta.placeholder = t("chat.placeholder");
+  ta.setAttribute("aria-label", t("chat.placeholder"));
+  scroll.setAttribute("role", "log");
+  scroll.setAttribute("aria-live", "polite");
   const sendBtn = el("button", "send-btn", t("chat.send"));
   const cancelBtn = el("button", "set-btn cancel-btn", t("chat.cancel"));
   cancelBtn.style.display = "none";
+  let dispatchController: AbortController | null = null;
   let compareOperation: { controller: AbortController; cancel(): Promise<void> } | null = null;
   const clearCompareOperation = () => {
     const operation = compareOperation;
@@ -672,13 +733,21 @@ export function renderWorkspace(deps: UiDeps): void {
     hint.textContent = "";
     hint.style.display = "none";
   };
+  const stopDispatch = () => {
+    chatMotionVersion += 1;
+    dispatchController?.abort(); dispatchController = null;
+    clearCompareOperation(); dispatching = false; sendBtn.disabled = false;
+    for (const row of thinkingMotions.keys()) removeThinking(row);
+    setChatMotion("idle", t("chat.stopped"));
+  };
+  activeDispatchStopper = stopDispatch;
   const cancelCurrentCompare = () => { void compareOperation?.cancel(); };
   cancelBtn.addEventListener("click", cancelCurrentCompare);
   const enterHint = el("span", "enter-hint mono", t("chat.enterHint"));
   const bottomRow = el("div", "composer-row");
   bottomRow.append(ta, enterHint, cancelBtn, sendBtn);
 
-  composer.append(hint, topRow, compareControls.element, bottomRow);
+  composer.append(storageNotice, hint, topRow, compareControls.element, bottomRow);
   chat.append(chatPresence, scroll, composer);
 
   // --- right inspector (Inspector | Activity tabs) ---
@@ -713,6 +782,7 @@ export function renderWorkspace(deps: UiDeps): void {
   const sheetClose = el("button", "sheet-close mono", t("settings.close"));
   sheetHead.append(sheetClose);
   const sheetBody = el("div", "sheet-body");
+  sheetBody.append(languageSelector(deps));
 
   // Design-v3 settings IA: four labelled sections. Rows are thin wiring —
   // anything with behavior delegates to tested modules (vault/mcp/gov/prefs).
@@ -824,7 +894,7 @@ export function renderWorkspace(deps: UiDeps): void {
         },
         onKill: async () => {
           if (!ownsBridge()) return;
-          await killEverything();
+          await killEverything(deps.gov);
         },
       });
       const ownsBridge = () => current() && (compBridge === b || startingCompanion === b);
@@ -903,7 +973,7 @@ export function renderWorkspace(deps: UiDeps): void {
 
   // APP & DATA — a WORKING reduced-motion toggle + the honest telemetry line.
   const rmToggle = el("button", "toggle");
-  const syncRm = () => rmToggle.classList.toggle("on", prefs.reducedMotion());
+  const syncRm = () => { rmToggle.classList.toggle("on", prefs.reducedMotion()); rmToggle.setAttribute("aria-label", t("settings.reducedMotion")); rmToggle.setAttribute("aria-pressed", String(prefs.reducedMotion())); };
   syncRm();
   rmToggle.addEventListener("click", () => {
     prefs.setReducedMotion(!prefs.reducedMotion());
@@ -923,9 +993,13 @@ export function renderWorkspace(deps: UiDeps): void {
   backdrop.append(sheet);
   root.append(backdrop);
 
+  let releaseSettingsFocus: (() => void) | undefined;
+  sheet.setAttribute("aria-label", t("settings.title"));
   const setSettings = (open: boolean) => {
     settingsOpen = open;
     backdrop.style.display = open ? "flex" : "none";
+    releaseSettingsFocus?.(); releaseSettingsFocus = undefined;
+    if (open) { releaseSettingsFocus = containDialog(sheet, () => setSettings(false)); sheetClose.focus(); }
   };
   settingsBtn.addEventListener("click", () => setSettings(true));
   sheetClose.addEventListener("click", () => setSettings(false));
@@ -978,7 +1052,7 @@ export function renderWorkspace(deps: UiDeps): void {
         el(
           "div",
           "company-sub mono",
-          t("company.counts", { agents: String(c.agentCount), pipelines: String(c.pipelineCount) }),
+          t("company.counts", { agents: c.agentCount, pipelines: c.pipelineCount }),
         ),
       );
       row.append(meta);
@@ -998,7 +1072,7 @@ export function renderWorkspace(deps: UiDeps): void {
             else await resumeCompany(cfg, c.id, { save: deps.persist });
             await loadCompany();
           } catch (e) {
-            const msg = e instanceof ApiError ? `${e.status} · ${e.message}` : String(e);
+            const msg = redactSummary(e instanceof ApiError ? `${e.status} · ${e.message}` : String(e));
             renderCompany(companies, jobs, msg);
           } finally {
             companyBusy = false;
@@ -1059,7 +1133,7 @@ export function renderWorkspace(deps: UiDeps): void {
       ]);
       renderCompany(toCompanyViews(rawCompanies), toJobViews(rawJobs));
     } catch (e) {
-      const msg = e instanceof ApiError ? `${e.status} · ${e.message}` : String(e);
+      const msg = redactSummary(e instanceof ApiError ? `${e.status} · ${e.message}` : String(e));
       renderCompany([], [], t("company.loadFailed", { reason: msg }));
     }
   };
@@ -1193,7 +1267,7 @@ export function renderWorkspace(deps: UiDeps): void {
   };
 
   const startNewSession = () => {
-    chatMotionVersion += 1;
+    stopDispatch();
     clearCompareOperation();
     dispatching = false;
     sendBtn.disabled = false;
@@ -1223,6 +1297,7 @@ export function renderWorkspace(deps: UiDeps): void {
       sessionStore.append(activeSession.id, { role, mode: entryMode, text, at: Date.now() }) ?? activeSession;
     if (activeSession.title !== before) syncCrumb();
     refreshSessionList();
+    updateStorageNotice();
   };
 
   const refreshSavings = async () => {
@@ -1234,7 +1309,7 @@ export function renderWorkspace(deps: UiDeps): void {
       if (!current()) return;
       const v = toSavingsView(raw);
       if (v.hasSavings) {
-        savingsAmount.textContent = `$${v.savedUsd.toFixed(v.savedUsd < 1 ? 4 : 2)}`;
+        savingsAmount.textContent = formatUsd(v.savedUsd);
         savingsSub.textContent = t("rail.savingsWindow", { days: 30 });
       } else {
         savingsAmount.textContent = "—";
@@ -1268,6 +1343,9 @@ export function renderWorkspace(deps: UiDeps): void {
       }
     }
     const owner = captureSession(cfg);
+    dispatchController?.abort();
+    const controller = new AbortController();
+    dispatchController = controller;
     const motionVersion = ++chatMotionVersion;
     const ownsRun = () => !workspaceDisposed && isCurrentSession(cfg, owner) && motionVersion === chatMotionVersion;
     const recordRun = (role: SessionRole, text: string) => {
@@ -1335,7 +1413,7 @@ export function renderWorkspace(deps: UiDeps): void {
         const thinking = thinkingRow(t("chat.thinking", { n: 1 }));
         scroll.append(thinking);
         scrollToEnd();
-        const raw = await cascade(cfg, { prompt: text });
+        const raw = await cascade(cfg, { prompt: text }, { signal: controller.signal });
         if (!ownsRun()) return;
         removeThinking(thinking);
         const view = toCascadeView(raw);
@@ -1362,9 +1440,9 @@ export function renderWorkspace(deps: UiDeps): void {
           scroll.append(thinking);
           scrollToEnd();
           try {
-            const model = await resolveOllamaModel(host, localModelInput.value.trim() || undefined);
+            const model = await resolveOllamaModel(host, localModelInput.value.trim() || undefined, { signal: controller.signal });
             if (!ownsRun()) return;
-            const res = await ollamaChat(host, model, text);
+            const res = await ollamaChat(host, model, text, { signal: controller.signal });
             if (!ownsRun()) return;
             removeThinking(thinking);
             showAnswerMotion(res.content);
@@ -1426,7 +1504,7 @@ export function renderWorkspace(deps: UiDeps): void {
               scroll.append(thinking);
               scrollToEnd();
               try {
-                const res = await directChat(provider, apiKey, model, text);
+                const res = await directChat(provider, apiKey, model, text, { signal: controller.signal });
                 if (!ownsRun()) return;
                 removeThinking(thinking);
                 showAnswerMotion(res.content);
@@ -1449,9 +1527,8 @@ export function renderWorkspace(deps: UiDeps): void {
         if (ownsRun()) bumpActivity();
       } else {
         const stub = await startCompare(cfg, { companyId: runCompanyId, query: text,
-          ...(runSelections !== undefined ? { selections: runSelections } : {}) });
+          ...(runSelections !== undefined ? { selections: runSelections } : {}) }, { signal: controller.signal });
         if (!ownsRun()) return;
-        const controller = new AbortController();
         let finishCancellation!: (result: { status: "CANCELLED"; error: string }) => void;
         const cancelled = new Promise<{ status: "CANCELLED"; error: string }>(resolve => { finishCancellation = resolve; });
         let cancelling = false;
@@ -1531,12 +1608,12 @@ export function renderWorkspace(deps: UiDeps): void {
       if (ownsRun()) void refreshSavings();
     } catch (e) {
       if (!ownsRun()) return;
-      const msg = e instanceof ApiError ? `${e.status} · ${e.message}` : String(e);
+      const msg = redactSummary(e instanceof ApiError ? `${e.status} · ${e.message}` : String(e));
       setRunMotion("error", msg);
       recordRun("error", msg);
       const errCard = el("div", "msg-final");
       errCard.style.borderLeftColor = "var(--molten)";
-      errCard.append(el("div", "msg-label", "error"), document.createTextNode(msg));
+      errCard.append(el("div", "msg-label", t("common.error")), document.createTextNode(msg));
       scroll.append(errCard);
     } finally {
       for (const row of runThinkingRows) removeThinking(row);
@@ -1553,7 +1630,7 @@ export function renderWorkspace(deps: UiDeps): void {
   ta.addEventListener("keydown", (e) => {
     // Design v3: Enter sends, Shift+Enter inserts a newline (Cmd/Ctrl+Enter
     // kept for muscle memory from the previous build).
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       void run();
     }
@@ -1566,6 +1643,9 @@ export function renderWorkspace(deps: UiDeps): void {
   // Everything this render owns beyond the DOM: the companion bridge + the
   // governance decorator installed with it, and the window key listener.
   disposeWorkspace = () => {
+    stopDispatch();
+    if (activeDispatchStopper === stopDispatch) activeDispatchStopper = null;
+    void deps.gov.invalidate().catch(() => {});
     workspaceDisposed = true;
     clearCompareOperation();
     for (const motion of motions) motion.dispose();
@@ -1577,6 +1657,7 @@ export function renderWorkspace(deps: UiDeps): void {
   };
 
   void refreshSavings();
+  updateStorageNotice();
   refreshSessionList();
 }
 
@@ -1587,7 +1668,7 @@ function renderCascadeAnswer(scroll: HTMLElement, v: CascadeView, t: Translator)
   card.append(document.createTextNode(v.answer || t("chat.empty")));
   scroll.append(card);
   if (v.totalCostUsd > 0) {
-    scroll.append(el("div", "saved-footer", `${v.provider} · ${v.model} · $${v.totalCostUsd.toFixed(4)}`));
+    scroll.append(el("div", "saved-footer", `${v.provider} · ${v.model} · ${formatUsd(v.totalCostUsd)}`));
   }
 }
 
@@ -1604,7 +1685,7 @@ function renderCompareAnswer(scroll: HTMLElement, v: CompareView, t: Translator)
   for (const m of v.perModel) {
     const cardEl = el("div", "model-card");
     const head = el("div", "model-head");
-    head.append(el("span", "model-name", `${m.provider}/${m.model}`), el("span", "model-cost", `$${m.costUsd.toFixed(4)}`));
+    head.append(el("span", "model-name", `${m.provider}/${m.model}`), el("span", "model-cost", `${formatUsd(m.costUsd)}`));
     cardEl.append(head, el("div", "model-answer", m.answer));
     grid.append(cardEl);
   }
@@ -1654,9 +1735,10 @@ function renderPlainAnswer(scroll: HTMLElement, content: string, t: Translator):
 
 /** Molten-rimmed error card (honest failure, never a fabricated answer). */
 function renderErrorCard(scroll: HTMLElement, message: string): void {
+  const t = makeT(getLocale());
   const card = el("div", "msg-final");
   card.style.borderLeftColor = "var(--molten)";
-  card.append(el("div", "msg-label", "error"), document.createTextNode(message));
+  card.append(el("div", "msg-label", t("common.error")), document.createTextNode(message));
   scroll.append(card);
 }
 
@@ -1729,9 +1811,11 @@ async function gateForToken(
   deps: UiDeps,
   kind: string,
   detail: ActionDetail,
+  prepared?: Awaited<ReturnType<Governance["request"]>>,
 ): Promise<{ ok: true; token: string } | { ok: false; reason: string }> {
   const { gov, t } = deps;
-  const res = await gov.request(kind, detail);
+  const res = prepared ?? await gov.request(kind, detail);
+  if (prepared) { try { gov.observePrepared?.(prepared, detail); } catch { /* non-authoritative mirror */ } }
   if (res.decision === "deny") return { ok: false, reason: t("gov.denied", { reason: res.reason }) };
   let token = res.token;
   if (res.decision === "require-approval") {
@@ -1790,7 +1874,9 @@ function showApprovalModal(
     btns.append(rejectBtn, approveBtn);
     card.append(btns);
 
+    let releaseFocus: (() => void) | undefined;
     const close = (o: ApprovalOutcome) => {
+      releaseFocus?.();
       approvalMotion.dispose();
       openApprovals.delete(actionId);
       overlay.remove();
@@ -1807,15 +1893,16 @@ function showApprovalModal(
 
     overlay.append(card);
     root.append(overlay);
-    approveBtn.focus();
+    card.setAttribute("aria-label", t("gov.approveTitle"));
+    releaseFocus = containDialog(card, () => close({ approved: false }));
+    rejectBtn.focus();
   });
 }
 
 /**
  * Two-step kill switch. Step one is the molten button in Settings; THIS dialog
  * is step two — it lists exactly what will be stopped (honest scope: open
- * approvals + the governed browser connection; PTY/relay aren't launchable
- * from this UI yet) and only acts on the explicit confirm. Afterwards it
+ * approvals, local requests, managed processes and companion) and only acts on the explicit confirm. Afterwards it
  * reports what actually happened instead of claiming "everything".
  */
 function showKillDialog(deps: UiDeps): Promise<void> {
@@ -1840,7 +1927,9 @@ function showKillDialog(deps: UiDeps): Promise<void> {
     btns.append(cancelBtn, confirmBtn);
     card.append(btns);
 
+    let releaseFocus: (() => void) | undefined;
     const close = () => {
+      releaseFocus?.();
       overlay.remove();
       resolve();
     };
@@ -1850,9 +1939,11 @@ function showKillDialog(deps: UiDeps): Promise<void> {
     });
     confirmBtn.addEventListener("click", () => {
       confirmBtn.disabled = true;
-      void killEverything().then((r) => {
+      void killEverything(deps.gov).then((r) => {
         scope.replaceChildren(
-          el("div", undefined, `✓ ${t("kill.doneApprovals", { n: String(r.approvals) })}`),
+          el("div", undefined, `✓ ${t("kill.doneApprovals", { n: r.approvals })}`),
+          el("div", undefined, t(r.native ? "kill.doneNative" : "kill.failedNative")),
+          el("div", undefined, t("chat.stopped")),
           el(
             "div",
             undefined,
@@ -1870,6 +1961,8 @@ function showKillDialog(deps: UiDeps): Promise<void> {
 
     overlay.append(card);
     root.append(overlay);
+    card.setAttribute("aria-label", t("kill.title"));
+    releaseFocus = containDialog(card, close);
     cancelBtn.focus(); // default focus on the SAFE action
   });
 }
@@ -1877,11 +1970,8 @@ function showKillDialog(deps: UiDeps): Promise<void> {
 /** One audit-log row: time · kind · outcome, molten when the outcome is a block. */
 function renderAuditRow(e: AuditEntry): HTMLElement {
   const row = el("div", "audit-row");
-  const time = new Date(e.ts);
-  const hh = String(time.getHours()).padStart(2, "0");
-  const mm = String(time.getMinutes()).padStart(2, "0");
-  const ss = String(time.getSeconds()).padStart(2, "0");
-  row.append(el("span", "audit-ts mono", `${hh}:${mm}:${ss}`));
+  const localizedTime = formatTime(e.ts);
+  row.append(el("span", "audit-ts mono", localizedTime));
   row.append(el("span", "audit-kind mono", e.kind));
   const blocked = e.outcome === "denied" || e.outcome === "rejected" || e.outcome === "replay-rejected" || e.outcome === "error";
   row.append(el("span", blocked ? "audit-outcome bad" : "audit-outcome", e.outcome));
@@ -1904,7 +1994,8 @@ function renderKeysSection(deps: UiDeps): HTMLElement {
 
   const refresh = async () => {
     listEl.innerHTML = "";
-    const entries = await vault.list();
+    let entries;
+    try { entries = await vault.list(); } catch { listEl.append(el("div", "keys-empty", t("keys.failed"))); return; }
     if (!entries.length) {
       listEl.append(emptyEl);
       return;
@@ -1916,11 +2007,11 @@ function renderKeysSection(deps: UiDeps): HTMLElement {
         el("span", "key-masked mono", e.masked),
       );
       const rm = el("button", "key-remove", "×");
-      rm.title = t("keys.remove");
+      rm.title = t("keys.remove"); rm.setAttribute("aria-label", `${t("keys.remove")} · ${e.provider}`);
       rm.addEventListener("click", () => {
         void (async () => {
-          await vault.remove(e.provider);
-          await refresh();
+          try { await vault.remove(e.provider); await refresh(); }
+          catch { listEl.append(el("div", "keys-empty", t("keys.failed"))); }
         })();
       });
       row.append(rm);
@@ -1937,6 +2028,8 @@ function renderKeysSection(deps: UiDeps): HTMLElement {
   const secretInput = el("input", "key-input") as HTMLInputElement;
   secretInput.type = "password";
   secretInput.placeholder = t("keys.secret");
+  secretInput.setAttribute("aria-label", t("keys.secret"));
+  providerSel.setAttribute("aria-label", t("keys.provider"));
   secretInput.autocomplete = "off";
 
   const addBtn = el("button", "key-add-btn", t("keys.add"));
@@ -1948,7 +2041,8 @@ function renderKeysSection(deps: UiDeps): HTMLElement {
       await vault.add(providerSel.value, secret);
       secretInput.value = ""; // never linger a raw secret in the DOM
       await refresh();
-    } finally {
+    } catch { listEl.append(el("div", "keys-empty", t("keys.failed"))); } finally {
+      secretInput.value = "";
       addBtn.disabled = false;
     }
   };
@@ -2087,6 +2181,15 @@ function renderMcpSection(deps: UiDeps): HTMLElement {
   const toolsPanel = el("div", "mcp-tools");
   toolsPanel.style.display = "none";
 
+  const capabilityNote = el("div", "mcp-empty"); sec.append(capabilityNote);
+  const checkCapability = async () => {
+    try {
+      const capability = await mcp.capabilities();
+      capabilityNote.textContent = capability.launchEnabled ? "" : t(capability.reasonCode === "MCP_WINDOWS_HOLD" ? "mcp.windowsHold" : capability.reasonCode === "MCP_HOST_REQUIRED" ? "mcp.unreachable" : "mcp.capabilityUnavailable");
+      return capability.launchEnabled;
+    } catch { capabilityNote.textContent = t("mcp.capabilityUnavailable"); return false; }
+  };
+  void checkCapability();
   let selected: string | null = null;
 
   // --- tool-call form for the currently selected server ---
@@ -2109,18 +2212,21 @@ function renderMcpSection(deps: UiDeps): HTMLElement {
       // Per-tool call form: JSON args → gate → call → molten-aware result card.
       const argsTa = el("textarea", "mcp-args") as HTMLTextAreaElement;
       argsTa.placeholder = t("mcp.argsJson");
+      argsTa.setAttribute("aria-label", `${tool.name} · ${t("mcp.argsJson")}`);
+      argsTa.dir = "ltr";
       const callBtn = el("button", "mcp-call-btn", t("mcp.call"));
       callBtn.append(el("span", "laneb-gov-badge", t("gov.governedBadge")));
       const resultBox = el("div", "mcp-result");
       resultBox.style.display = "none";
 
       const doCall = async () => {
+        if (!await checkCapability()) return;
         const parsed = parseToolArgs(argsTa.value);
         resultBox.style.display = "block";
         resultBox.style.borderLeftColor = "var(--molten)";
         if (!parsed.ok) {
           resultBox.innerHTML = "";
-          resultBox.append(el("div", "msg-label", t("mcp.errorResult")), document.createTextNode(parsed.error));
+          resultBox.append(el("div", "msg-label", t("mcp.errorResult")), document.createTextNode(t("mcp.invalidArgs")));
           return;
         }
         // GATE: a tool call is a side effect — a human approves first.
@@ -2129,15 +2235,16 @@ function renderMcpSection(deps: UiDeps): HTMLElement {
           tool: tool.name,
           summary: t("gov.kindMcpTool", { tool: tool.name, server }),
         };
-        const gate = await gateForToken(deps, "mcp.tool", detail);
-        if (!gate.ok) {
-          resultBox.innerHTML = "";
-          resultBox.append(el("div", "msg-label", t("mcp.errorResult")), document.createTextNode(gate.reason));
-          return;
-        }
         callBtn.disabled = true;
         try {
-          const res = await mcp.callTool(server, tool.name, parsed.value, gate.token);
+          const prepared = await mcp.prepareCall(server, tool.name, parsed.value);
+          const gate = await gateForToken(deps, "mcp.tool", detail, prepared);
+          if (!gate.ok) {
+            resultBox.innerHTML = "";
+            resultBox.append(el("div", "msg-label", t("mcp.errorResult")), document.createTextNode(gate.reason));
+            return;
+          }
+          const res = await mcp.executeCall(gate.token);
           const view = summarizeCallResult(res);
           resultBox.innerHTML = "";
           resultBox.style.borderLeftColor = resultBorderColor(view.isError);
@@ -2147,7 +2254,7 @@ function renderMcpSection(deps: UiDeps): HTMLElement {
         } catch (e) {
           resultBox.innerHTML = "";
           resultBox.style.borderLeftColor = "var(--molten)";
-          const msg = e instanceof McpGateError ? t("gov.rejectedByUser") : String(e instanceof Error ? e.message : e);
+          const msg = e instanceof McpGateError ? t("gov.rejectedByUser") : t("mcp.actionFailed");
           resultBox.append(el("div", "msg-label", t("mcp.errorResult")), document.createTextNode(msg));
           await deps.gov.settle("mcp.tool", "error", detail);
         } finally {
@@ -2161,6 +2268,7 @@ function renderMcpSection(deps: UiDeps): HTMLElement {
   };
 
   const loadTools = async (server: string) => {
+    if (!await checkCapability()) return;
     selected = server;
     toolsPanel.innerHTML = "";
     toolsPanel.style.display = "block";
@@ -2190,7 +2298,7 @@ function renderMcpSection(deps: UiDeps): HTMLElement {
       toolsPanel.innerHTML = "";
       const err = el("div", "mcp-result");
       err.style.borderLeftColor = "var(--molten)";
-      err.append(el("div", "msg-label", t("mcp.errorResult")), document.createTextNode(String(e instanceof Error ? e.message : e)));
+      err.append(el("div", "msg-label", t("mcp.errorResult")), document.createTextNode(t("mcp.actionFailed")));
       toolsPanel.append(err);
     }
   };
@@ -2210,9 +2318,11 @@ function renderMcpSection(deps: UiDeps): HTMLElement {
       const info = el("div", "mcp-row-info");
       info.append(el("span", "mcp-name mono", name));
       info.append(el("span", "mcp-cmd mono", [def.command, ...def.args].join(" ")));
+      info.setAttribute("role", "button"); info.tabIndex = 0;
+      info.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void loadTools(name); } });
       info.addEventListener("click", () => void loadTools(name));
       const rm = el("button", "key-remove", "×");
-      rm.title = t("mcp.remove");
+      rm.title = t("mcp.remove"); rm.setAttribute("aria-label", `${t("mcp.remove")} · ${name}`);
       rm.addEventListener("click", () => {
         void (async () => {
           await mcp.removeServer(name);
@@ -2277,9 +2387,9 @@ function renderCascadeInspector(body: HTMLElement, v: CascadeView, t: Translator
     kv(t("inspector.provider"), v.provider || "—"),
     kv(t("inspector.model"), v.model || "—"),
     kv(t("inspector.tier"), v.tier || "—"),
-    kv(t("inspector.confidence"), v.confidence.toFixed(2)),
+    kv(t("inspector.confidence"), formatNumber(v.confidence, { maximumFractionDigits: 2 })),
     kv(t("inspector.escalated"), v.escalated ? "yes" : "no", v.escalated),
-    kv(t("inspector.cost"), `$${v.totalCostUsd.toFixed(4)}`),
+    kv(t("inspector.cost"), formatUsd(v.totalCostUsd)),
     kv(t("inspector.stoppedReason"), v.stoppedReason || "—"),
   );
   if (v.attempts.length) {
@@ -2287,8 +2397,8 @@ function renderCascadeInspector(body: HTMLElement, v: CascadeView, t: Translator
     for (const a of v.attempts) {
       const box = el("div", "attempt");
       const top = el("div", "a-top");
-      top.append(el("span", undefined, `${a.provider}/${a.model}`), el("span", undefined, `$${a.costUsd.toFixed(4)}`));
-      box.append(top, el("div", "a-sub", `${a.tier} · conf ${a.confidence.toFixed(2)}`));
+      top.append(el("span", undefined, `${a.provider}/${a.model}`), el("span", undefined, formatUsd(a.costUsd)));
+      box.append(top, el("div", "a-sub", `${a.tier} · ${t("inspector.confidence")} ${formatNumber(a.confidence, { maximumFractionDigits: 2 })}`));
       body.append(box);
     }
   }
@@ -2303,7 +2413,7 @@ function renderCompareInspector(body: HTMLElement, v: CompareView, t: Translator
   body.append(
     kv(t("chat.perModel"), String(v.perModel.length)),
     kv(t("chat.failed"), String(v.failed.length), v.failed.length > 0),
-    kv(t("inspector.cost"), `$${v.totalCostUsd.toFixed(4)}`),
+    kv(t("inspector.cost"), formatUsd(v.totalCostUsd)),
     kv(t("chat.synthesis"), v.status !== "COMPLETED" ? v.status : v.synthesisParsed ? "parsed" : "raw", v.status !== "COMPLETED" || !v.synthesisParsed),
   );
 }

@@ -228,11 +228,10 @@ describe("createMemoryMcpBridge — config + gated callTool", () => {
       config: { calc: { command: "mcp-calc", args: [] } },
     });
     // Drive the gate exactly as the UI does: request → approve → token.
-    const detail = { server: "calc", tool: "add" };
-    const req = await gov.request("mcp.tool", detail);
+    const req = await bridge.prepareCall("calc", "add", { a: 1, b: 2 });
     expect(req.decision).toBe("require-approval");
     const { token } = await gov.approve(req.actionId);
-    const res = await bridge.callTool("calc", "add", { a: 1, b: 2 }, token);
+    const res = await bridge.executeCall(token);
     expect(res.content[0].text).toBe("42");
     expect(server.sent.find((m) => m.method === "tools/call").params).toEqual({ name: "add", arguments: { a: 1, b: 2 } });
   });
@@ -261,10 +260,10 @@ describe("createMemoryMcpBridge — config + gated callTool", () => {
     const gov = createMemoryGovernance();
     const server = makeFakeServer({ callResult: { content: [{ type: "text", text: "ok" }] } });
     const bridge = createMemoryMcpBridge({ spawnImpl: () => server.child, gov, config: { calc: { command: "c", args: [] } } });
-    const req = await gov.request("mcp.tool", { server: "calc", tool: "add" });
+    const req = await bridge.prepareCall("calc", "add", {});
     const { token } = await gov.approve(req.actionId);
-    await bridge.callTool("calc", "add", {}, token); // spends the token
-    await expect(bridge.callTool("calc", "add", {}, token)).rejects.toBeInstanceOf(McpGateError); // replay refused
+    await bridge.executeCall(token); // spends the token
+    await expect(bridge.executeCall(token)).rejects.toBeInstanceOf(McpGateError); // replay refused
   });
 
   it("listTools on an unknown server throws (never fabricates tools)", async () => {
@@ -355,7 +354,7 @@ describe("createMemoryMcpBridge — gated listTools (discovery)", () => {
 
 // ── Tauri bridge — thin host delegation ─────────────────────────────────────────
 describe("createTauriMcpBridge — hands the token to the host to consume", () => {
-  it("callTool invokes mcp_call_tool with token+server+tool+args and maps the result", async () => {
+  it("executeCall invokes mcp_call_tool with only a token and maps the result", async () => {
     const calls: Array<{ cmd: string; args?: Record<string, unknown> }> = [];
     const invoke = vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
       calls.push({ cmd, args });
@@ -363,9 +362,9 @@ describe("createTauriMcpBridge — hands the token to the host to consume", () =
       return null;
     });
     const bridge = createTauriMcpBridge(invoke);
-    const res = await bridge.callTool("fs", "read", { path: "/x" }, "tok_1");
+    const res = await bridge.executeCall("tok_1");
     expect(res).toEqual({ content: [{ type: "text", text: "hi" }], isError: false });
-    expect(calls).toEqual([{ cmd: "mcp_call_tool", args: { token: "tok_1", server: "fs", tool: "read", args: { path: "/x" } } }]);
+    expect(calls).toEqual([{ cmd: "mcp_call_tool", args: { token: "tok_1" } }]);
   });
 
   it("listServers maps the host's entry array into an McpConfig", async () => {
@@ -387,5 +386,66 @@ describe("result view helpers", () => {
     expect(resultBorderColor(false)).toBe("var(--steel-600)");
     expect(resultBorderColor(true)).not.toMatch(/green/i);
     expect(resultBorderColor(false)).not.toMatch(/green/i);
+  });
+});
+
+
+describe("immutable MCP invocation lifecycle", () => {
+  it("executes the frozen nested arguments and launch argv despite caller mutation", async () => {
+    const gov = createMemoryGovernance(); const server = makeFakeServer();
+    const spawn = vi.fn(() => server.child);
+    const args = { target: { path: "/initial", list: [1, "two", null] } };
+    const bridge = createMemoryMcpBridge({ gov, spawnImpl: spawn, config: { fs: { command: "mcp-fs", args: ["", "Unicode-日本語"] } } });
+    const prepared = await bridge.prepareCall("fs", "read", args);
+    args.target.path = "/changed"; args.target.list.reverse();
+    const { token } = await gov.approve(prepared.actionId);
+    await bridge.executeCall(token);
+    expect(spawn).toHaveBeenCalledWith("mcp-fs", ["", "Unicode-日本語"]);
+    expect(server.sent.find(x => x.method === "tools/call").params.arguments).toEqual({ target: { path: "/initial", list: [1, "two", null] } });
+  });
+  it("registry replacement and ABA invalidate an approved invocation", async () => {
+    const gov = createMemoryGovernance(); const spawn = vi.fn(() => makeFakeServer().child);
+    const bridge = createMemoryMcpBridge({ gov, spawnImpl: spawn, config: { fs: { command: "original", args: [] } } });
+    const prepared = await bridge.prepareCall("fs", "read", {});
+    const { token } = await gov.approve(prepared.actionId);
+    await bridge.addServer("fs", "other", []); await bridge.addServer("fs", "original", []);
+    await expect(bridge.executeCall(token)).rejects.toBeInstanceOf(McpGateError);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+  it("Kill/revoke refuses both pending and already granted invocations", async () => {
+    const gov = createMemoryGovernance(); const spawn = vi.fn(() => makeFakeServer().child);
+    const bridge = createMemoryMcpBridge({ gov, spawnImpl: spawn, config: { fs: { command: "mcp-fs", args: [] } } });
+    const pending = await bridge.prepareCall("fs", "read", {});
+    await gov.invalidate(); await expect(gov.approve(pending.actionId)).rejects.toThrow();
+    const granted = await bridge.prepareCall("fs", "read", {}); const { token } = await gov.approve(granted.actionId);
+    await gov.invalidate(); await expect(bridge.executeCall(token)).rejects.toBeInstanceOf(McpGateError);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+  it("two simultaneous executions admit a token once", async () => {
+    const gov = createMemoryGovernance(); const spawn = vi.fn(() => makeFakeServer().child);
+    const bridge = createMemoryMcpBridge({ gov, spawnImpl: spawn, config: { fs: { command: "mcp-fs", args: [] } } });
+    const p = await bridge.prepareCall("fs", "read", {}); const { token } = await gov.approve(p.actionId);
+    const outcomes = await Promise.allSettled([bridge.executeCall(token), bridge.executeCall(token)]);
+    expect(outcomes.filter(x => x.status === "fulfilled")).toHaveLength(1); expect(spawn).toHaveBeenCalledTimes(1);
+  });
+  it("rejects unsupported argument values before asking for approval", async () => {
+    const gov = createMemoryGovernance(); const request = vi.spyOn(gov, "request");
+    const bridge = createMemoryMcpBridge({ gov, spawnImpl: vi.fn(), config: { fs: { command: "mcp-fs", args: [] } } });
+    for (const args of [{ bad: Number.NaN }, { bad: undefined }, { bad: 2 ** 53 }, { tooLarge: "x".repeat(4096) }]) await expect(bridge.prepareCall("fs", "read", args)).rejects.toBeInstanceOf(McpError);
+    expect(request).not.toHaveBeenCalled();
+  });
+});
+
+describe("native launch capability is a refusal boundary, not a grant", () => {
+  it("reports the Windows MCP HOLD without enabling unrelated execution", async () => {
+    const invoke = vi.fn(async (command: string) => {
+      if (command === "mcp_capabilities") return { launchEnabled: false, reasonCode: "MCP_WINDOWS_HOLD" };
+      throw Error("unexpected command");
+    });
+    expect(await createTauriMcpBridge(invoke).capabilities()).toEqual({ launchEnabled: false, reasonCode: "MCP_WINDOWS_HOLD" });
+    expect(invoke.mock.calls).toEqual([["mcp_capabilities"]]);
+  });
+  it("treats missing host capability data as launch unavailable", async () => {
+    expect((await createTauriMcpBridge(async () => ({})).capabilities()).launchEnabled).toBe(false);
   });
 });

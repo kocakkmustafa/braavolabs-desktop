@@ -18,7 +18,9 @@
  * THE MOAT APPLIES TO MCP TOO — to discovery as much as to the call. Starting
  * an MCP server (even just to ask it tools/list) is a native process launch
  * driven by a stored, mutable config entry, so BOTH listTools and callTool pass
- * the gate: request('mcp.discover'|'mcp.tool', {server, ...}) → approval → a
+ * discovery uses a definition-bound grant; tool calls use host prepare → native
+ * approval → token-only execute. The host freezes all invocation fields before
+ * approval, with a 120-second lifetime and registry/credential/revoke epochs. A
  * one-time token → the bridge consumes it EXACTLY ONCE — checked against the
  * server's CURRENT resolved command+args, not just its name — before anything
  * is spawned, so editing a server's definition between approval and use
@@ -33,7 +35,7 @@
  * seam when the server is later spawned. stderr is surfaced verbatim for debug
  * but NEVER parsed as JSON-RPC — only stdout carries the protocol.
  */
-import type { ActionDetail, Governance } from "./governance";
+import type { ActionDetail, Governance, GateResult } from "./governance";
 
 type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 
@@ -101,6 +103,21 @@ export function parseToolArgs(input: string): ParsedToolArgs {
     return { ok: false, error: "arguments must be a JSON object" };
   }
   return { ok: true, value: parsed as Record<string, unknown> };
+}
+
+function snapshotToolArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const check = (v: unknown, depth: number): boolean => {
+    if (depth > 32) return false;
+    if (v === null || typeof v === "string" || typeof v === "boolean") return true;
+    if (typeof v === "number") return Number.isFinite(v) && (!Number.isInteger(v) || Number.isSafeInteger(v));
+    if (Array.isArray(v)) return v.every(x => check(x, depth + 1));
+    if (v && typeof v === "object" && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null)) return Object.values(v).every(x => check(x, depth + 1));
+    return false;
+  };
+  if (!args || Array.isArray(args) || !check(args, 0)) throw new McpError("arguments require a bounded JSON object with safe numbers");
+  const text = JSON.stringify(args);
+  if (new TextEncoder().encode(text).length > 4096) throw new McpError("arguments exceed the native preview limit");
+  return JSON.parse(text) as Record<string, unknown>;
 }
 
 // ── errors ───────────────────────────────────────────────────────────────────
@@ -171,6 +188,10 @@ export class McpClient {
   }
 
   private onData(chunk: string): void {
+    if (this.closed) return;
+    if (this.buf.length + chunk.length > 1_048_576) {
+      this.failAll(new McpError("MCP output limit exceeded")); this.close(); return;
+    }
     this.buf += chunk;
     let idx: number;
     while ((idx = this.buf.indexOf("\n")) >= 0) {
@@ -339,7 +360,10 @@ export function resultBorderColor(isError: boolean): string {
 // ── the bridge (memory dev/test · Tauri host) ─────────────────────────────────
 
 /** The MCP surface the UI drives. Backends: memory (dev/test) or Tauri host. */
+export interface McpCapabilities { launchEnabled: boolean; reasonCode?: string; }
+
 export interface McpBridge {
+  capabilities(): Promise<McpCapabilities>;
   listServers(): Promise<McpConfig>;
   addServer(name: string, command: string, args: string[]): Promise<void>;
   removeServer(name: string): Promise<void>;
@@ -356,6 +380,11 @@ export interface McpBridge {
    * to {server, tool}; it is consumed EXACTLY once before the server is spawned.
    * An invalid/absent/replayed token throws McpGateError and NOTHING runs.
    */
+  /** Host snapshots the complete invocation before asking for native approval. */
+  prepareCall(server: string, tool: string, args: Record<string, unknown>): Promise<GateResult>;
+  /** Only a one-use approval token crosses the execution boundary. */
+  executeCall(token: string): Promise<McpCallResult>;
+  /** @deprecated Unsafe name-only grants are refused; use prepareCall/executeCall. */
   callTool(server: string, tool: string, args: Record<string, unknown>, token: string): Promise<McpCallResult>;
 }
 
@@ -368,6 +397,7 @@ export interface MemoryMcpOpts {
   config?: McpConfig;
   timeoutMs?: number;
   onStderr?: (chunk: string) => void;
+  launchEnabled?: boolean;
 }
 
 /**
@@ -377,8 +407,12 @@ export interface MemoryMcpOpts {
  * token means the server is never even spawned.
  */
 export function createMemoryMcpBridge(opts: MemoryMcpOpts): McpBridge {
-  const cfg = new Map<string, McpServerDef>(Object.entries(opts.config ?? {}));
+  const cfg = new Map<string, McpServerDef>(Object.entries(opts.config ?? {}).map(([name, d]) => [name, { command: d.command, args: [...d.args] }]));
   const withOpts: WithMcpOpts = { timeoutMs: opts.timeoutMs, onStderr: opts.onStderr };
+  let revision = 0;
+  let nextPlan = 0;
+  const plans = new Map<string, { definition: McpServerDef; tool: string; args: Record<string, unknown>; detail: ActionDetail; revision: number; expires: number }>();
+  const clock = () => globalThis.performance?.now?.() ?? Date.now();
 
   const def = (server: string): McpServerDef => {
     const d = cfg.get(server);
@@ -387,16 +421,21 @@ export function createMemoryMcpBridge(opts: MemoryMcpOpts): McpBridge {
   };
 
   return {
+    async capabilities() { return { launchEnabled: opts.launchEnabled ?? true, ...(opts.launchEnabled === false ? { reasonCode: "MCP_HOST_REQUIRED" } : {}) }; },
     async listServers() {
-      return Object.fromEntries([...cfg.entries()].sort(([a], [b]) => a.localeCompare(b)));
+      return Object.fromEntries([...cfg.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([n, d]) => [n, { command: d.command, args: [...d.args] }]));
     },
     async addServer(name, command, args) {
       const n = name.trim();
       if (!n) throw new McpError("server name is required");
       if (!command.trim()) throw new McpError("command is required");
+      revision += 1; plans.clear();
+      await opts.gov.invalidate();
       cfg.set(n, { command: command.trim(), args: [...args] });
     },
     async removeServer(name) {
+      revision += 1; plans.clear();
+      await opts.gov.invalidate();
       cfg.delete(name.trim());
     },
     async listTools(server, token) {
@@ -409,15 +448,31 @@ export function createMemoryMcpBridge(opts: MemoryMcpOpts): McpBridge {
       if (!consumed) throw new McpGateError();
       return listServerTools(d, opts.spawnImpl, withOpts);
     },
-    async callTool(server, tool, args, token) {
-      const d = def(server);
-      // GATE FIRST — spend the one-time token BEFORE spawning anything. A
-      // replayed/forged/mis-bound token → refused → the server never runs.
-      const detail: ActionDetail = { server, tool };
-      const consumed = await opts.gov.consume(token, "mcp.tool", detail);
-      if (!consumed) throw new McpGateError();
-      return callServerTool(d, tool, args, opts.spawnImpl, withOpts);
+    async prepareCall(server, tool, args) {
+      const d = { ...def(server), args: [...def(server).args] };
+      const preparedRevision = revision;
+      const expires = clock() + 120_000;
+      for (const [id, plan] of plans) if (clock() >= plan.expires) plans.delete(id);
+      if (plans.size >= 128) throw new McpGateError("too many pending invocations");
+      const canonical = snapshotToolArgs(args);
+      const planId = globalThis.crypto?.randomUUID?.() ?? `plan-${++nextPlan}-${clock()}`;
+      const detail: ActionDetail = { server, tool, path: planId, argv: [d.command, ...d.args] };
+      const request = await opts.gov.request("mcp.tool", detail);
+      if (revision !== preparedRevision) throw new McpGateError("registry changed while preparing invocation");
+      plans.set(request.actionId, { definition: { command: d.command, args: [...d.args] }, tool, args: canonical, detail, revision: preparedRevision, expires });
+      return request;
     },
+    async executeCall(token) {
+      for (const [id, plan] of plans) {
+        if (plan.revision !== revision || clock() >= plan.expires) { plans.delete(id); continue; }
+        if (!await opts.gov.consume(token, "mcp.tool", plan.detail)) continue;
+        plans.delete(id);
+        if (plan.revision !== revision || clock() >= plan.expires) throw new McpGateError("invocation invalidated");
+        return callServerTool(plan.definition, plan.tool, plan.args, opts.spawnImpl, withOpts);
+      }
+      throw new McpGateError("prepare and approve a new invocation");
+    },
+    async callTool() { throw new McpGateError("prepareCall/executeCall required"); },
   };
 }
 
@@ -440,6 +495,10 @@ interface RawCallResult {
  */
 export function createTauriMcpBridge(invoke: Invoke): McpBridge {
   return {
+    async capabilities() {
+      const raw = await invoke("mcp_capabilities") as Partial<McpCapabilities> | null;
+      return { launchEnabled: raw?.launchEnabled === true, reasonCode: typeof raw?.reasonCode === "string" ? raw.reasonCode : undefined };
+    },
     async listServers() {
       const raw = (await invoke("mcp_list_servers")) as RawServerEntry[] | null;
       const out: McpConfig = {};
@@ -461,13 +520,16 @@ export function createTauriMcpBridge(invoke: Invoke): McpBridge {
       const raw = (await invoke("mcp_list_tools", { token, server })) as McpTool[] | null;
       return Array.isArray(raw) ? raw : [];
     },
-    async callTool(server, tool, args, token) {
-      const raw = (await invoke("mcp_call_tool", { token, server, tool, args })) as RawCallResult | null;
-      return {
-        content: Array.isArray(raw?.content) ? (raw!.content as McpContentBlock[]) : [],
-        isError: Boolean(raw?.isError),
-      };
+    async prepareCall(server, tool, args) {
+      const raw = await invoke("mcp_prepare_call", { server, tool, args: snapshotToolArgs(args) }) as Partial<GateResult> | null;
+      if (!raw?.actionId) throw new McpGateError("host invocation could not be prepared");
+      return { actionId: raw.actionId, kind: "mcp.tool", decision: raw.decision ?? "deny", reason: raw.reason ?? "", token: raw.token };
     },
+    async executeCall(token) {
+      const raw = (await invoke("mcp_call_tool", { token })) as RawCallResult | null;
+      return { content: Array.isArray(raw?.content) ? raw.content : [], isError: Boolean(raw?.isError) };
+    },
+    async callTool() { throw new McpGateError("prepareCall/executeCall required"); },
   };
 }
 
@@ -482,5 +544,5 @@ export function resolveMcpBridge(gov: Governance): McpBridge {
   const spawnImpl: McpSpawn = () => {
     throw new McpError("MCP servers require the Braavolabs desktop host (run the Tauri app).");
   };
-  return createMemoryMcpBridge({ spawnImpl, gov });
+  return createMemoryMcpBridge({ spawnImpl, gov, launchEnabled: false });
 }

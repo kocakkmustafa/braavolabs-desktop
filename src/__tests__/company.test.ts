@@ -85,7 +85,7 @@ describe("relativeAge", () => {
     expect(relativeAge("2026-07-23T12:00:00.000Z", now)).toBe("2d");
   });
   it("says 'now' under a minute and empty for missing/invalid input", () => {
-    expect(relativeAge("2026-07-25T11:59:40.000Z", now)).toBe("now");
+    expect(relativeAge("2026-07-25T11:59:40.000Z", now)).toBe("0m");
     expect(relativeAge(null, now)).toBe("");
     expect(relativeAge("not a date", now)).toBe("");
   });

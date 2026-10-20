@@ -46,7 +46,7 @@ desktop/
 │   ├── mcp.ts              MCP stdio client: register servers, tools/list, gated
 │   │                       tools/call (JSON-RPC 2.0, partial-line, timeout→kill).
 │   │                       Rust-host session / memory-mirror fallback. Tested (21).
-│   ├── i18n.ts             single messages object, en + tr (i18n-ready).
+│   ├── i18n.ts             eight catalogues, explicit locale preference, Intl and RTL.
 │   ├── ui.ts               DOM shell (3-pane + keys + Lane-B + approval modal);
 │   │                       source-executing handler regression tests.
 │   ├── main.ts             entry: hydrate → login or workspace.
@@ -129,7 +129,7 @@ Braavolabs server (above); **Local** and **Direct** bypass it entirely.
 
 ### Local · Ollama (`local.ts`)
 
-Keyless, offline. Talks straight to a local Ollama daemon:
+After an initial account sign-in and model installation, Local is keyless and runs without the Braavolabs API. Sign-in itself requires a connection. It talks straight to a local Ollama daemon:
 
 | Call | Endpoint | Notes |
 |---|---|---|
@@ -266,12 +266,12 @@ The dialog runs async off the main thread (non-blocking `show()` + oneshot chann
 so it can't deadlock the event loop.
 
 The dialog body is derived from the **enforced binding fields** — the actual
-`argv` + `cwd` (for a command), `server` + `tool` (for an MCP call), `path` (for a
+`argv` + `cwd` (for a command), the complete immutable invocation (for MCP), `path` (for a
 file write) — the exact things the token binds to and the host runs. It is **never**
 the webview's free-text `summary`: a compromised webview could set `summary` to
 "Sync notes folder" while requesting `rm -rf` in `argv`, so the human must see
-what actually runs. Each field is sanitized to a single bounded line (control
-chars/newlines stripped, length-capped) so the webview can't inject fake dialog
+what actually runs. Generic fields are sanitized to a bounded line; MCP uses
+complete JSON-quoted fields and refuses a preview that cannot fit so the webview can't inject fake dialog
 chrome. The in-app arc-rim modal remains a rich preview, but the native dialog is
 the **trust anchor** — a webview can neither forge an OS click nor control what the
 dialog says. The Lane-A Direct, Lane-B launch, and Local lanes funnel through this
@@ -344,22 +344,57 @@ id-matching helpers have 7 Rust cases).
 
 ### The moat applies to MCP too
 
-A `tools/call` is a **side effect**, so it passes the same governance gate as
-every other lane (§ Governance). `tools/list` is read-only discovery and is
-**not** gated; `tools/call` is `mcp.tool` → **require-approval**:
+Both discovery and calls launch a native process and require native approval.
+The Rust host prepares a one-use, 120-second invocation: resolved executable,
+launch argv, working directory, inherited environment snapshot and JSON tool
+arguments. The complete JSON-quoted effective fields appear in the native
+preview; oversized previews are refused. The renderer executes with only the
+token. The legacy name-only tool-call IPC no longer exists.
 
-```
-request('mcp.tool', {server, tool}) → approval modal → one-time token
-        → mcp_call_tool(token, …)  →  host consumes the token  →  spawn + call
-```
+Registry edits (including A→B→A), credential changes, explicit rejection and Kill
+invalidate outstanding plans. Final validation, token consumption and OS spawn
+share one host lock. Raw arguments and environment stay out of audit/relay; an
+action ID links the redacted lifecycle records. This is an ordinary OS process,
+not a sandbox or a verified cloud account. Unix executable device/inode identity is also checked. External binary replacement between
+check and exec, interpreters, scripts and descendants remain residual risks.
+Native concurrency, dialogs and real process teardown require separate
+acceptance. Windows MCP launch is held closed in host prepare/execute until
+executable-identity and native approval acceptance; provider/chat modes remain
+available. The capability read is descriptive and cannot mint a grant; headless adapters do not establish these properties.
 
-Crucially, the token is **consumed host-side** (Rust), bound to `{server, tool}`,
-exactly like `governed_command`. The webview never spends it — so a compromised
-webview cannot run a tool without a real host-side consume, and a replayed,
-forged, or mis-bound token is refused *before the server is ever spawned* (tested:
-no-token → no-spawn; token-for-tool-A → refused for tool-B; replay-after-consume
-→ refused). Tool errors are honest and **molten**-rimmed; a success is neutral
-steel — there is no green anywhere.
+Kill aborts local HTTP work, revokes host approvals, requests managed command/MCP
+cancellation, kills managed PTYs and stops the companion locally. Independent
+cleanup continues when another part fails. Remote provider work, external
+terminals and descendants may continue; cancellation does not prove no billing.
+Direct/Local and server dispatch use a 120-second whole-response deadline; JSON
+provider/local bodies and native retained output are capped at 1 MiB. Native RPC/command waits run on
+blocking workers so the IPC dispatcher can process Kill. MCP stdin uses one
+bounded writer queue/ack with the same deadline/cancel checks; a blocked write
+does not own the reader/deadline loop. There is
+no automatic inference retry after these failures.
+
+Local transcripts retain up to 50 chats, 200 entries/chat and 4,000 characters per
+entry. The UI reports truncation, quota failure and unreadable history, and can
+export retained content. Quota failure keeps the conversation in memory without
+automatically evicting 3/4 of persisted history. A corrupt original is preserved
+for export/recovery; this is bounded convenience history, not an archive. New
+runtime history is partitioned by API base + userId/tenantId only after a
+successful login/profile reply matches the exact API/token snapshot. Decoded
+JWT labels are never an identity proof or permission to load disk history.
+Hydrated boot checks the existing authenticated /users/me route with a 5-second
+bound; offline/failed/unknown identity leaves existing bytes untouched and uses
+volatile history for new Local work. A changed token/API requires a fresh
+verified binding before another namespace can be opened. The old shared v1 record is preserved
+and never silently loaded as another account; recovering it requires owner
+verification. Ordinary scoped logout never deletes that ownerless legacy
+record. Logout reports scoped disk cleanup failure; in-memory history is cleared.
+
+The supported catalogues are `tr`, `en`, `es-419`, `pt-BR`, `de`, `fr`, `ja`, `ar`.
+A saved explicit choice takes precedence over device negotiation. Arabic sets
+RTL; code/JSON remains LTR. Numbers, USD and times use Intl. Native approval
+buttons and host field labels use the chosen locale without changing authority.
+Catalogue parity and helper tests do not replace native-speaker, keyboard,
+screen-reader or native WebView acceptance.
 
 ---
 

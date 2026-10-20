@@ -1,3 +1,5 @@
+import { rememberHistoryIdentity, forgetHistoryIdentity } from "./sessions";
+import { withinRequestBudget } from "./request-budget";
 /**
  * Braavolabs API client — the shared CLI endpoint contract with a desktop URL boundary:
  * dependency-free `fetch`, a single transparent refresh-on-401, `ApiError` on
@@ -299,7 +301,7 @@ export interface CompareParams {
 export async function startCompare(
   cfg: Config,
   p: CompareParams,
-  o: { fetchImpl?: FetchLike; save?: (c: Config) => void } = {},
+  o: { fetchImpl?: FetchLike; save?: (c: Config) => void | Promise<void>; signal?: AbortSignal } = {},
 ): Promise<{ id: string; status: string }> {
   const body: Record<string, unknown> = { companyId: p.companyId, query: p.query };
   if (p.selections !== undefined) body.selections = p.selections;
@@ -308,7 +310,20 @@ export async function startCompare(
   if (p.maxCostUsd !== undefined) body.maxCostUsd = p.maxCostUsd;
   // Explicit selections must never degrade to an automatic compare on an older server.
   const path = p.selections === undefined ? "/research/compare" : "/research/compare/selected";
-  return apiFetch(path, { method: "POST", body, cfg, fetchImpl: o.fetchImpl, save: o.save });
+  return withinRequestBudget(signal => apiFetch(path, { method: "POST", body, cfg, fetchImpl: o.fetchImpl, save: o.save, signal }), o);
+}
+
+/** Verify rehydrated transcript ownership through the existing authenticated
+ * profile route. Failure/offline leaves history volatile and does not block Local.
+ * The decoded token alone is never trusted to open a persisted namespace. */
+export async function verifyHistoryIdentity(cfg: Config, o: { fetchImpl?: FetchLike; save?: (c: Config) => void | Promise<void>; timeoutMs?: number } = {}): Promise<boolean> {
+  const owner = captureSession(cfg);
+  forgetHistoryIdentity(cfg);
+  try {
+    const profile = await withinRequestBudget(signal => apiFetch("/users/me", { cfg, signal, save: o.save, fetchImpl: o.fetchImpl }), { timeoutMs: o.timeoutMs ?? 5000 });
+    if (!isCurrentSession(cfg, owner)) return false;
+    return rememberHistoryIdentity(cfg, { user: { id: profile?.id }, tenant: { id: profile?.tenant?.id } });
+  } catch { return false; }
 }
 
 /** Company-scoped discovery; no inference or provider probe. */
@@ -415,13 +430,13 @@ export interface CascadeParams {
 export async function cascade(
   cfg: Config,
   p: CascadeParams,
-  o: { fetchImpl?: FetchLike; save?: (c: Config) => void } = {},
+  o: { fetchImpl?: FetchLike; save?: (c: Config) => void | Promise<void>; signal?: AbortSignal } = {},
 ): Promise<any> {
   const body: Record<string, unknown> = { prompt: p.prompt };
   if (p.confidenceThreshold !== undefined) body.confidenceThreshold = p.confidenceThreshold;
   if (p.secondOpinion !== undefined) body.secondOpinion = p.secondOpinion;
   if (p.budgetUsdCap !== undefined) body.budgetUsdCap = p.budgetUsdCap;
-  return apiFetch("/research/cascade", { method: "POST", body, cfg, fetchImpl: o.fetchImpl, save: o.save });
+  return withinRequestBudget(signal => apiFetch("/research/cascade", { method: "POST", body, cfg, fetchImpl: o.fetchImpl, save: o.save, signal }), o);
 }
 
 /** POST /auth/logout — best-effort server-side refresh-token revocation. Sends
