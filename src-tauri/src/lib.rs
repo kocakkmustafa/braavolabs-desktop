@@ -1376,6 +1376,7 @@ fn request_action(app: AppHandle, window: tauri::WebviewWindow, gov: State<'_, G
 #[tauri::command]
 async fn approve_action(
     app: AppHandle,
+    window: tauri::WebviewWindow,
     gov: State<'_, Governance>,
     action_id: String,
     ts: Option<u64>,
@@ -1394,7 +1395,7 @@ async fn approve_action(
     // Show the native dialog and await the human's choice off the main thread.
     // The dialog body is the ENFORCED description (argv/cwd/…), not the
     // webview's free-text summary — the human confirms what actually runs.
-    let approved = native_confirm(&app, &rec.dialog_text).await;
+    let approved = native_confirm(&app, Some(&window), &rec.dialog_text).await;
 
     let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
     let dialog_current = gate.dialogs.remove(&action_id);
@@ -1422,21 +1423,29 @@ const APPROVAL_DIALOG_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// loop stays free to render the dialog (blocking here would deadlock). Any
 /// abnormal outcome — the sender dropped, or the timeout elapsing — resolves to
 /// `false` (deny): the gate is fail-closed by construction.
-async fn native_confirm(app: &AppHandle, enforced_body: &str) -> bool {
+async fn native_confirm(app: &AppHandle, parent: Option<&tauri::WebviewWindow>, enforced_body: &str) -> bool {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
     let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
     let locale = app.try_state::<Governance>().and_then(|state| state.0.lock().ok().map(|gate| gate.ui_locale.clone())).unwrap_or_else(|| "en".into());
     let text = |key| native_presentation::message(&locale, key);
     let body = native_presentation::body(&locale, enforced_body);
-    app.dialog()
+    let mut dialog = app.dialog()
         .message(format!("{}\n\n{}\n\n{}", text("intro"), body, text("question")))
         .title(text("title"))
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::OkCancelCustom(
             text("Allow").to_string(),
             text("Deny").to_string(),
-        ))
+        ));
+    // Attach the approval to the requesting window (a native sheet on macOS).
+    // Without a parent, macOS shows a detached system alert that outlives the
+    // app and stays clickable after Kill/expiry; a late click is already
+    // fail-closed, but the stale alert misleads the user.
+    if let Some(window) = parent {
+        dialog = dialog.parent(window);
+    }
+    dialog
         .show(move |ok| {
             // Dropped receiver (timed-out caller) just means the send fails —
             // harmless; the timeout branch already denied.
