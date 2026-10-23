@@ -1413,6 +1413,30 @@ async fn approve_action(
     Ok(serde_json::json!({ "token": token }))
 }
 
+/// Close a still-open approval sheet after Kill or expiry. A late click was
+/// already fail-closed (the gate is no longer current), but a lingering
+/// Allow/Deny sheet misleads the user. Dismissing it resolves the pending
+/// `native_confirm` as deny. macOS shows the parented dialog as a sheet; other
+/// platforms keep their app-modal dialog behaviour.
+fn dismiss_approval_sheet(window: &tauri::WebviewWindow) {
+    #[cfg(target_os = "macos")]
+    {
+        let owned = window.clone();
+        let _ = window.run_on_main_thread(move || {
+            if let Ok(ptr) = owned.ns_window() {
+                // SAFETY: Tauri returns this window's live NSWindow; it is only
+                // touched here, on the main thread, for the duration of the call.
+                let ns_window: &objc2_app_kit::NSWindow = unsafe { &*ptr.cast() };
+                if let Some(sheet) = ns_window.attachedSheet() {
+                    ns_window.endSheet(&sheet);
+                }
+            }
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
+}
+
 /// How long the native approval dialog may stay open before it resolves to a
 /// fail-closed deny. Long enough for a human to read + decide, bounded so a
 /// pending action can't wedge the gate indefinitely.
@@ -1455,7 +1479,10 @@ async fn native_confirm(app: &AppHandle, parent: Option<&tauri::WebviewWindow>, 
     match tokio::time::timeout(APPROVAL_DIALOG_TIMEOUT, rx).await {
         Ok(Ok(choice)) => choice,        // human clicked
         Ok(Err(_)) => false,             // sender dropped → deny
-        Err(_) => false,                 // timed out → deny (fail-closed)
+        Err(_) => {                      // timed out → deny (fail-closed)
+            if let Some(window) = parent { dismiss_approval_sheet(window); }
+            false
+        }
     }
 }
 
@@ -1493,7 +1520,17 @@ fn set_ui_locale(gov: State<'_, Governance>, locale: String) -> Result<(), Strin
 
 #[tauri::command]
 async fn invalidate_actions(app: AppHandle, gov: State<'_, Governance>) -> Result<(), String> {
-    gov.0.lock().map_err(|_| "gate poisoned")?.invalidate_all();
+    let approval_open = {
+        let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+        let open = !gate.dialogs.is_empty();
+        gate.invalidate_all();
+        open
+    };
+    // Kill also closes an approval that is still on screen; its late answer
+    // could not run anything, but it should not stay clickable.
+    if approval_open {
+        if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) { dismiss_approval_sheet(&window); }
+    }
     tauri::async_runtime::spawn_blocking(move || {
         if let Some(state) = app.try_state::<pty::PtyHostState>() { state.kill_all(); }
     }).await.map_err(|_| "native cleanup worker did not complete")?;

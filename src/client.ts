@@ -45,7 +45,9 @@ export class AuthenticationProtocolError extends ApiError {}
 export function apiRequestUrl(apiUrl: string, path: string): string {
   let base: URL;
   try { base = new URL(apiUrl); } catch { throw new ApiError(0, "Invalid API URL"); }
-  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(base.hostname);
+  // Must match the CSP connect-src loopback sources; CSP cannot express an IPv6
+  // literal, so http://[::1] would be blocked by the webview after this check.
+  const loopback = ["localhost", "127.0.0.1"].includes(base.hostname);
   if ((base.protocol !== "https:" && !(base.protocol === "http:" && loopback)) ||
       base.username || base.password || base.search || base.hash || apiUrl.includes("\\")) {
     throw new ApiError(0, "API requires HTTPS or loopback, without credentials, query or fragment");
