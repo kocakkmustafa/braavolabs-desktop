@@ -46,6 +46,11 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native"] }
 
+# Dismiss a stale native approval sheet after Kill/expiry (macOS). Same
+# objc2-app-kit 0.3.2 that rfd/tauri already lock; only the NSWindow API is used.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWindow", "NSResponder"] }
+
 [profile.release]
 panic = "abort"
 codegen-units = 1

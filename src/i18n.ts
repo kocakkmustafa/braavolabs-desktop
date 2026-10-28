@@ -1,514 +1,85 @@
-/**
- * Minimal i18n — a SINGLE messages object (not hardcoded strings sprinkled
- * through the DOM), en + tr only for the first desktop release but structured
- * so the other four ui locales (ar/de/es/fr) slot in later without touching
- * call sites. `t("path.to.key")` resolves dotted keys; unknown keys return the
- * key itself (visible-but-safe) rather than throwing.
- */
-
-export type Locale = "en" | "tr";
-
-type Dict = Record<string, unknown>;
-
-const en: Dict = {
-  titlebar: { settings: "Settings" },
-  sessions: { today: "Today", earlier: "Earlier", untitled: "New chat" },
-  surface: {
-    chat: "Chat",
-    company: "Company",
-    code: "Code",
-    codeCrumb: "Code · vendor CLI",
-    companyCrumb: "Company · cloud",
-  },
-  changes: {
-    title: "Changed files",
-    pathPlaceholder: "/absolute/path/to/your/repo",
-    refresh: "Refresh",
-    summary: "{files} files · +{added} −{removed}",
-    clean: "Working tree clean.",
-    loading: "Reading git…",
-    needPath: "Enter the repo path your CLI session is working in.",
-    hostOnly: "Reading git needs the Braavolabs desktop host (run the Tauri app).",
-  },
-  company: {
-    summary: "{total} companies · {active} active · {jobs} jobs · {scheduled} scheduled",
-    companies: "COMPANIES",
-    jobs: "ALWAYS-ON JOBS",
-    counts: "{agents} agents · {pipelines} pipelines",
-    pause: "Pause",
-    resume: "Resume",
-    empty: "No companies yet. Companies are authored on the web; this surface reads and controls them.",
-    noJobs: "No scheduled jobs.",
-    loading: "Loading…",
-    loadFailed: "Couldn't load companies: {reason}",
-    lastRun: "last {age}",
-    nextRun: "in {age}",
-    stateScheduled: "scheduled",
-    statePaused: "paused",
-    stateUnscheduled: "no schedule registered",
-  },
-  settings: {
-    title: "Settings",
-    close: "esc",
-    secModels: "MODELS & KEYS",
-    secConnectors: "CONNECTORS & HOSTS",
-    secGovernance: "GOVERNANCE",
-    secApp: "APP & DATA",
-    vendorCli: "Vendor CLI",
-    vendorCliSub: "claude / codex — your own subscription, billed by the vendor",
-    openCode: "Open Code",
-    hosts: "Hosts",
-    hostsSub: "sandbox · PTY · browser — separate permission scopes, every session passes the gate",
-    policyTitle: "Approval policy",
-    policySub: "Per-action defaults — fail-closed, unknown kinds are denied",
-    policyAuto: "auto",
-    policyAsk: "ask",
-    policyDeny: "deny",
-    secCompanion: "COMPANION",
-    companionTitle: "Broadcast this session",
-    companionSub: "Watch, steer and answer approvals from your phone — owner-bound, redacted stream",
-    companionOff: "off",
-    companionOn: "live · session {id}…",
-    companionErr: "relay unreachable — broadcast not started",
-    companionPhone: "On your phone",
-    companionPhoneSub: "Sign in with the SAME account → Companion. No pairing step — sessions are bound to your account.",
-    killTitle: "Kill switch",
-    killSub: "Stop everything this app can reach — two-step, audited",
-    killBtn: "Kill all…",
-    reducedMotion: "Reduced motion",
-    reducedMotionSub: "Turn off every micro-animation (the OS setting always wins)",
-    telemetry: "Telemetry",
-    telemetrySub: "None — this app ships no analytics or tracking code",
-  },
-  kill: {
-    title: "Stop everything?",
-    body: "This rejects and disconnects what is listed below. It cannot be undone.",
-    scopeApprovals: "every open approval request → rejected (fail-closed)",
-    scopeRelay: "companion broadcast → stopped (session marked ended)",
-    scopeBrowser: "governed browser connection → disconnected (audited)",
-    scopeNote: "PTY / relay sessions can't be started from this app yet — nothing of theirs is running here.",
-    cancel: "Cancel",
-    confirm: "Stop everything",
-    doneApprovals: "{n} open approval(s) rejected",
-    doneRelay: "companion broadcast stopped",
-    failedRelay: "companion stopped locally — the relay may not have confirmed it",
-    closeBtn: "Close",
-    doneNoRelay: "companion broadcast was not active",
-    doneBrowser: "browser connection closed",
-    doneNoBrowser: "no live browser connection",
-  },
-  app: { name: "Braavolabs", tagline: "Multi-model chat, one workspace." },
-  login: {
-    title: "Sign in to Braavolabs",
-    email: "Email",
-    password: "Password",
-    apiUrl: "API URL",
-    submit: "Sign in",
-    signingIn: "Signing in…",
-    requiredEmail: "Enter your email address.",
-    requiredPassword: "Enter your password.",
-    invalidEmail: "Enter a valid email address.",
-    errInvalid: "Invalid email or password.",
-    errLocked: "Account temporarily locked. Try again later.",
-    errRateLimited: "Too many attempts. Try again in a few minutes.",
-    errUnavailable: "Authentication service is temporarily unavailable.",
-    errNetwork: "Cannot reach the sign-in service. Check your connection and API URL.",
-    errUnknown: "Sign in failed.",
-  },
-  rail: {
-    connection: "Connection",
-    connected: "Connected",
-    disconnected: "Signed out",
-    newChat: "New chat",
-    memory: "Memory vault",
-    savings: "Savings",
-    signOut: "Sign out",
-    noSavings: "No savings data yet.",
-    savingsWindow: "Last {days} days",
-  },
-  keys: {
-    title: "BYOK keys",
-    empty: "No keys stored. Add one to use Direct.",
-    provider: "Provider",
-    secret: "API key",
-    add: "Add",
-    remove: "Remove",
-    stored: "Stored locally, never sent to the server.",
-  },
-  laneB: {
-    title: "Lane-B · your CLIs",
-    subtitle: "Runs your own signed-in CLI. No vendor OAuth; output stays opaque.",
-    installed: "installed",
-    notInstalled: "not installed",
-    copy: "Copy launch command",
-    copied: "Copied ✓",
-    launchHint: "Run in your terminal for an interactive session:",
-    notFound: "{bin} not found",
-    useApiKey: "Use API key → Direct",
-  },
-  mcp: {
-    title: "MCP servers",
-    empty: "No MCP servers. Add one to browse & call its tools.",
-    name: "Name",
-    command: "Command",
-    args: "Args (space-separated)",
-    add: "Add server",
-    remove: "Remove",
-    tools: "Tools",
-    noTools: "No tools — click a server to load its tools.",
-    loadTools: "Load tools",
-    loading: "Loading…",
-    call: "Call tool",
-    argsJson: "Arguments (JSON)",
-    result: "Result",
-    errorResult: "Tool error",
-    empty2: "No content returned.",
-    unreachable: "MCP servers require the Braavolabs desktop host (run the Tauri app).",
-  },
-  chat: {
-    placeholder: "Ask across your models…",
-    send: "Send",
-    enterHint: "⇧⏎ newline",
-    modeCompare: "Compare",
-    modeCascade: "Cascade",
-    modeLocal: "Local",
-    modeDirect: "Direct",
-    companyId: "Company ID",
-    modelSelection: "Model selection", automaticModels: "Automatic models", selectedModels: "Select exact models",
-    loadModels: "Load available models", modelsNeeded: "Load models for this company before sending.",
-    modelsLoading: "Loading models…", modelsUnavailable: "Model options unavailable. Retry or choose automatic models.",
-    chooseModels: "Select 1–{n} models. Effort controls only the selected candidate; synthesis uses the server default.",
-    noModels: "No selectable models configured for this company.",
-    reasoningEffort: "Reasoning effort for {model}", effortDefault: "Provider default effort",
-    effortlow: "Low", effortmedium: "Medium", efforthigh: "High",
-    companyNeeded: "Compare needs an active company. Enter a Company ID or switch to Cascade.",
-    localModel: "Model (optional)",
-    directModel: "Model (optional override)",
-    localUnreachable: "Ollama not reachable — is it running on {host}?",
-    noKey: "No {provider} key stored. Add one under BYOK keys.",
-    localSource: "Local · Ollama",
-    directSource: "Direct · {provider}",
-    thinking: "{n} faces thinking…",
-    localThinking: "Local model thinking…",
-    directThinking: "{provider} thinking…",
-    polling: "Working… ({status})",
-    finalAnswer: "Final answer",
-    synthesis: "Synthesis",
-    consensus: "Consensus",
-    disagreements: "Disagreements",
-    perModel: "Per model",
-    failed: "Failed candidates",
-    unparsed: "synthesis was not strict-JSON — raw fallback",
-    empty: "No answer returned.",
-  },
-  inspector: {
-    title: "Inspector",
-    empty: "Run a query to see cost, tier & confidence.",
-    tier: "Tier",
-    model: "Model",
-    provider: "Provider",
-    confidence: "Confidence",
-    escalated: "Escalated",
-    cost: "Cost",
-    attempts: "Attempts",
-    stoppedReason: "Stopped",
-    savingsBreakdown: "Savings breakdown",
-    actual: "Actual",
-    baseline: "Baseline",
-    saved: "Saved",
-  },
-  gov: {
-    activity: "Activity",
-    inspectorTab: "Inspector",
-    auditTitle: "Activity / audit",
-    auditEmpty: "No governed actions yet.",
-    policyTitle: "Policy",
-    policyHint: "Which actions run automatically vs. ask you first. Unknown actions always ask (fail-closed).",
-    decisionAuto: "auto",
-    decisionApproval: "asks you",
-    decisionDeny: "blocked",
-    approveTitle: "Approval needed",
-    approveBody: "Braavolabs is asking before it runs this action. Nothing runs until you approve.",
-    approveAction: "Action",
-    approveReason: "Why",
-    approveBtn: "Approve & run",
-    rejectBtn: "Reject",
-    denied: "Blocked by policy: {reason}",
-    rejectedByUser: "You rejected this action.",
-    resolvedElsewhere: "Already resolved from another device (companion or kill switch).",
-    governedBadge: "governed",
-    kindSpawnLaunch: "Reveal launch command for {vendor}",
-    kindDirectDispatch: "Send your prompt to {provider} with your BYOK key",
-    kindLocalDispatch: "Run locally via Ollama",
-    kindServerDispatch: "Server {mode} dispatch ({origin}-initiated)",
-    kindMcpTool: "Call MCP tool {tool} on {server}",
-    kindMcpDiscover: "List tools on MCP server {server}",
-  },
-};
-
-const tr: Dict = {
-  titlebar: { settings: "Ayarlar" },
-  sessions: { today: "Bugün", earlier: "Daha önce", untitled: "Yeni sohbet" },
-  surface: {
-    chat: "Sohbet",
-    company: "Şirket",
-    code: "Kod",
-    codeCrumb: "Kod · vendor CLI",
-    companyCrumb: "Şirket · bulut",
-  },
-  changes: {
-    title: "Değişen dosyalar",
-    pathPlaceholder: "/repo/dizinin/tam/yolu",
-    refresh: "Yenile",
-    summary: "{files} dosya · +{added} −{removed}",
-    clean: "Çalışma ağacı temiz.",
-    loading: "git okunuyor…",
-    needPath: "CLI oturumunun çalıştığı repo yolunu gir.",
-    hostOnly: "git okuması Braavolabs masaüstü host'unu gerektirir (Tauri uygulamasını çalıştır).",
-  },
-  company: {
-    summary: "{total} şirket · {active} aktif · {jobs} iş · {scheduled} zamanlanmış",
-    companies: "ŞİRKETLER",
-    jobs: "SÜREKLİ İŞLER",
-    counts: "{agents} ajan · {pipelines} pipeline",
-    pause: "Duraklat",
-    resume: "Sürdür",
-    empty: "Henüz şirket yok. Şirketler web'de oluşturulur; bu yüzey onları okur ve yönetir.",
-    noJobs: "Zamanlanmış iş yok.",
-    loading: "Yükleniyor…",
-    loadFailed: "Şirketler yüklenemedi: {reason}",
-    lastRun: "son {age}",
-    nextRun: "{age} sonra",
-    stateScheduled: "zamanlanmış",
-    statePaused: "duraklatıldı",
-    stateUnscheduled: "zamanlayıcı kaydı yok",
-  },
-  settings: {
-    title: "Ayarlar",
-    close: "esc",
-    secModels: "MODELLER & ANAHTARLAR",
-    secConnectors: "BAĞLAYICILAR & HOST'LAR",
-    secGovernance: "YÖNETİŞİM",
-    secApp: "UYGULAMA & VERİ",
-    vendorCli: "Vendor CLI",
-    vendorCliSub: "claude / codex — kendi aboneliğin, faturası sağlayıcıda",
-    openCode: "Code'u aç",
-    hosts: "Host'lar",
-    hostsSub: "sandbox · PTY · tarayıcı — ayrı izin kapsamları, her oturum kapıdan geçer",
-    policyTitle: "Onay politikası",
-    policySub: "Eylem başına varsayılanlar — fail-closed, bilinmeyen tür reddedilir",
-    policyAuto: "oto",
-    policyAsk: "sor",
-    policyDeny: "ret",
-    secCompanion: "COMPANION",
-    companionTitle: "Bu oturumu yayınla",
-    companionSub: "Telefondan izle, yönlendir, onayla — owner-bound, redakte akış",
-    companionOff: "kapalı",
-    companionOn: "canlı · oturum {id}…",
-    companionErr: "relay'e ulaşılamadı — yayın başlamadı",
-    companionPhone: "Telefonunda",
-    companionPhoneSub: "AYNI hesapla giriş yap → Companion. Eşleme adımı yok — oturumlar hesabına bağlı.",
-    killTitle: "Kill switch",
-    killSub: "Bu uygulamanın erişebildiği her şeyi durdur — iki adım, denetimli",
-    killBtn: "Tümünü durdur…",
-    reducedMotion: "Azaltılmış hareket",
-    reducedMotionSub: "Tüm mikro-animasyonları kapat (işletim sistemi ayarı her zaman kazanır)",
-    telemetry: "Telemetri",
-    telemetrySub: "Yok — bu uygulamada analitik/izleme kodu bulunmuyor",
-  },
-  kill: {
-    title: "Her şey durdurulsun mu?",
-    body: "Aşağıda listelenenler reddedilir ve bağlantıları kesilir. Geri alınamaz.",
-    scopeApprovals: "açık her onay isteği → reddedilir (fail-closed)",
-    scopeRelay: "companion yayını → durdurulur (oturum ended işaretlenir)",
-    scopeBrowser: "governed tarayıcı bağlantısı → kesilir (denetim kaydına düşer)",
-    scopeNote: "PTY / relay oturumları henüz bu uygulamadan başlatılamıyor — burada koşan bir şeyleri yok.",
-    cancel: "Vazgeç",
-    confirm: "Her şeyi durdur",
-    doneApprovals: "{n} açık onay reddedildi",
-    doneRelay: "companion yayını durduruldu",
-    failedRelay: "companion yerelde durduruldu — relay onaylamamış olabilir",
-    closeBtn: "Kapat",
-    doneNoRelay: "companion yayını zaten kapalıydı",
-    doneBrowser: "tarayıcı bağlantısı kapatıldı",
-    doneNoBrowser: "canlı tarayıcı bağlantısı yoktu",
-  },
-  app: { name: "Braavolabs", tagline: "Çok-model sohbet, tek çalışma alanı." },
-  login: {
-    title: "Braavolabs'a giriş yap",
-    email: "E-posta",
-    password: "Parola",
-    apiUrl: "API adresi",
-    submit: "Giriş yap",
-    signingIn: "Giriş yapılıyor…",
-    requiredEmail: "E-posta adresinizi girin.",
-    requiredPassword: "Parolanızı girin.",
-    invalidEmail: "Geçerli bir e-posta adresi girin.",
-    errInvalid: "E-posta veya parola hatalı.",
-    errLocked: "Hesap geçici olarak kilitlendi. Daha sonra tekrar deneyin.",
-    errRateLimited: "Çok fazla deneme. Birkaç dakika sonra tekrar deneyin.",
-    errUnavailable: "Kimlik doğrulama servisi geçici olarak kullanılamıyor.",
-    errNetwork: "Giriş servisine ulaşılamıyor. Bağlantınızı ve API adresini kontrol edin.",
-    errUnknown: "Giriş başarısız.",
-  },
-  rail: {
-    connection: "Bağlantı",
-    connected: "Bağlı",
-    disconnected: "Çıkış yapıldı",
-    newChat: "Yeni sohbet",
-    memory: "Hafıza kasası",
-    savings: "Tasarruf",
-    signOut: "Çıkış yap",
-    noSavings: "Henüz tasarruf verisi yok.",
-    savingsWindow: "Son {days} gün",
-  },
-  keys: {
-    title: "BYOK anahtarları",
-    empty: "Kayıtlı anahtar yok. Direct için bir tane ekle.",
-    provider: "Sağlayıcı",
-    secret: "API anahtarı",
-    add: "Ekle",
-    remove: "Sil",
-    stored: "Yerelde saklanır, sunucuya asla gönderilmez.",
-  },
-  laneB: {
-    title: "Lane-B · kendi CLI'ların",
-    subtitle: "Kendi giriş yapmış CLI'ını çalıştırır. Vendor OAuth yok; çıktı opak kalır.",
-    installed: "kurulu",
-    notInstalled: "kurulu değil",
-    copy: "Başlatma komutunu kopyala",
-    copied: "Kopyalandı ✓",
-    launchHint: "İnteraktif oturum için terminalinde çalıştır:",
-    notFound: "{bin} bulunamadı",
-    useApiKey: "API anahtarı kullan → Direct",
-  },
-  mcp: {
-    title: "MCP sunucuları",
-    empty: "MCP sunucusu yok. Araçlarını görmek ve çağırmak için bir tane ekle.",
-    name: "Ad",
-    command: "Komut",
-    args: "Argümanlar (boşlukla ayrılmış)",
-    add: "Sunucu ekle",
-    remove: "Sil",
-    tools: "Araçlar",
-    noTools: "Araç yok — araçları yüklemek için bir sunucuya tıkla.",
-    loadTools: "Araçları yükle",
-    loading: "Yükleniyor…",
-    call: "Aracı çağır",
-    argsJson: "Argümanlar (JSON)",
-    result: "Sonuç",
-    errorResult: "Araç hatası",
-    empty2: "İçerik dönmedi.",
-    unreachable: "MCP sunucuları Braavolabs masaüstü host'unu gerektirir (Tauri uygulamasını çalıştır).",
-  },
-  chat: {
-    placeholder: "Modellerine sor…",
-    send: "Gönder",
-    enterHint: "⇧⏎ yeni satır",
-    modeCompare: "Karşılaştır",
-    modeCascade: "Kademeli",
-    modeLocal: "Yerel",
-    modeDirect: "Doğrudan",
-    companyId: "Şirket ID",
-    modelSelection: "Model seçimi", automaticModels: "Otomatik modeller", selectedModels: "Tam model seçimi",
-    loadModels: "Kullanılabilir modelleri yükle", modelsNeeded: "Göndermeden önce bu şirket için modelleri yükleyin.",
-    modelsLoading: "Modeller yükleniyor…", modelsUnavailable: "Model seçenekleri kullanılamıyor. Yeniden deneyin veya otomatik modelleri seçin.",
-    chooseModels: "1–{n} model seçin. Efor yalnız seçilen adayı kontrol eder; sentez sunucu varsayılanını kullanır.",
-    noModels: "Bu şirket için seçilebilir model yapılandırılmamış.",
-    reasoningEffort: "{model} için düşünme eforu", effortDefault: "Sağlayıcı varsayılan eforu",
-    effortlow: "Düşük", effortmedium: "Orta", efforthigh: "Yüksek",
-    companyNeeded: "Karşılaştırma aktif bir şirket gerektirir. Şirket ID gir ya da Kademeli'ye geç.",
-    localModel: "Model (opsiyonel)",
-    directModel: "Model (opsiyonel override)",
-    localUnreachable: "Ollama erişilemiyor — {host} üzerinde çalışıyor mu?",
-    noKey: "{provider} için kayıtlı anahtar yok. BYOK anahtarları'ndan ekle.",
-    localSource: "Yerel · Ollama",
-    directSource: "Doğrudan · {provider}",
-    thinking: "{n} yüz düşünüyor…",
-    localThinking: "Yerel model düşünüyor…",
-    directThinking: "{provider} düşünüyor…",
-    polling: "Çalışıyor… ({status})",
-    finalAnswer: "Nihai yanıt",
-    synthesis: "Sentez",
-    consensus: "Uzlaşı",
-    disagreements: "Ayrışmalar",
-    perModel: "Model başına",
-    failed: "Başarısız adaylar",
-    unparsed: "sentez strict-JSON değildi — ham geri-dönüş",
-    empty: "Yanıt dönmedi.",
-  },
-  inspector: {
-    title: "Denetçi",
-    empty: "Maliyet, kademe ve güveni görmek için bir sorgu çalıştır.",
-    tier: "Kademe",
-    model: "Model",
-    provider: "Sağlayıcı",
-    confidence: "Güven",
-    escalated: "Yükseltildi",
-    cost: "Maliyet",
-    attempts: "Denemeler",
-    stoppedReason: "Durma nedeni",
-    savingsBreakdown: "Tasarruf dökümü",
-    actual: "Gerçek",
-    baseline: "Referans",
-    saved: "Tasarruf",
-  },
-  gov: {
-    activity: "Etkinlik",
-    inspectorTab: "Denetçi",
-    auditTitle: "Etkinlik / denetim",
-    auditEmpty: "Henüz denetlenen eylem yok.",
-    policyTitle: "Politika",
-    policyHint: "Hangi eylemler otomatik çalışır, hangileri önce sana sorar. Bilinmeyen eylemler daima sorar (fail-closed).",
-    decisionAuto: "otomatik",
-    decisionApproval: "sana sorar",
-    decisionDeny: "engelli",
-    approveTitle: "Onay gerekli",
-    approveBody: "Braavolabs bu eylemi çalıştırmadan önce soruyor. Sen onaylamadan hiçbir şey çalışmaz.",
-    approveAction: "Eylem",
-    approveReason: "Neden",
-    approveBtn: "Onayla ve çalıştır",
-    rejectBtn: "Reddet",
-    denied: "Politika engelledi: {reason}",
-    rejectedByUser: "Bu eylemi reddettin.",
-    resolvedElsewhere: "Başka bir cihazdan çoktan çözüldü (companion ya da kill switch).",
-    governedBadge: "denetimli",
-    kindSpawnLaunch: "{vendor} için başlatma komutunu göster",
-    kindDirectDispatch: "Prompt'unu BYOK anahtarınla {provider} sağlayıcısına gönder",
-    kindLocalDispatch: "Ollama ile yerelde çalıştır",
-    kindServerDispatch: "Sunucu {mode} çağrısı ({origin} başlattı)",
-    kindMcpTool: "{server} üzerindeki {tool} MCP aracını çağır",
-    kindMcpDiscover: "{server} MCP sunucusundaki araçları listele",
-  },
-};
-
-const MESSAGES: Record<Locale, Dict> = { en, tr };
-
+/** Fourteen frontend catalogues. Explicit preference precedes device negotiation. */
+import en from "./locales/en.json";
+import tr from "./locales/tr.json";
+import es from "./locales/es-419.json";
+import pt from "./locales/pt-BR.json";
+import de from "./locales/de.json";
+import fr from "./locales/fr.json";
+import ja from "./locales/ja.json";
+import ar from "./locales/ar.json";
+import it from "./locales/it.json";
+import ko from "./locales/ko.json";
+import id from "./locales/id.json";
+import pl from "./locales/pl.json";
+import hi from "./locales/hi.json";
+import zhHans from "./locales/zh-Hans.json";
+import { pluralMessage } from "./i18n-plurals";
+import { EXTRA_MESSAGES, LANGUAGES } from "./i18n-extra";
+export const LOCALES = LANGUAGES;
+export type Locale = typeof LOCALES[number];
+export const LOCALE_NAMES: Record<Locale, string> = { en: "English", tr: "Türkçe", "es-419": "Español (Latinoamérica)", "pt-BR": "Português (Brasil)", de: "Deutsch", fr: "Français", ja: "日本語", ar: "العربية", it: "Italiano", ko: "한국어", id: "Bahasa Indonesia", pl: "Polski", hi: "हिन्दी", "zh-Hans": "简体中文" };
+const base: Record<Locale, Record<string, string>> = { en, tr, "es-419": es, "pt-BR": pt, de, fr, ja, ar, it, ko, id, pl, hi, "zh-Hans": zhHans };
+export const MESSAGES = Object.fromEntries(LOCALES.map(locale => [locale, { ...base[locale], ...(EXTRA_MESSAGES as Partial<typeof base>)[locale] }])) as typeof base;
+const KEY = "bv.locale";
+let activeLocale: Locale = "en";
+export function normalizeLocale(value?: string): Locale | undefined {
+  if (!value) return undefined;
+  try {
+    const canonical = Intl.getCanonicalLocales(value.replaceAll("_", "-"))[0];
+    const parsed = new Intl.Locale(canonical);
+    // Traditional-script preferences must not silently become Simplified Chinese.
+    if (parsed.language === "zh") return parsed.maximize().script === "Hans" ? "zh-Hans" : undefined;
+    return LOCALES.find(locale => locale.toLowerCase() === canonical.toLowerCase())
+      ?? ({ es: "es-419", pt: "pt-BR", tr: "tr", en: "en", de: "de", fr: "fr", ja: "ja", ar: "ar", it: "it", ko: "ko", id: "id", pl: "pl", hi: "hi" } as Record<string, Locale>)[parsed.language];
+  } catch { return undefined; }
+}
 export function detectLocale(): Locale {
   try {
-    const lang = (globalThis.navigator?.language ?? "en").slice(0, 2).toLowerCase();
-    return lang === "tr" ? "tr" : "en";
-  } catch {
-    return "en";
+    // A saved value must be one of our exact supported preferences.
+    const saved = globalThis.localStorage?.getItem(KEY);
+    if (LOCALES.includes(saved as Locale)) return saved as Locale;
+  } catch { /* storage blocked: use device preference */ }
+  try {
+    for (const value of (globalThis.navigator?.languages?.length ? globalThis.navigator.languages : [globalThis.navigator?.language])) {
+      const locale = normalizeLocale(value); if (locale) return locale;
+    }
+  } catch { /* navigator unavailable */ }
+  return "en";
+}
+export function applyLocale(locale: Locale): void {
+  activeLocale = locale;
+  if (typeof document !== "undefined") {
+    document.documentElement.lang = locale;
+    document.documentElement.dir = locale === "ar" ? "rtl" : "ltr";
   }
 }
-
-function resolve(dict: Dict, path: string): string | undefined {
-  const out = path.split(".").reduce<unknown>((acc, k) => {
-    if (acc && typeof acc === "object" && k in (acc as Dict)) return (acc as Dict)[k];
-    return undefined;
-  }, dict);
-  return typeof out === "string" ? out : undefined;
+export function saveLocale(locale: Locale): boolean {
+  if (!LOCALES.includes(locale)) throw new Error("unsupported locale");
+  try {
+    if (!globalThis.localStorage) return false;
+    globalThis.localStorage.setItem(KEY, locale);
+  } catch { return false; }
+  applyLocale(locale);
+  return true;
 }
-
-/** Translator for a locale. Interpolates {placeholders} from `vars`. */
+export function getLocale(): Locale { return activeLocale; }
+export function formatNumber(value: number | null, options: Intl.NumberFormatOptions = {}): string {
+  if (value === null || !Number.isFinite(value)) return makeT(activeLocale)("common.unknown");
+  return new Intl.NumberFormat(activeLocale, options).format(value);
+}
+export function formatUsd(value: number | null): string {
+  return formatNumber(value, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 4 });
+}
+export function formatTime(value: number): string {
+  if (!Number.isFinite(value) || !Number.isFinite(new Date(value).getTime())) return makeT(activeLocale)("common.unknown");
+  return new Intl.DateTimeFormat(activeLocale, { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(value);
+}
 export function makeT(locale: Locale) {
-  const dict = MESSAGES[locale] ?? MESSAGES.en;
+  const dict = MESSAGES[locale];
   return (key: string, vars?: Record<string, string | number>): string => {
-    const raw = resolve(dict, key) ?? resolve(MESSAGES.en, key) ?? key;
-    if (!vars) return raw;
-    return raw.replace(/\{(\w+)\}/g, (_m, name) => (name in vars ? String(vars[name]) : `{${name}}`));
+    const raw = pluralMessage(locale, key, vars) ?? dict[key] ?? MESSAGES.en[key] ?? key;
+    return !vars ? raw : raw.replace(/\{(\w+)\}/g, (_m, name) => !(name in vars) ? `{${name}}`
+      : typeof vars[name] === "number" ? Number.isFinite(vars[name]) ? new Intl.NumberFormat(locale).format(vars[name]) : dict["common.unknown"] : String(vars[name]));
   };
 }
-
 export type Translator = ReturnType<typeof makeT>;

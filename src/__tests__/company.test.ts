@@ -85,7 +85,7 @@ describe("relativeAge", () => {
     expect(relativeAge("2026-07-23T12:00:00.000Z", now)).toBe("2d");
   });
   it("says 'now' under a minute and empty for missing/invalid input", () => {
-    expect(relativeAge("2026-07-25T11:59:40.000Z", now)).toBe("now");
+    expect(relativeAge("2026-07-25T11:59:40.000Z", now)).toBe("0m");
     expect(relativeAge(null, now)).toBe("");
     expect(relativeAge("not a date", now)).toBe("");
   });
@@ -104,4 +104,12 @@ describe("companySummary", () => {
     ]);
     expect(companySummary(companies, jobs)).toEqual({ total: 3, active: 2, jobs: 2, scheduled: 1 });
   });
+});
+
+it("does not invent counts/status or replace an explicit zero with a nested nonzero", () => {
+  const [unknown, zero] = toCompanyViews([{ id: "u", agentCount: "0", pipelineCount: -1 },
+    { id: "z", agentCount: 0, pipelineCount: 0, _count: { agents: 5, pipelines: 2 } }]);
+  expect(unknown).toMatchObject({ agentCount: null, pipelineCount: null, status: "", canPause: false, canResume: false });
+  expect(zero).toMatchObject({ agentCount: 0, pipelineCount: 0 });
+  expect(toCompanyViews([{ id: "i", agentCount: Infinity, pipelineCount: 1.5 }])[0]).toMatchObject({ agentCount: null, pipelineCount: null });
 });

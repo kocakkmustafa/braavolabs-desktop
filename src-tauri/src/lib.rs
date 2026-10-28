@@ -33,8 +33,15 @@
 //! a secret.
 
 mod auth_clear;
+mod action_scope;
+mod bounded_io;
+mod native_presentation;
 
-use std::collections::{BTreeMap, HashMap};
+// Test-only, add-only synthetic fixture; production credential paths are unchanged.
+#[cfg(test)]
+mod keychain_fixture;
+
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -314,7 +321,9 @@ fn secure_store_set(
     app: AppHandle,
     token: Option<String>,
     refresh_token: Option<String>,
+    gov: State<'_, Governance>,
 ) -> Result<(), String> {
+    gov.0.lock().map_err(|_| "gate poisoned")?.invalidate_all();
     let dir = config_dir(&app)?;
     let backend = make_backend(&dir);
     if token.is_none() && refresh_token.is_none() {
@@ -336,7 +345,8 @@ fn set_or_delete(backend: &dyn SecretBackend, account: &str, value: Option<Strin
 }
 
 #[tauri::command]
-fn secure_store_clear(app: AppHandle) -> Result<(), String> {
+fn secure_store_clear(app: AppHandle, gov: State<'_, Governance>) -> Result<(), String> {
+    gov.0.lock().map_err(|_| "gate poisoned")?.invalidate_all();
     let dir = config_dir(&app)?;
     let backend = make_backend(&dir);
     auth_clear::clear_auth(&dir, [ACCT_TOKEN, ACCT_REFRESH], |account| backend.delete(account))
@@ -402,7 +412,8 @@ fn write_index(config_dir: &Path, index: &BTreeMap<String, String>) -> Result<()
 }
 
 #[tauri::command]
-fn key_add(app: AppHandle, provider: String, secret: String) -> Result<(), String> {
+fn key_add(app: AppHandle, gov: State<'_, Governance>, provider: String, secret: String) -> Result<(), String> {
+    gov.0.lock().map_err(|_| "gate poisoned")?.invalidate_all();
     let provider = provider.trim().to_string();
     if provider.is_empty() {
         return Err("provider is required".into());
@@ -434,7 +445,8 @@ fn key_list(app: AppHandle) -> Result<Vec<KeyEntry>, String> {
 }
 
 #[tauri::command]
-fn key_remove(app: AppHandle, provider: String) -> Result<(), String> {
+fn key_remove(app: AppHandle, gov: State<'_, Governance>, provider: String) -> Result<(), String> {
+    gov.0.lock().map_err(|_| "gate poisoned")?.invalidate_all();
     let provider = provider.trim().to_string();
     let dir = config_dir(&app)?;
     let backend = make_backend(&dir);
@@ -1167,14 +1179,43 @@ struct Bound {
     /// separate from `summary` precisely so a webview can't make the dialog
     /// show something other than what will run.
     dialog_text: String,
+    stamp: action_scope::Stamp,
 }
 
 /// The host-owned gate state. Behind a Mutex; the webview never sees it.
 #[derive(Default)]
 struct GateState {
+    dialogs: HashSet<String>,
     pending: HashMap<String, Bound>, // actionId → awaiting approval
     tokens: HashMap<String, Bound>,  // token → bound action (spent on consume)
     seq: u64,
+    ui_locale: String,
+    scope: action_scope::Scope,
+    mcp_plans: HashMap<String, McpInvocation>,
+    active: Vec<std::sync::Weak<std::sync::atomic::AtomicBool>>,
+}
+
+impl GateState {
+    fn register_active(&mut self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.active.retain(|entry| entry.strong_count() > 0);
+        self.active.push(std::sync::Arc::downgrade(&flag));
+        flag
+    }
+    fn invalidate_all(&mut self) {
+        for entry in self.active.drain(..) { if let Some(flag) = entry.upgrade() { flag.store(true, std::sync::atomic::Ordering::SeqCst); } }
+        self.scope.revoke();
+        self.pending.clear();
+        self.dialogs.clear();
+        self.tokens.clear();
+        self.mcp_plans.clear();
+    }
+    fn invalidate_mcp(&mut self) {
+        self.scope.registry_changed();
+        self.pending.retain(|_, r| !r.kind.starts_with("mcp."));
+        self.tokens.retain(|_, r| !r.kind.starts_with("mcp."));
+        self.mcp_plans.clear();
+    }
 }
 
 struct Governance(Mutex<GateState>);
@@ -1258,7 +1299,12 @@ fn mint_id(prefix: &str, seq: u64) -> String {
 }
 
 #[tauri::command]
-fn request_action(app: AppHandle, gov: State<'_, Governance>, kind: String, detail: Option<ActionDetail>, ts: Option<u64>) -> Result<GateResult, String> {
+fn request_action(app: AppHandle, window: tauri::WebviewWindow, gov: State<'_, Governance>, kind: String, detail: Option<ActionDetail>, ts: Option<u64>) -> Result<GateResult, String> {
+    if kind == "mcp.discover" {
+        let server = detail.as_ref().and_then(|d| d.server.clone()).ok_or("MCP server required")?;
+        return prepare_mcp_invocation(app, window, gov, server, None, None);
+    }
+    if kind == "mcp.tool" { return Err("MCP tool calls require a host-prepared invocation".into()); }
     let detail = detail.unwrap_or_default();
     let ts = ts.unwrap_or(0);
     // For pty.spawn the classifier's hard-denies live on the pty fields, so pass
@@ -1275,6 +1321,10 @@ fn request_action(app: AppHandle, gov: State<'_, Governance>, kind: String, deta
         classify(&kind, detail.argv.as_deref().unwrap_or(&[]), detail.path.as_deref())
     };
     let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+    let scope = gate.scope;
+    gate.pending.retain(|_, rec| scope.current(rec.stamp, rec.kind.starts_with("mcp.")));
+    gate.tokens.retain(|_, rec| scope.current(rec.stamp, rec.kind.starts_with("mcp.")));
+    if gate.pending.len() + gate.tokens.len() + gate.dialogs.len() >= 512 { return Err("Too many pending approvals; cancel pending actions first".into()); }
     let action_id = mint_id("act", gate.seq + 1);
     let binding = detail.binding(&kind);
     let summary = detail.summary_or(&kind);
@@ -1288,6 +1338,7 @@ fn request_action(app: AppHandle, gov: State<'_, Governance>, kind: String, deta
         dialog_text.push_str(&line);
     }
 
+    let stamp = gate.scope.stamp(APPROVAL_DIALOG_TIMEOUT);
     match decision {
         "deny" => {
             audit_append(&app, &mut gate, &kind, decision, "denied", &summary, ts);
@@ -1295,12 +1346,12 @@ fn request_action(app: AppHandle, gov: State<'_, Governance>, kind: String, deta
         }
         "auto-allow" => {
             let token = mint_id("tok", gate.seq + 1);
-            gate.tokens.insert(token.clone(), Bound { action_id: action_id.clone(), kind: kind.clone(), binding, summary: summary.clone(), dialog_text });
+            gate.tokens.insert(token.clone(), Bound { action_id: action_id.clone(), kind: kind.clone(), binding, summary: summary.clone(), dialog_text, stamp });
             audit_append(&app, &mut gate, &kind, decision, "granted", &summary, ts);
             Ok(GateResult { action_id, decision: decision.into(), reason: reason.into(), token: Some(token) })
         }
         _ => {
-            gate.pending.insert(action_id.clone(), Bound { action_id: action_id.clone(), kind: kind.clone(), binding, summary: summary.clone(), dialog_text });
+            gate.pending.insert(action_id.clone(), Bound { action_id: action_id.clone(), kind: kind.clone(), binding, summary: summary.clone(), dialog_text, stamp });
             audit_append(&app, &mut gate, &kind, decision, "pending", &summary, ts);
             Ok(GateResult { action_id, decision: "require-approval".into(), reason: reason.into(), token: None })
         }
@@ -1325,6 +1376,7 @@ fn request_action(app: AppHandle, gov: State<'_, Governance>, kind: String, deta
 #[tauri::command]
 async fn approve_action(
     app: AppHandle,
+    window: tauri::WebviewWindow,
     gov: State<'_, Governance>,
     action_id: String,
     ts: Option<u64>,
@@ -1335,18 +1387,22 @@ async fn approve_action(
     // only for this quick lookup — NOT across the (slow, human-paced) dialog.
     let rec = {
         let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
-        gate.pending
-            .remove(&action_id)
-            .ok_or("no pending action for that id")?
+        let rec = gate.pending.remove(&action_id).ok_or("no pending action for that id")?;
+        gate.dialogs.insert(action_id.clone());
+        rec
     };
 
     // Show the native dialog and await the human's choice off the main thread.
     // The dialog body is the ENFORCED description (argv/cwd/…), not the
     // webview's free-text summary — the human confirms what actually runs.
-    let approved = native_confirm(&app, &rec.dialog_text).await;
+    let approved = native_confirm(&app, Some(&window), &rec.dialog_text).await;
 
     let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
-    if !approved {
+    let dialog_current = gate.dialogs.remove(&action_id);
+    let current = dialog_current && gate.scope.current(rec.stamp, rec.kind.starts_with("mcp."))
+        && (!rec.kind.starts_with("mcp.") || gate.mcp_plans.contains_key(&rec.action_id));
+    if !approved || !current {
+        gate.mcp_plans.remove(&rec.action_id);
         // Deny / dismiss / timeout → fail-closed: no token, honest audit.
         audit_append(&app, &mut gate, &rec.kind, "require-approval", "rejected", &rec.summary, ts);
         return Ok(serde_json::json!({ "token": serde_json::Value::Null }));
@@ -1355,6 +1411,30 @@ async fn approve_action(
     gate.tokens.insert(token.clone(), rec.clone());
     audit_append(&app, &mut gate, &rec.kind, "require-approval", "approved", &rec.summary, ts);
     Ok(serde_json::json!({ "token": token }))
+}
+
+/// Close a still-open approval sheet after Kill or expiry. A late click was
+/// already fail-closed (the gate is no longer current), but a lingering
+/// Allow/Deny sheet misleads the user. Dismissing it resolves the pending
+/// `native_confirm` as deny. macOS shows the parented dialog as a sheet; other
+/// platforms keep their app-modal dialog behaviour.
+fn dismiss_approval_sheet(window: &tauri::WebviewWindow) {
+    #[cfg(target_os = "macos")]
+    {
+        let owned = window.clone();
+        let _ = window.run_on_main_thread(move || {
+            if let Ok(ptr) = owned.ns_window() {
+                // SAFETY: Tauri returns this window's live NSWindow; it is only
+                // touched here, on the main thread, for the duration of the call.
+                let ns_window: &objc2_app_kit::NSWindow = unsafe { &*ptr.cast() };
+                if let Some(sheet) = ns_window.attachedSheet() {
+                    ns_window.endSheet(&sheet);
+                }
+            }
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
 }
 
 /// How long the native approval dialog may stay open before it resolves to a
@@ -1367,20 +1447,29 @@ const APPROVAL_DIALOG_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// loop stays free to render the dialog (blocking here would deadlock). Any
 /// abnormal outcome — the sender dropped, or the timeout elapsing — resolves to
 /// `false` (deny): the gate is fail-closed by construction.
-async fn native_confirm(app: &AppHandle, enforced_body: &str) -> bool {
+async fn native_confirm(app: &AppHandle, parent: Option<&tauri::WebviewWindow>, enforced_body: &str) -> bool {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
     let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
-    app.dialog()
-        .message(format!(
-            "Braavolabs is asking to run this action:\n\n{enforced_body}\n\nAllow it to proceed?"
-        ))
-        .title("Braavolabs — approval required")
+    let locale = app.try_state::<Governance>().and_then(|state| state.0.lock().ok().map(|gate| gate.ui_locale.clone())).unwrap_or_else(|| "en".into());
+    let text = |key| native_presentation::message(&locale, key);
+    let body = native_presentation::body(&locale, enforced_body);
+    let mut dialog = app.dialog()
+        .message(format!("{}\n\n{}\n\n{}", text("intro"), body, text("question")))
+        .title(text("title"))
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::OkCancelCustom(
-            "Allow".to_string(),
-            "Deny".to_string(),
-        ))
+            text("Allow").to_string(),
+            text("Deny").to_string(),
+        ));
+    // Attach the approval to the requesting window (a native sheet on macOS).
+    // Without a parent, macOS shows a detached system alert that outlives the
+    // app and stays clickable after Kill/expiry; a late click is already
+    // fail-closed, but the stale alert misleads the user.
+    if let Some(window) = parent {
+        dialog = dialog.parent(window);
+    }
+    dialog
         .show(move |ok| {
             // Dropped receiver (timed-out caller) just means the send fails —
             // harmless; the timeout branch already denied.
@@ -1390,7 +1479,10 @@ async fn native_confirm(app: &AppHandle, enforced_body: &str) -> bool {
     match tokio::time::timeout(APPROVAL_DIALOG_TIMEOUT, rx).await {
         Ok(Ok(choice)) => choice,        // human clicked
         Ok(Err(_)) => false,             // sender dropped → deny
-        Err(_) => false,                 // timed out → deny (fail-closed)
+        Err(_) => {                      // timed out → deny (fail-closed)
+            if let Some(window) = parent { dismiss_approval_sheet(window); }
+            false
+        }
     }
 }
 
@@ -1398,6 +1490,8 @@ async fn native_confirm(app: &AppHandle, enforced_body: &str) -> bool {
 fn reject_action(app: AppHandle, gov: State<'_, Governance>, action_id: String, ts: Option<u64>) -> Result<(), String> {
     let ts = ts.unwrap_or(0);
     let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+    gate.mcp_plans.remove(&action_id);
+    gate.dialogs.remove(&action_id);
     if let Some(rec) = gate.pending.remove(&action_id) {
         audit_append(&app, &mut gate, &rec.kind, "require-approval", "rejected", &rec.summary, ts);
     }
@@ -1409,12 +1503,38 @@ fn reject_action(app: AppHandle, gov: State<'_, Governance>, action_id: String, 
 /// consume_action and the key_get gate so both enforce the exact same contract.
 fn try_consume_token(gate: &mut GateState, token: &str, kind: &str, binding: &str) -> bool {
     match gate.tokens.get(token) {
-        Some(rec) if rec.kind == kind && rec.binding == binding => {
+        Some(rec) if rec.kind == kind && rec.binding == binding && gate.scope.current(rec.stamp, rec.kind.starts_with("mcp.")) => {
             gate.tokens.remove(token); // one-time
             true
         }
         _ => false, // missing (replay/forgery) or kind/binding mismatch
     }
+}
+
+#[tauri::command]
+fn set_ui_locale(gov: State<'_, Governance>, locale: String) -> Result<(), String> {
+    if !native_presentation::LOCALES.contains(&locale.as_str()) { return Err("unsupported UI locale".into()); }
+    gov.0.lock().map_err(|_| "gate poisoned")?.ui_locale = locale;
+    Ok(())
+}
+
+#[tauri::command]
+async fn invalidate_actions(app: AppHandle, gov: State<'_, Governance>) -> Result<(), String> {
+    let approval_open = {
+        let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+        let open = !gate.dialogs.is_empty();
+        gate.invalidate_all();
+        open
+    };
+    // Kill also closes an approval that is still on screen; its late answer
+    // could not run anything, but it should not stay clickable.
+    if approval_open {
+        if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) { dismiss_approval_sheet(&window); }
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(state) = app.try_state::<pty::PtyHostState>() { state.kill_all(); }
+    }).await.map_err(|_| "native cleanup worker did not complete")?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1474,6 +1594,9 @@ struct CommandResult {
     /// stdout is returned to the caller but NEVER written to the audit log.
     stdout: String,
     stderr: String,
+    cancelled: bool,
+    output_limited: bool,
+    output_incomplete: bool,
 }
 
 /// THE COMMAND CHOKE POINT. The single path through which a command may ever run.
@@ -1486,7 +1609,17 @@ struct CommandResult {
 /// secrets, and can't reach the network. Fail-closed: if the sandbox can't be
 /// built or its launcher is missing, the command is refused, never run bare.
 #[tauri::command]
-fn governed_command(
+async fn governed_command(
+    app: AppHandle, token: String, argv: Vec<String>, cwd: String,
+    clean_env: Option<bool>, timeout_ms: Option<u64>, ts: Option<u64>,
+) -> Result<CommandResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let gov = app.state::<Governance>();
+        governed_command_blocking(app.clone(), gov, token, argv, cwd, clean_env, timeout_ms, ts)
+    }).await.map_err(|_| "command worker did not complete")?
+}
+
+fn governed_command_blocking(
     app: AppHandle,
     gov: State<'_, Governance>,
     token: String,
@@ -1499,23 +1632,7 @@ fn governed_command(
     use std::process::{Command, Stdio};
     let ts = ts.unwrap_or(0);
 
-    // 1. Spend the token — a command CANNOT run without passing the gate. The
-    //    map removal IS the gate; the "consumed" ledger line is deferred to step
-    //    4 so it can record the sandbox isolation the command actually ran under.
     let detail = ActionDetail { argv: Some(argv.clone()), cwd: Some(cwd.clone()), ..Default::default() };
-    {
-        let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
-        let ok = match gate.tokens.get(&token).cloned() {
-            Some(rec) if rec.kind == "command.run" && rec.binding == detail.binding("command.run") => true,
-            _ => false,
-        };
-        if !ok {
-            audit_append(&app, &mut gate, "command.run", "-", "replay-rejected", "command.run", ts);
-            return Err("invalid or already-spent token".into());
-        }
-        gate.tokens.remove(&token);
-    }
-
     // 2. Re-validate at the choke point (defense-in-depth, independent of policy).
     if argv.is_empty() {
         return Err("empty argv".into());
@@ -1556,13 +1673,6 @@ fn governed_command(
         }
     };
 
-    // 4. Audit the consumption now that the sandbox summary is known.
-    {
-        let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
-        let line = format!("{} | {}", redact(&argv.join(" ")), sandbox_summary);
-        audit_append(&app, &mut gate, "command.run", "-", "consumed", &line, ts);
-    }
-
     // 5. Build the child from the WRAPPED argv (sandbox launcher + policy + `--` +
     //    the original argv) — still an argv ARRAY, never a shell string. The child
     //    runs in `cwd`.
@@ -1601,32 +1711,35 @@ fn governed_command(
         }
     }
 
-    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
-
-    // 4. Timeout: poll try_wait to a deadline, then kill.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000));
-    let mut timed_out = false;
-    loop {
-        match child.try_wait().map_err(|e| e.to_string())? {
-            Some(_) => break,
-            None => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    timed_out = true;
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
+    let (mut child, cancel) = {
+        let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+        if !try_consume_token(&mut gate, &token, "command.run", &detail.binding("command.run")) {
+            return Err("invalid or already-spent token".into());
         }
-    }
-    let output = child.wait_with_output().map_err(|e| e.to_string())?;
-    let result = CommandResult {
-        code: output.status.code(),
-        timed_out,
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        let child = cmd.spawn().map_err(|_| "command could not be started")?;
+        let cancel = gate.register_active();
+        audit_append(&app, &mut gate, "command.run", "-", "consumed", &format!("command.run | {sandbox_summary}"), ts);
+        (child, cancel)
     };
+    // Drain both pipes immediately, with bounded retention. Never wait for a
+    // child to exit before draining (a full OS pipe would deadlock that wait).
+    let stdout = bounded_io::drain(child.stdout.take().ok_or("no stdout")?, cancel.clone());
+    let stderr = bounded_io::drain(child.stderr.take().ok_or("no stderr")?, cancel.clone());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000).clamp(1, 120_000));
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|_| "command wait failed")? { break status; }
+        timed_out = std::time::Instant::now() >= deadline;
+        if timed_out || cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = child.kill();
+            break child.wait().map_err(|_| "command reap failed")?;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let (out, stdout_incomplete) = stdout.finish(); let (err, stderr_incomplete) = stderr.finish();
+    let output_limited = out.len() >= bounded_io::OUTPUT_LIMIT || err.len() >= bounded_io::OUTPUT_LIMIT;
+    let result = CommandResult { code: status.code(), timed_out, stdout: out, stderr: err,
+        cancelled: cancel.load(std::sync::atomic::Ordering::SeqCst), output_limited, output_incomplete: stdout_incomplete || stderr_incomplete };
     {
         let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
         let outcome = if timed_out || result.code != Some(0) { "error" } else { "success" };
@@ -1803,13 +1916,15 @@ fn pty_spawn(
         ..Default::default()
     };
     let binding = detail.binding("pty.spawn");
-    {
+    let launch_stamp = {
         let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+        let stamp = gate.tokens.get(&token).map(|rec| rec.stamp).ok_or("invalid or already-spent token")?;
         if !try_consume_token(&mut gate, &token, "pty.spawn", &binding) {
             audit_append(&app, &mut gate, "pty.spawn", "-", "replay-rejected", "pty.spawn", ts);
             return Err("invalid or already-spent token".into());
         }
-    }
+        stamp
+    };
 
     // (c) Resolve the vendor binary — a KNOWN vendor (asserted above), found on
     //     PATH or a neutral prefix (never a token/config dir). "Not installed" is
@@ -1888,23 +2003,16 @@ fn pty_spawn(
     ];
 
     // (f) Open the PTY (default 80×24) and spawn the sandbox-wrapped vendor argv.
-    let bundle = match pty::open_pty_child(&wrapped, &cwd_path, &env, 80, 24) {
-        Ok(b) => b,
-        Err(e) => {
-            audit_pty("error", "pty: pty open failed");
-            return Err(e);
-        }
+    let (session_id, reader) = {
+        let gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+        if !gate.scope.current(launch_stamp, false) { return Err("PTY approval expired or was invalidated before launch".into()); }
+        let bundle = pty::open_pty_child(&wrapped, &cwd_path, &env, 80, 24)?;
+        let pty::PtyChild { child, master, writer, reader } = bundle;
+        let session_id = mint_id("pty", now_ms());
+        let session = pty::Session::new(child, master, writer, vendor.clone(), cwd.clone());
+        state.register(session_id.clone(), session)?;
+        (session_id, reader)
     };
-    let pty::PtyChild { child, master, writer, reader } = bundle;
-
-    let session_id = mint_id("pty", now_ms());
-    let session = pty::Session::new(child, master, writer, vendor.clone(), cwd.clone());
-    // register defensively re-checks the cap (and tears the child down on refusal
-    // so a lost race can't leak a live process) — before the reader thread starts.
-    if let Err(e) = state.register(session_id.clone(), session) {
-        audit_pty("error", &format!("pty: register refused ({e})"));
-        return Err(e);
-    }
 
     // Background reader: base64 chunks → pty://output, EOF → pty://exit + settle.
     spawn_pty_reader(app.clone(), session_id.clone(), reader);
@@ -2419,7 +2527,7 @@ const MCP_TIMEOUT_MS: u64 = 10_000;
 
 /// A registered MCP server: launch command + discrete argument ARRAY (never a
 /// joined string — so there is no shell and no injection seam at spawn time).
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 struct McpServerDef {
     command: String,
     #[serde(default)]
@@ -2445,14 +2553,35 @@ fn read_mcp(app: &AppHandle) -> Result<BTreeMap<String, McpServerDef>, String> {
     let path = mcp_path(app)?;
     match fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
-        Err(_) => Ok(BTreeMap::new()), // no file yet ⇒ empty registry
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(_) => Err("MCP registry could not be read".into()),
     }
 }
 
 fn write_mcp(app: &AppHandle, map: &BTreeMap<String, McpServerDef>) -> Result<(), String> {
     let path = mcp_path(app)?;
-    let data = serde_json::to_vec_pretty(map).map_err(|e| e.to_string())?;
-    write_private(&path, &data)
+    let dir = path.parent().ok_or("MCP registry directory unavailable")?;
+    fs::create_dir_all(dir).map_err(|_| "MCP registry directory unavailable")?;
+    let temporary = dir.join(format!(".mcp-{}-{}.tmp", std::process::id(), now_ms()));
+    let mut options = fs::OpenOptions::new(); options.write(true).create_new(true);
+    #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+    let outcome = (|| -> Result<(), String> {
+        let mut file = options.open(&temporary).map_err(|_| "MCP registry temporary write failed")?;
+        let bytes = serde_json::to_vec_pretty(map).map_err(|_| "MCP registry encoding failed")?;
+        file.write_all(&bytes).map_err(|_| "MCP registry write failed")?;
+        file.sync_all().map_err(|_| "MCP registry sync failed")?;
+        fs::rename(&temporary, &path).map_err(|_| "MCP registry replacement failed; previous configuration preserved")?;
+        #[cfg(unix)] { let _ = fs::File::open(dir).and_then(|f| f.sync_all()); }
+        Ok(())
+    })();
+    if outcome.is_err() { let _ = fs::remove_file(&temporary); }
+    outcome
+}
+
+#[tauri::command]
+fn mcp_capabilities() -> serde_json::Value {
+    serde_json::json!({ "launchEnabled": !cfg!(windows),
+        "reasonCode": if cfg!(windows) { Some("MCP_WINDOWS_HOLD") } else { None } })
 }
 
 #[tauri::command]
@@ -2465,7 +2594,7 @@ fn mcp_list_servers(app: AppHandle) -> Result<Vec<McpServerEntry>, String> {
 }
 
 #[tauri::command]
-fn mcp_add_server(app: AppHandle, name: String, command: String, args: Option<Vec<String>>) -> Result<(), String> {
+fn mcp_add_server(app: AppHandle, gov: State<'_, Governance>, name: String, command: String, args: Option<Vec<String>>) -> Result<(), String> {
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("name is required".into());
@@ -2473,13 +2602,17 @@ fn mcp_add_server(app: AppHandle, name: String, command: String, args: Option<Ve
     if command.trim().is_empty() {
         return Err("command is required".into());
     }
+    let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+    gate.invalidate_mcp();
     let mut map = read_mcp(&app)?;
     map.insert(name, McpServerDef { command: command.trim().to_string(), args: args.unwrap_or_default() });
     write_mcp(&app, &map)
 }
 
 #[tauri::command]
-fn mcp_remove_server(app: AppHandle, name: String) -> Result<(), String> {
+fn mcp_remove_server(app: AppHandle, gov: State<'_, Governance>, name: String) -> Result<(), String> {
+    let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+    gate.invalidate_mcp();
     let mut map = read_mcp(&app)?;
     map.remove(name.trim());
     write_mcp(&app, &map)
@@ -2494,9 +2627,11 @@ fn mcp_remove_server(app: AppHandle, name: String) -> Result<(), String> {
 #[derive(Default)]
 struct LineBuffer {
     buf: Vec<u8>,
+    overflow: bool,
 }
 impl LineBuffer {
     fn push(&mut self, chunk: &[u8]) -> Vec<String> {
+        if self.buf.len() + chunk.len() > bounded_io::OUTPUT_LIMIT { self.overflow = true; return vec![]; }
         self.buf.extend_from_slice(chunk);
         let mut out = vec![];
         while let Some(idx) = self.buf.iter().position(|&b| b == b'\n') {
@@ -2527,9 +2662,9 @@ fn parse_rpc_response(line: &str, id: u64) -> Option<Result<serde_json::Value, S
     Some(Ok(msg.get("result").cloned().unwrap_or(serde_json::Value::Null)))
 }
 
-fn send_line(stdin: &mut impl std::io::Write, msg: &serde_json::Value) -> Result<(), String> {
-    let line = format!("{}\n", serde_json::to_string(msg).map_err(|e| e.to_string())?);
-    stdin.write_all(line.as_bytes()).map_err(|e| e.to_string())
+fn send_line(writer: &bounded_io::Writer, msg: &serde_json::Value, deadline: std::time::Instant, cancel: &std::sync::atomic::AtomicBool) -> Result<(), String> {
+    let line = format!("{}\n", serde_json::to_string(msg).map_err(|_| "MCP request could not be encoded")?);
+    writer.send(line.into_bytes(), deadline, cancel)
 }
 
 /// Block until a response for `id` arrives on `rx` or the deadline passes.
@@ -2538,21 +2673,23 @@ fn await_response(
     rx: &std::sync::mpsc::Receiver<String>,
     id: u64,
     deadline: std::time::Instant,
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<serde_json::Value, String> {
     use std::sync::mpsc::RecvTimeoutError;
     loop {
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) { return Err("MCP cancelled or output limit exceeded".into()); }
         let now = std::time::Instant::now();
         if now >= deadline {
             return Err(format!("MCP request timed out (id {id})"));
         }
-        match rx.recv_timeout(deadline - now) {
+        match rx.recv_timeout((deadline - now).min(std::time::Duration::from_millis(25))) {
             Ok(line) => {
                 if let Some(res) = parse_rpc_response(&line, id) {
                     return res;
                 }
                 // not our id / a notification — keep reading until deadline
             }
-            Err(RecvTimeoutError::Timeout) => return Err(format!("MCP request timed out (id {id})")),
+            Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => return Err("MCP server closed the stream".into()),
         }
     }
@@ -2562,53 +2699,33 @@ fn await_response(
 /// return the method's result. ALWAYS kills + reaps the child before returning
 /// (timeout or not) — a wedged server never becomes a zombie. stderr is drained
 /// on a thread and discarded; only stdout is parsed as JSON-RPC.
-fn run_mcp_session(
-    def: &McpServerDef,
-    method: &str,
-    params: serde_json::Value,
-    timeout_ms: u64,
-) -> Result<serde_json::Value, String> {
+fn run_mcp_child(mut child: std::process::Child, method: &str, params: serde_json::Value, timeout_ms: u64, cancel: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<serde_json::Value, String> {
     use std::io::{BufReader, Read};
-    use std::process::{Command, Stdio};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
-
-    let mut child = Command::new(&def.command)
-        .args(&def.args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("failed to spawn MCP server: {e}"))?;
-
-    let mut stdin = child.stdin.take().ok_or("no stdin on MCP child")?;
+    let stdin = child.stdin.take().ok_or("no stdin on MCP child")?;
+    let writer = bounded_io::Writer::new(stdin);
     let stdout = child.stdout.take().ok_or("no stdout on MCP child")?;
     let stderr = child.stderr.take().ok_or("no stderr on MCP child")?;
 
-    // stderr is OPAQUE — drain and DISCARD it, never parse it as JSON-RPC.
-    let stderr_handle = std::thread::spawn(move || {
-        let mut r = BufReader::new(stderr);
-        let mut sink = Vec::new();
-        let _ = r.read_to_end(&mut sink);
-    });
-
-    // Reader thread: byte chunks → LineBuffer → complete lines over a channel.
-    let (tx, rx) = mpsc::channel::<String>();
-    let reader_handle = std::thread::spawn(move || {
-        let mut r = BufReader::new(stdout);
-        let mut lb = LineBuffer::default();
-        let mut buf = [0u8; 4096];
+    // Opaque stderr is drained without allocating an unbounded Vec.
+    let _stderr = bounded_io::drain(stderr, cancel.clone());
+    let (tx, rx) = mpsc::sync_channel::<String>(64);
+    let reader_cancel = cancel.clone();
+    std::thread::spawn(move || {
+        let mut r = BufReader::new(stdout); let mut lb = LineBuffer::default();
+        let mut buf = [0u8; 4096]; let mut total = 0usize;
         loop {
             match r.read(&mut buf) {
-                Ok(0) => break,
+                Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    total += n;
+                    if total > bounded_io::OUTPUT_LIMIT { reader_cancel.store(true, std::sync::atomic::Ordering::SeqCst); break; }
                     for line in lb.push(&buf[..n]) {
-                        if tx.send(line).is_err() {
-                            return;
-                        }
+                        if tx.try_send(line).is_err() { reader_cancel.store(true, std::sync::atomic::Ordering::SeqCst); return; }
                     }
+                    if lb.overflow { reader_cancel.store(true, std::sync::atomic::Ordering::SeqCst); break; }
                 }
-                Err(_) => break,
             }
         }
     });
@@ -2617,30 +2734,31 @@ fn run_mcp_session(
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         // 1. initialize (id 1)
         send_line(
-            &mut stdin,
+            &writer,
             &serde_json::json!({
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",
                 "params": { "protocolVersion": MCP_PROTOCOL_VERSION, "capabilities": {},
                             "clientInfo": { "name": "braavolabs", "version": "0.1.0" } }
-            }),
+            }), deadline, &cancel,
         )?;
-        await_response(&rx, 1, deadline)?;
+        await_response(&rx, 1, deadline, &cancel)?;
         // 2. notifications/initialized (NOTIFICATION — no id)
-        send_line(&mut stdin, &serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))?;
+        send_line(&writer, &serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }), deadline, &cancel)?;
         // 3. the method (id 2)
         send_line(
-            &mut stdin,
-            &serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": method, "params": params }),
+            &writer,
+            &serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": method, "params": params }), deadline, &cancel,
         )?;
-        await_response(&rx, 2, deadline)
+        await_response(&rx, 2, deadline, &cancel)
     })();
 
     // Teardown — ALWAYS. Kill first so the reader thread's stdout closes.
     let _ = child.kill();
     let _ = child.wait();
+    drop(writer); // closes queue; blocked write exits when its pipe closes
     drop(rx);
-    let _ = reader_handle.join();
-    let _ = stderr_handle.join();
+    // Do not join pipe readers: a descendant may hold inherited descriptors.
+    // Direct child is reaped; bounded readers never delay the response forever.
     outcome
 }
 
@@ -2651,52 +2769,17 @@ fn run_mcp_session(
 /// editing the definition between approval and this call invalidates the
 /// token instead of silently running the swapped-in command.
 #[tauri::command]
-fn mcp_list_tools(
-    app: AppHandle,
-    gov: State<'_, Governance>,
-    token: String,
-    server: String,
-    ts: Option<u64>,
+async fn mcp_list_tools(
+    app: AppHandle, window: tauri::WebviewWindow, token: String,
+    server: String, ts: Option<u64>,
 ) -> Result<serde_json::Value, String> {
-    let ts = ts.unwrap_or(0);
-    let map = read_mcp(&app)?;
-    let def = map
-        .get(server.trim())
-        .ok_or_else(|| format!("no MCP server named \"{}\"", server.trim()))?
-        .clone();
-    let mut argv = vec![def.command.clone()];
-    argv.extend(def.args.clone());
-    let detail = ActionDetail {
-        server: Some(server.clone()),
-        argv: Some(argv),
-        ..Default::default()
-    };
-    {
-        let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
-        let ok = matches!(
-            gate.tokens.get(&token).cloned(),
-            Some(rec) if rec.kind == "mcp.discover" && rec.binding == detail.binding("mcp.discover")
-        );
-        if !ok {
-            audit_append(&app, &mut gate, "mcp.discover", "-", "replay-rejected", "mcp.discover", ts);
-            return Err("invalid or already-spent token".into());
-        }
-        gate.tokens.remove(&token); // one-time
-        let summary = format!("mcp discover · {}", server.trim());
-        audit_append(&app, &mut gate, "mcp.discover", "-", "consumed", &summary, ts);
-    }
-    let run = run_mcp_session(&def, "tools/list", serde_json::json!({}), MCP_TIMEOUT_MS);
-    let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
-    match run {
-        Ok(result) => {
-            audit_append(&app, &mut gate, "mcp.discover", "-", "success", "mcp.discover", ts);
-            Ok(result.get("tools").cloned().unwrap_or(serde_json::json!([])))
-        }
-        Err(e) => {
-            audit_append(&app, &mut gate, "mcp.discover", "-", "error", "mcp.discover", ts);
-            Err(e)
-        }
-    }
+    let owner_window = window.label().to_string();
+    let _ = server; // legacy transport field cannot alter the host-owned plan
+    tauri::async_runtime::spawn_blocking(move || {
+        let gov = app.state::<Governance>();
+        let result = execute_mcp_invocation(&app, &gov, &token, "mcp.discover", Some(&owner_window), ts.unwrap_or(0))?;
+        Ok(result.get("tools").cloned().unwrap_or(serde_json::json!([])))
+    }).await.map_err(|_| "MCP discovery worker did not complete")?
 }
 
 /// One tool-call result crossing back to the webview (camelCase → `isError`).
@@ -2707,69 +2790,163 @@ struct McpCallResult {
     is_error: bool,
 }
 
-/// THE GATED MCP CALL. Spends a one-time `mcp.tool` token (bound to {server,
-/// tool}) BEFORE spawning the server — a webview cannot forge a host token, so a
-/// tools/call can never run without passing the governance gate. Mirrors
-/// `governed_command`'s consume-then-run choke-point shape.
+/// The immutable invocation is owned by this host, not by a renderer digest.
+/// Environment values/arguments remain ephemeral and never enter audit/relay.
+#[derive(Clone)]
+struct McpInvocation {
+    server: String,
+    original: McpServerDef,
+    resolved: PathBuf,
+    executable_len: u64,
+    executable_modified: Option<SystemTime>,
+    executable_identity: Option<(u64, u64)>,
+    cwd: PathBuf,
+    environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    params: serde_json::Value,
+    window: String,
+    stamp: action_scope::Stamp,
+}
+
+fn executable_identity(meta: &fs::Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)] { use std::os::unix::fs::MetadataExt; Some((meta.dev(), meta.ino())) }
+    #[cfg(not(unix))] { let _ = meta; None } // Windows verified-object execution still requires native acceptance
+}
+
+fn resolve_mcp_executable(command: &str) -> Result<PathBuf, String> {
+    let input = Path::new(command);
+    let mut candidates = Vec::new();
+    if input.is_absolute() || input.components().count() > 1 {
+        candidates.push(input.to_path_buf());
+    } else if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            candidates.push(dir.join(command));
+            #[cfg(windows)]
+            if input.extension().is_none() {
+                // Command::new itself does not safely launch arbitrary cmd/bat
+                // wrappers; the explicit unsupported error preserves that limit.
+                candidates.push(dir.join(format!("{command}.exe")));
+                candidates.push(dir.join(format!("{command}.com")));
+            }
+        }
+    }
+    for path in candidates {
+        let Ok(real) = path.canonicalize() else { continue };
+        let Ok(meta) = fs::metadata(&real) else { continue };
+        if !meta.is_file() { continue; }
+        #[cfg(unix)]
+        { use std::os::unix::fs::PermissionsExt; if meta.permissions().mode() & 0o111 == 0 { continue; } }
+        return Ok(real);
+    }
+    Err("MCP executable is unavailable; use an installed executable path".into())
+}
+
+fn validate_mcp_json(value: &serde_json::Value, depth: usize) -> bool {
+    if depth > 32 { return false; }
+    match value {
+        serde_json::Value::Number(n) => n.as_f64().map(|x| x.is_finite() && (x.fract() != 0.0 || x.abs() <= 9_007_199_254_740_991.0)).unwrap_or(false),
+        serde_json::Value::Array(a) => a.iter().all(|v| validate_mcp_json(v, depth + 1)),
+        serde_json::Value::Object(m) => m.values().all(|v| validate_mcp_json(v, depth + 1)),
+        _ => true,
+    }
+}
+
 #[tauri::command]
-fn mcp_call_tool(
+fn mcp_prepare_call(
     app: AppHandle,
+    window: tauri::WebviewWindow,
     gov: State<'_, Governance>,
-    token: String,
     server: String,
     tool: String,
     args: Option<serde_json::Value>,
-    ts: Option<u64>,
-) -> Result<McpCallResult, String> {
-    let ts = ts.unwrap_or(0);
-    // 1. Spend the token. Binding is {tool, server} for kind mcp.tool.
-    let detail = ActionDetail {
-        tool: Some(tool.clone()),
-        server: Some(server.clone()),
-        ..Default::default()
-    };
-    {
-        let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
-        let ok = matches!(
-            gate.tokens.get(&token).cloned(),
-            Some(rec) if rec.kind == "mcp.tool" && rec.binding == detail.binding("mcp.tool")
-        );
-        if !ok {
-            audit_append(&app, &mut gate, "mcp.tool", "-", "replay-rejected", "mcp.tool", ts);
-            return Err("invalid or already-spent token".into());
-        }
-        gate.tokens.remove(&token); // one-time
-        let summary = format!("mcp {} · {}", server.trim(), tool.trim());
-        audit_append(&app, &mut gate, "mcp.tool", "-", "consumed", &summary, ts);
+) -> Result<GateResult, String> {
+    prepare_mcp_invocation(app, window, gov, server, Some(tool), args)
+}
+
+fn prepare_mcp_invocation(app: AppHandle, window: tauri::WebviewWindow, gov: State<'_, Governance>, server: String, tool: Option<String>, args: Option<serde_json::Value>) -> Result<GateResult, String> {
+    if cfg!(windows) { return Err("MCP_WINDOWS_HOLD".into()); }
+    let kind = if tool.is_some() { "mcp.tool" } else { "mcp.discover" };
+    let tool = tool.unwrap_or_default();
+    if window.label() != MAIN_WINDOW_LABEL { return Err("MCP invocation requires its owning window".into()); }
+    let server = server.trim().to_string();
+    if server.is_empty() || (kind == "mcp.tool" && tool.is_empty()) || tool.chars().any(char::is_control) || server.chars().any(char::is_control) {
+        return Err("MCP server and tool must be nonempty names".into());
     }
-
-    // 2. Resolve the server + run the tools/call session.
-    let map = read_mcp(&app)?;
-    let def = match map.get(server.trim()) {
-        Some(d) => d.clone(),
-        None => {
-            let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
-            audit_append(&app, &mut gate, "mcp.tool", "-", "error", "mcp.tool", ts);
-            return Err(format!("no MCP server named \"{}\"", server.trim()));
-        }
-    };
-    let params = serde_json::json!({ "name": tool, "arguments": args.unwrap_or(serde_json::json!({})) });
-    let run = run_mcp_session(&def, "tools/call", params, MCP_TIMEOUT_MS);
-
+    let arguments = args.unwrap_or_else(|| serde_json::json!({}));
+    if !arguments.is_object() || !validate_mcp_json(&arguments, 0) {
+        return Err("MCP arguments require a bounded JSON object with safe numbers".into());
+    }
+    let json = serde_json::to_string(&arguments).map_err(|_| "MCP arguments could not be encoded")?;
+    if json.len() > 4096 { return Err("MCP arguments exceed the native preview limit".into()); }
+    // Registry edits, revoke and final spawn use this same coordinator. Never
+    // hold it during a human dialog or the JSON-RPC session.
     let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
-    match run {
-        Ok(result) => {
-            let is_error = result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
-            let content = result.get("content").cloned().unwrap_or(serde_json::json!([]));
-            let outcome = if is_error { "error" } else { "success" };
-            audit_append(&app, &mut gate, "mcp.tool", "-", outcome, "mcp.tool", ts);
-            Ok(McpCallResult { content, is_error })
-        }
-        Err(e) => {
-            audit_append(&app, &mut gate, "mcp.tool", "-", "error", "mcp.tool", ts);
-            Err(e)
-        }
-    }
+    let scope = gate.scope;
+    gate.mcp_plans.retain(|_, plan| scope.current(plan.stamp, true));
+    gate.pending.retain(|_, rec| scope.current(rec.stamp, rec.kind.starts_with("mcp.")));
+    gate.tokens.retain(|_, rec| scope.current(rec.stamp, rec.kind.starts_with("mcp.")));
+    if gate.mcp_plans.len() >= 128 { return Err("Too many pending MCP invocations; cancel pending actions first".into()); }
+    let original = read_mcp(&app)?.get(&server).cloned().ok_or("MCP server not found")?;
+    if original.args.len() > 64 { return Err("MCP launch arguments exceed the native preview limit".into()); }
+    let resolved = resolve_mcp_executable(&original.command)?;
+    let meta = fs::metadata(&resolved).map_err(|_| "MCP executable metadata is unavailable")?;
+    let cwd = std::env::current_dir().and_then(|p| p.canonicalize()).map_err(|_| "MCP working directory is unavailable")?;
+    // Quoted JSON makes element boundaries/control characters visible; no
+    // truncate/collapse helper may hide an effective target or tool argument.
+    let dialog_text = format!(
+        "Action: {kind}\nServer: {}\nExecutable: {}\nLaunch argv: {}\nDirectory: {}\nTool: {}\nArguments: {}\n\nLocal OS process, inherited environment snapshot and ordinary filesystem/network access; this is not a sandbox or a verified cloud account. Single use; expires in 120 seconds.",
+        serde_json::to_string(&server).unwrap(), serde_json::to_string(&resolved.to_string_lossy()).unwrap(),
+        serde_json::to_string(&original.args).unwrap(), serde_json::to_string(&cwd.to_string_lossy()).unwrap(),
+        serde_json::to_string(&tool).unwrap(), json
+    );
+    if dialog_text.chars().count() > 6500 { return Err("MCP invocation cannot fit the complete native preview".into()); }
+    let action_id = mint_id("act", gate.seq + 1);
+    let stamp = gate.scope.stamp(APPROVAL_DIALOG_TIMEOUT);
+    let params = if kind == "mcp.tool" { serde_json::json!({"name": tool, "arguments": arguments}) } else { serde_json::json!({}) };
+    gate.mcp_plans.insert(action_id.clone(), McpInvocation {
+        server, original, resolved, executable_len: meta.len(), executable_modified: meta.modified().ok(), executable_identity: executable_identity(&meta), cwd,
+        environment: std::env::vars_os().collect(), params, window: window.label().to_string(), stamp,
+    });
+    gate.pending.insert(action_id.clone(), Bound { action_id: action_id.clone(), kind: kind.into(), binding: action_id.clone(), summary: format!("mcp invocation {action_id}"), dialog_text, stamp });
+    audit_append(&app, &mut gate, kind, "require-approval", "pending", &format!("mcp invocation {action_id}"), 0);
+    Ok(GateResult { action_id, decision: "require-approval".into(), reason: "native immutable invocation approval required".into(), token: None })
+}
+
+/// Token-only executor. No second renderer server/tool/args/config lookup may
+/// alter the plan. The lock covers consume + OS spawn, then leaves RPC unlocked.
+#[tauri::command]
+async fn mcp_call_tool(app: AppHandle, window: tauri::WebviewWindow, token: String, ts: Option<u64>) -> Result<McpCallResult, String> {
+    let owner_window = window.label().to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        let gov = app.state::<Governance>();
+        let result = execute_mcp_invocation(&app, &gov, &token, "mcp.tool", Some(&owner_window), ts.unwrap_or(0))?;
+        Ok(McpCallResult { is_error: result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false),
+            content: result.get("content").cloned().unwrap_or_else(|| serde_json::json!([])) })
+    }).await.map_err(|_| "MCP call worker did not complete")?
+}
+
+fn execute_mcp_invocation(app: &AppHandle, gov: &Governance, token: &str, kind: &str, window: Option<&str>, ts: u64) -> Result<serde_json::Value, String> {
+    if cfg!(windows) { return Err("MCP_WINDOWS_HOLD".into()); }
+    let (child, params, cancel, summary) = {
+        let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+        let rec = gate.tokens.remove(token).ok_or("invalid or already-spent MCP token")?;
+        if rec.kind != kind || !gate.scope.current(rec.stamp, true) { return Err("MCP approval expired or was invalidated".into()); }
+        let plan = gate.mcp_plans.remove(&rec.action_id).ok_or("MCP invocation is unavailable")?;
+        if window != Some(plan.window.as_str()) || plan.window != MAIN_WINDOW_LABEL { return Err("MCP invocation belongs to another window".into()); }
+        if read_mcp(app)?.get(&plan.server) != Some(&plan.original) { return Err("MCP registry changed; prepare a new invocation".into()); }
+        let meta = fs::metadata(&plan.resolved).map_err(|_| "MCP executable is unavailable")?;
+        if meta.len() != plan.executable_len || meta.modified().ok() != plan.executable_modified || executable_identity(&meta) != plan.executable_identity { return Err("MCP executable changed; prepare a new invocation".into()); }
+        let child = std::process::Command::new(&plan.resolved)
+            .args(&plan.original.args).current_dir(&plan.cwd).env_clear().envs(plan.environment.iter().map(|(k, v)| (k, v)))
+            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
+            .spawn().map_err(|_| "MCP process could not be started; a new approval is required")?;
+        let cancel = gate.register_active();
+        audit_append(app, &mut gate, kind, "-", "consumed", &rec.summary, ts);
+        (child, plan.params, cancel, rec.summary)
+    };
+    let result = run_mcp_child(child, if kind == "mcp.tool" { "tools/call" } else { "tools/list" }, params, MCP_TIMEOUT_MS, cancel);
+    let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+    audit_append(app, &mut gate, kind, "-", if result.is_ok() {"completed"} else {"error"}, &summary, ts);
+    result
 }
 
 #[cfg(test)]
@@ -3136,23 +3313,7 @@ mod secret_store_tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Real OS-keychain round-trip. `#[ignore]` so the default `cargo test`
-    /// never touches the developer's login keychain; run explicitly with
-    /// `cargo test --ignored keychain_roundtrip` on macOS/Windows to verify.
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    #[test]
-    #[ignore]
-    fn keychain_roundtrip() {
-        let be = KeychainBackend;
-        assert!(be.secure());
-        let acct = "test.s010.roundtrip";
-        be.set(acct, "keychain-secret-xyz").unwrap();
-        assert_eq!(be.get(acct).unwrap(), Some("keychain-secret-xyz".into()));
-        be.delete(acct).unwrap();
-        assert_eq!(be.get(acct).unwrap(), None);
-        // Deleting an absent credential is a no-op, not an error.
-        be.delete(acct).unwrap();
-    }
+
 }
 
 #[cfg(test)]
@@ -3255,6 +3416,7 @@ mod governance_tests {
                 binding: binding.into(),
                 summary: "s".into(),
                 dialog_text: "d".into(),
+                stamp: gate.scope.stamp(APPROVAL_DIALOG_TIMEOUT),
             },
         );
     }
@@ -3697,6 +3859,8 @@ pub fn run() {
             approve_action,
             reject_action,
             consume_action,
+            invalidate_actions,
+            set_ui_locale,
             settle_action,
             audit_recent,
             governed_command,
@@ -3709,10 +3873,12 @@ pub fn run() {
             browser_disconnect,
             browser_dispatch,
             git_changed_files,
+            mcp_capabilities,
             mcp_list_servers,
             mcp_add_server,
             mcp_remove_server,
             mcp_list_tools,
+            mcp_prepare_call,
             mcp_call_tool
         ])
         .build(tauri::generate_context!())
@@ -3722,6 +3888,7 @@ pub fn run() {
             // can't outlive the app (macOS sandbox-exec has no --die-with-parent).
             // ExitRequested fires when the last window closes / quit is requested.
             if let tauri::RunEvent::ExitRequested { .. } = event {
+                if let Some(gov) = app_handle.try_state::<Governance>() { if let Ok(mut gate) = gov.0.lock() { gate.invalidate_all(); } }
                 if let Some(state) = app_handle.try_state::<pty::PtyHostState>() {
                     state.kill_all();
                 }

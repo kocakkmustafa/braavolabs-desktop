@@ -90,6 +90,7 @@ export class RelayBridge {
   private readonly handlers: BridgeHandlers;
   private sessionId: string | null = null;
   private unsubscribe: (() => void) | null = null;
+  private generation = 0;
 
   constructor(transport: RelayTransport, handlers: BridgeHandlers) {
     this.transport = transport;
@@ -103,22 +104,33 @@ export class RelayBridge {
 
   /** Register with the relay and start listening for inbound commands. */
   async start(reg: SessionRegistration): Promise<{ sessionId: string }> {
+    const generation = ++this.generation;
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+    this.sessionId = null;
     const { sessionId } = await this.transport.register(reg);
+    if (generation !== this.generation) {
+      // The workspace may close while registration is in flight. Mirror its end
+      // without reopening command delivery or replacing a newer session.
+      try { await this.transport.postEvent(sessionId, { type: "status", state: "ended" }); } catch { /* best effort */ }
+      return { sessionId };
+    }
     this.sessionId = sessionId;
-    this.unsubscribe = this.transport.subscribeCommands(sessionId, (raw) => this.dispatch(raw));
+    this.unsubscribe = this.transport.subscribeCommands(sessionId, (raw) => {
+      if (generation === this.generation && this.sessionId === sessionId) this.dispatch(raw);
+    });
     return { sessionId };
   }
 
-  /** Mirror the session as ended, then unsubscribe. No-op if never started. */
+  /** Stop command delivery immediately, then mirror the captured session's end. */
   async stop(): Promise<void> {
-    if (!this.sessionId) return;
-    try {
-      await this.setStatus("ended");
-    } finally {
-      this.unsubscribe?.();
-      this.unsubscribe = null;
-      this.sessionId = null;
-    }
+    ++this.generation; // Also cancels a registration that has not returned yet.
+    const sessionId = this.sessionId;
+    this.sessionId = null;
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+    if (!sessionId) return;
+    try { await this.transport.postEvent(sessionId, { type: "status", state: "ended" }); } catch { /* best effort mirror */ }
   }
 
   // ── inbound: companion → local ─────────────────────────────────────────
@@ -250,15 +262,24 @@ function toBase64(s: string): string {
  * is not.
  */
 export function bridgeGovernance(gov: Governance, bridge: RelayBridge): Governance {
+  const mirrored = new Set<string>();
+  const observePrepared: NonNullable<Governance["observePrepared"]> = (result, detail) => {
+    if (result.decision !== "require-approval" || mirrored.has(result.actionId)) return;
+    mirrored.add(result.actionId);
+    if (mirrored.size > 512) mirrored.delete(mirrored.values().next().value!);
+    // Only action identity/kind and the existing sanitized summary are mirrored.
+    // No renderer args/environment and no second governance request or grant.
+    void bridge.emitApprovalRequest(result.actionId, result.kind, detail?.summary ?? `${result.kind} requires approval`).catch(() => {});
+  };
   return {
     ...gov,
+    observePrepared(result, detail) {
+      try { gov.observePrepared?.(result, detail); } catch { /* observation cannot block local authority */ }
+      observePrepared(result, detail);
+    },
     async request(kind, detail) {
       const result = await gov.request(kind, detail);
-      if (result.decision === "require-approval") {
-        void bridge
-          .emitApprovalRequest(result.actionId, result.kind, detail?.summary ?? `${kind} requires approval`)
-          .catch(() => {});
-      }
+      observePrepared(result, detail);
       return result;
     },
     async settle(kind, outcome, detail) {

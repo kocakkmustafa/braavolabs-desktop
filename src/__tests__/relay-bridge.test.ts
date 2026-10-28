@@ -250,6 +250,20 @@ describe("RelayBridge — inbound command dispatch", () => {
 });
 
 describe("bridgeGovernance — observation decorator", () => {
+  it("mirrors one host-prepared action without a second grant or raw detail payload", async () => {
+    const { transport, postCalls } = fakeTransport();
+    const bridge = new RelayBridge(transport, fakeHandlers()); await bridge.start({ surface: "desktop" });
+    const gov = createMemoryGovernance(); const request = vi.spyOn(gov, "request");
+    const wrapped = bridgeGovernance(gov, bridge);
+    const prepared = { actionId: "host-prepared", kind: "mcp.tool", decision: "require-approval" as const, reason: "native" };
+    const detail = { summary: "MCP tool", argv: ["PRIVATE_ARGUMENT"], path: "PRIVATE_ENV" };
+    wrapped.observePrepared!(prepared, detail); wrapped.observePrepared!(prepared, detail);
+    await Promise.resolve();
+    const events = postCalls.filter(event => event.type === "approval-request");
+    expect(events).toHaveLength(1); expect(JSON.stringify(events)).toContain("host-prepared");
+    expect(JSON.stringify(events)).not.toContain("PRIVATE_"); expect(request).not.toHaveBeenCalled();
+  });
+
   it("mirrors a require-approval GateResult to emitApprovalRequest", async () => {
     const { transport, postCalls } = fakeTransport();
     const bridge = new RelayBridge(transport, fakeHandlers());

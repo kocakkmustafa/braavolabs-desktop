@@ -17,16 +17,24 @@
 export interface SavingsView {
   /** True only when the server reported a real, positive saved amount. */
   hasSavings: boolean;
-  savedUsd: number;
-  savedPct: number;
-  actualUsd: number;
-  baselineUsd: number;
+  savedUsd: number | null;
+  savedPct: number | null;
+  actualUsd: number | null;
+  baselineUsd: number | null;
   /** "≈ saved $1.23" or "" — the ember footer line. Empty ⇒ render nothing. */
   label: string;
   /** Data-quality note passed through verbatim (honesty; never dropped). */
   note?: string;
 }
 
+/** Missing/invalid observations stay unknown. Numeric strings are not measurements. */
+function metric(value: unknown, maximum = Infinity): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= maximum ? value : null;
+}
+/** Savings is a difference, so measured losses/negative percentages are valid. */
+function signedMetric(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
 function money(n: number): string {
   return `$${n.toFixed(n < 1 ? 4 : 2)}`;
 }
@@ -38,17 +46,17 @@ function money(n: number): string {
  */
 export function toSavingsView(raw: any): SavingsView {
   const report = raw?.report ?? {};
-  const savedUsd = Number(report.savedUsd);
-  const savedPct = Number(report.savedPct);
-  const actualUsd = Number(report.actualUsd);
-  const baselineUsd = Number(report.baselineUsd);
-  const has = Number.isFinite(savedUsd) && savedUsd > 0;
+  const savedUsd = signedMetric(report.savedUsd);
+  const savedPct = signedMetric(report.savedPct);
+  const actualUsd = metric(report.actualUsd);
+  const baselineUsd = metric(report.baselineUsd);
+  const has = savedUsd !== null && savedUsd > 0;
   return {
     hasSavings: has,
-    savedUsd: Number.isFinite(savedUsd) ? savedUsd : 0,
-    savedPct: Number.isFinite(savedPct) ? savedPct : 0,
-    actualUsd: Number.isFinite(actualUsd) ? actualUsd : 0,
-    baselineUsd: Number.isFinite(baselineUsd) ? baselineUsd : 0,
+    savedUsd,
+    savedPct,
+    actualUsd,
+    baselineUsd,
     label: has ? `≈ saved ${money(savedUsd)}` : "",
     note: typeof raw?.note === "string" ? raw.note : undefined,
   };
@@ -60,8 +68,8 @@ export interface CascadeAttemptView {
   provider: string;
   model: string;
   tier: string;
-  confidence: number;
-  costUsd: number;
+  confidence: number | null;
+  costUsd: number | null;
 }
 
 export interface CascadeView {
@@ -69,9 +77,9 @@ export interface CascadeView {
   provider: string;
   model: string;
   tier: string;
-  confidence: number;
-  escalated: boolean;
-  totalCostUsd: number;
+  confidence: number | null;
+  escalated: boolean | null;
+  totalCostUsd: number | null;
   stoppedReason: string;
   rationale: string;
   attempts: CascadeAttemptView[];
@@ -85,9 +93,9 @@ export function toCascadeView(raw: any): CascadeView {
     provider: String(raw?.provider ?? ""),
     model: String(raw?.model ?? ""),
     tier: String(raw?.tier ?? ""),
-    confidence: Number(raw?.confidence ?? 0),
-    escalated: raw?.escalated === true,
-    totalCostUsd: Number(raw?.totalCostUsd ?? 0),
+    confidence: metric(raw?.confidence, 1),
+    escalated: typeof raw?.escalated === "boolean" ? raw.escalated : null,
+    totalCostUsd: metric(raw?.totalCostUsd),
     stoppedReason: String(raw?.stoppedReason ?? ""),
     rationale: String(raw?.rationale ?? ""),
     attempts: attempts.map(
@@ -95,8 +103,8 @@ export function toCascadeView(raw: any): CascadeView {
         provider: String(a?.provider ?? ""),
         model: String(a?.model ?? ""),
         tier: String(a?.tier ?? ""),
-        confidence: Number(a?.confidence ?? 0),
-        costUsd: Number(a?.costUsd ?? 0),
+        confidence: metric(a?.confidence, 1),
+        costUsd: metric(a?.costUsd),
       }),
     ),
   };
@@ -108,7 +116,7 @@ export interface CompareCandidateView {
   provider: string;
   model: string;
   answer: string;
-  costUsd: number;
+  costUsd: number | null;
 }
 
 export interface CompareView {
@@ -122,7 +130,7 @@ export interface CompareView {
   perModel: CompareCandidateView[];
   failed: { provider: string; model: string; error: string }[];
   synthesisParsed: boolean;
-  totalCostUsd: number;
+  totalCostUsd: number | null;
   /** Server-persisted error string on a FAILED session, if any. */
   error?: string;
 }
@@ -156,7 +164,7 @@ export function toCompareView(session: any): CompareView {
               provider: String(m?.provider ?? ""),
               model: String(m?.model ?? ""),
               answer: String(m?.answer ?? ""),
-              costUsd: Number(m?.costUsd ?? 0),
+              costUsd: metric(m?.costUsd),
             }),
           )
         : [],
@@ -169,7 +177,7 @@ export function toCompareView(session: any): CompareView {
           }))
         : [],
     synthesisParsed: has ? mm.synthesisParsed === true : false,
-    totalCostUsd: has ? Number(mm.totalCostUsd ?? 0) : 0,
+    totalCostUsd: has ? metric(mm.totalCostUsd) : null,
     error: typeof session?.error === "string" && session.error.trim() ? session.error
       : invalidSynthesis ? String(mm.synthesizerError || "Invalid structured synthesis") : undefined,
   };

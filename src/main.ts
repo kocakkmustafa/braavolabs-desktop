@@ -4,17 +4,20 @@
  * lifting is delegated to the tested modules; this file is glue.
  */
 import "./styles.css";
+import { resolveTheme } from "./theme";
 import { type Config, DEFAULT_API, setPersist } from "./config";
 import { resolveStore, loadApiUrl, hydrateConfig, createConfigPersister } from "./store";
 import { resolveKeyVault } from "./keyvault";
 import { resolveSpawnProbe } from "./spawn";
 import { resolveGovernance } from "./governance";
 import { resolveMcpBridge } from "./mcp";
-import { detectLocale, makeT } from "./i18n";
+import { detectLocale, makeT, applyLocale } from "./i18n";
 import { renderLogin, renderWorkspace, type UiDeps } from "./ui";
+import { verifyHistoryIdentity } from "./client";
 import { clearAllSessions } from "./sessions";
 
 async function boot(): Promise<void> {
+  resolveTheme();
   const root = document.getElementById("app");
   if (!root) return;
 
@@ -28,7 +31,7 @@ async function boot(): Promise<void> {
   setPersist(persist);
 
   const locale = detectLocale();
-  document.documentElement.lang = locale;
+  applyLocale(locale);
   const t = makeT(locale);
   const gov = resolveGovernance();
   const deps: UiDeps = {
@@ -43,9 +46,10 @@ async function boot(): Promise<void> {
     onSignOutError: (message) => {
       const warning = document.createElement("p");
       warning.setAttribute("role", "alert");
-      warning.textContent = message;
+      warning.textContent = t("common.signOutWarning");
+      void message;
       const retry = document.createElement("button");
-      retry.textContent = "Retry clearing saved credentials";
+      retry.textContent = t("common.retryClear");
       retry.addEventListener("click", async () => {
         if (cfg.token || cfg.refreshToken) return;
         retry.disabled = true;
@@ -63,13 +67,29 @@ async function boot(): Promise<void> {
       // are THIS user's content — the next account on this machine must not
       // find them in the sidebar. renderLogin() also tears the workspace down
       // (companion bridge + governance decorator), see runWorkspaceTeardown.
-      clearAllSessions();
+      const historyCleared = clearAllSessions();
       renderLogin(deps);
+      if (!historyCleared) {
+        const warning = document.createElement("p"); warning.setAttribute("role", "alert");
+        warning.textContent = t("sessions.clearFailed"); root.prepend(warning);
+      }
     },
   };
 
-  if (cfg.token) renderWorkspace(deps);
-  else renderLogin(deps);
+  const invoke = (globalThis as any).__TAURI__?.core?.invoke;
+  let nativeLocaleFailed = false;
+  if (typeof invoke === "function") {
+    try { await invoke("set_ui_locale", { locale }); } catch { nativeLocaleFailed = true; }
+  }
+  if (cfg.token) {
+    root.textContent = t("sessions.verifying");
+    await verifyHistoryIdentity(cfg, { save: persist });
+    if (cfg.token) renderWorkspace(deps); else renderLogin(deps);
+  } else renderLogin(deps);
+  if (nativeLocaleFailed) {
+    const warning = document.createElement("p"); warning.setAttribute("role", "status");
+    warning.textContent = t("native.syncFailed"); root.prepend(warning);
+  }
 }
 
 void boot();

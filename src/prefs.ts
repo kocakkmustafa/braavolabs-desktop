@@ -18,16 +18,18 @@ export const REDUCE_CLASS = "reduce-motion";
 
 export interface Prefs {
   reducedMotion(): boolean;
-  setReducedMotion(on: boolean): void;
+  setReducedMotion(on: boolean): boolean;
 }
 
-export function createPrefs(storage: KVStorage): Prefs {
+export function createPrefs(storage: KVStorage | undefined): Prefs {
+  let reduced = false;
+  try { reduced = storage?.getItem(KEY) === "1"; } catch { /* session fallback */ }
   return {
-    reducedMotion() {
-      return storage.getItem(KEY) === "1";
-    },
+    reducedMotion: () => reduced,
     setReducedMotion(on) {
-      storage.setItem(KEY, on ? "1" : "0");
+      reduced = on;
+      try { if (!storage) return false; storage.setItem(KEY, on ? "1" : "0"); return true; }
+      catch { return false; }
     },
   };
 }
@@ -42,16 +44,14 @@ export function applyReducedMotion(rootEl: Element, on: boolean): void {
 }
 
 /** Runtime resolver — localStorage in the webview, memory fallback elsewhere. */
+let runtimePrefs: Prefs | undefined;
 export function resolvePrefs(): Prefs {
+  if (runtimePrefs) return runtimePrefs;
   try {
     const ls = globalThis.localStorage;
     ls.getItem(KEY);
-    return createPrefs(ls);
+    return runtimePrefs = createPrefs(ls);
   } catch {
-    const mem = new Map<string, string>();
-    return createPrefs({
-      getItem: (k) => mem.get(k) ?? null,
-      setItem: (k, v) => void mem.set(k, v),
-    });
+    return runtimePrefs = createPrefs(undefined);
   }
 }

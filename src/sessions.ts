@@ -48,7 +48,12 @@ export interface KVStorage {
   setItem(key: string, value: string): void;
 }
 
+export interface SessionStatus { persistence: "saved" | "failed" | "corrupt" | "volatile"; truncated: boolean; legacy?: boolean; }
+
 export interface SessionStore {
+  clearMemory(): void;
+  status(): SessionStatus;
+  export(): string;
   /** Newest-first. */
   list(): ChatSession[];
   get(id: string): ChatSession | undefined;
@@ -78,69 +83,105 @@ export function groupSessions(
   return { today, earlier };
 }
 
-function sanitize(raw: unknown): ChatSession[] {
-  if (!Array.isArray(raw)) return [];
-  const out: ChatSession[] = [];
-  for (const s of raw) {
-    if (!s || typeof s !== "object") continue;
-    const c = s as Partial<ChatSession>;
-    if (typeof c.id !== "string" || !Array.isArray(c.entries)) continue;
-    out.push({
-      id: c.id,
-      title: typeof c.title === "string" ? c.title : "",
-      createdAt: typeof c.createdAt === "number" ? c.createdAt : 0,
-      updatedAt: typeof c.updatedAt === "number" ? c.updatedAt : 0,
-      entries: c.entries.filter(
-        (e): e is SessionEntry =>
-          !!e && typeof e === "object" && typeof (e as SessionEntry).text === "string",
-      ),
-    });
+function sanitize(raw: unknown): { sessions: ChatSession[]; changed: boolean } {
+  if (!Array.isArray(raw)) return { sessions: [], changed: true };
+  const out: ChatSession[] = []; let changed = false;
+  const finite = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
+  for (const row of raw) {
+    if (!row || typeof row !== "object" || typeof row.id !== "string" || !Array.isArray(row.entries)) { changed = true; continue; }
+    const entries: SessionEntry[] = [];
+    for (const entry of row.entries) {
+      if (!entry || typeof entry !== "object" || !["user", "assistant", "error"].includes(entry.role)
+        || typeof entry.mode !== "string" || typeof entry.text !== "string" || !finite(entry.at)) { changed = true; continue; }
+      if (Object.keys(entry).some(key => !["role", "mode", "text", "at"].includes(key))) changed = true;
+      entries.push({ role: entry.role, mode: entry.mode, text: entry.text, at: entry.at });
+    }
+    if (typeof row.title !== "string" || !finite(row.createdAt) || !finite(row.updatedAt)
+      || Object.keys(row).some(key => !["id", "title", "createdAt", "updatedAt", "entries"].includes(key))) changed = true;
+    out.push({ id: row.id, title: typeof row.title === "string" ? row.title : "",
+      createdAt: finite(row.createdAt) ? row.createdAt : 0, updatedAt: finite(row.updatedAt) ? row.updatedAt : 0, entries });
   }
-  return out;
+  return { sessions: out, changed };
 }
 
-export function createSessionStore(storage: KVStorage, idGen?: () => string): SessionStore {
+/** A decoded JWT can propose a local partition label only. It never proves
+ * identity or authorizes disk rehydration. A successful authenticated API reply
+ * must bind the label to this exact config/API/token snapshot first. */
+function namespaceFromIdentity(apiUrl: string, userId: unknown, tenantId: unknown): string | null {
+  try {
+    const api = new URL(apiUrl);
+    if (api.username || api.password || !["http:", "https:"].includes(api.protocol)) return null;
+    if (typeof userId !== "string" || !userId || typeof tenantId !== "string" || !tenantId || userId.length > 256 || tenantId.length > 256) return null;
+    return `bv.sessions.v2:${encodeURIComponent(JSON.stringify([api.origin + api.pathname.replace(/\/+$/, ""), tenantId, userId]))}`;
+  } catch { return null; }
+}
+export function sessionNamespace(apiUrl: string, accessToken?: string): string | null {
+  try {
+    const pieces = accessToken?.split("."); if (pieces?.length !== 3 || pieces[1].length > 16_384) return null;
+    const part = pieces[1].replaceAll("-", "+").replaceAll("_", "/");
+    const bytes = Uint8Array.from(atob(part.padEnd(Math.ceil(part.length / 4) * 4, "=")), character => character.charCodeAt(0));
+    const claims = JSON.parse(new TextDecoder().decode(bytes));
+    if (!claims || claims.typ === "refresh") return null;
+    return namespaceFromIdentity(apiUrl, claims.userId, claims.tenantId);
+  } catch { return null; }
+}
+type HistoryConfig = { apiUrl: string; token?: string };
+const verifiedOwners = new WeakMap<HistoryConfig, { apiUrl: string; token: string; key: string }>();
+export function rememberHistoryIdentity(cfg: HistoryConfig, authenticatedReply: { user?: { id?: string }; tenant?: { id?: string } }): boolean {
+  verifiedOwners.delete(cfg);
+  const key = namespaceFromIdentity(cfg.apiUrl, authenticatedReply.user?.id, authenticatedReply.tenant?.id);
+  if (!cfg.token || !key || sessionNamespace(cfg.apiUrl, cfg.token) !== key) return false;
+  verifiedOwners.set(cfg, { apiUrl: cfg.apiUrl, token: cfg.token, key });
+  return true;
+}
+export function forgetHistoryIdentity(cfg: HistoryConfig): void { verifiedOwners.delete(cfg); }
+function verifiedNamespace(cfg: HistoryConfig): string | null {
+  const owner = verifiedOwners.get(cfg);
+  if (!owner || owner.apiUrl !== cfg.apiUrl || owner.token !== cfg.token || sessionNamespace(cfg.apiUrl, cfg.token) !== owner.key) return null;
+  return owner.key;
+}
+
+export function createSessionStore(storage: KVStorage, idGen?: () => string, options: { key?: string; volatile?: boolean; legacy?: boolean } = {}): SessionStore {
+  const storeKey = options.key ?? STORE_KEY;
   const nextId =
     idGen ??
     (() =>
       globalThis.crypto?.randomUUID?.() ??
       `s_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`);
 
-  const load = (): ChatSession[] => {
-    try {
-      return sanitize(JSON.parse(storage.getItem(STORE_KEY) ?? "[]"));
-    } catch {
-      // Corrupt JSON — start clean rather than crash the workspace.
-      return [];
-    }
+  let state: SessionStatus = { persistence: options.volatile ? "volatile" : "saved", truncated: false, ...(options.legacy ? { legacy: true } : {}) };
+  let original = "";
+  let cache: ChatSession[] = [];
+  try {
+    original = storage.getItem(storeKey) ?? "[]";
+    const parsed: unknown = JSON.parse(original);
+    if (!Array.isArray(parsed)) throw new Error("invalid transcript");
+    const result = sanitize(parsed); cache = result.sessions;
+    if (result.changed) state.persistence = "corrupt";
+  } catch { state.persistence = "corrupt"; }
+  const bound = (sessions: ChatSession[]) => {
+    if (sessions.length > MAX_SESSIONS) state.truncated = true;
+    return [...sessions].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, MAX_SESSIONS).map(s => {
+      if (s.entries.length > MAX_ENTRIES || s.entries.some(e => e.text.length > MAX_ENTRY_CHARS)) state.truncated = true;
+      return { ...s, entries: s.entries.slice(-MAX_ENTRIES).map(e => e.text.length > MAX_ENTRY_CHARS
+        ? { ...e, text: `${e.text.slice(0, MAX_ENTRY_CHARS)}…` } : e) };
+    });
   };
-
-  /**
-   * Persist, DEGRADING instead of throwing. `record()` runs on the send path,
-   * so a QuotaExceededError propagating from here would strand the send button
-   * disabled with the user's text already cleared — and stay broken across
-   * restarts, since storage is still full. So: try, then retry with a quarter
-   * of the history, then give up quietly (the conversation still renders; only
-   * its persistence is lost).
-   */
+  cache = bound(cache);
+  const load = () => cache;
   const save = (sessions: ChatSession[]) => {
-    const bounded = [...sessions]
-      .sort((a, b) => b.updatedAt - a.updatedAt)
-      .slice(0, MAX_SESSIONS);
-    try {
-      storage.setItem(STORE_KEY, JSON.stringify(bounded));
-      return;
-    } catch {
-      /* quota / storage unavailable — fall through to the eviction retry */
-    }
-    try {
-      storage.setItem(STORE_KEY, JSON.stringify(bounded.slice(0, Math.floor(MAX_SESSIONS / 4))));
-    } catch {
-      /* still failing — persistence is off for now, by design */
-    }
+    cache = bound(sessions);
+    // Preserve the original corrupt record for recovery/export. Never silently
+    // overwrite it or evict 3/4 of history after a quota failure.
+    if (state.persistence === "corrupt" || state.persistence === "volatile") return;
+    try { storage.setItem(storeKey, JSON.stringify(cache)); state.persistence = "saved"; }
+    catch { state.persistence = "failed"; }
   };
 
   return {
+    clearMemory() { cache = []; },
+    status() { return { ...state }; },
+    export() { return JSON.stringify({ version: 1, sessions: cache, ...(state.persistence === "corrupt" || state.truncated ? { recovery: original } : {}) }, null, 2); },
     list() {
       return load().sort((a, b) => b.updatedAt - a.updatedAt);
     },
@@ -158,6 +199,7 @@ export function createSessionStore(storage: KVStorage, idGen?: () => string): Se
       const sessions = load();
       const s = sessions.find((x) => x.id === id);
       if (!s) return undefined;
+      if (entry.text.length > MAX_ENTRY_CHARS || s.entries.length >= MAX_ENTRIES) state.truncated = true;
       s.entries.push(
         entry.text.length > MAX_ENTRY_CHARS
           ? { ...entry, text: `${entry.text.slice(0, MAX_ENTRY_CHARS)}…` }
@@ -181,27 +223,41 @@ export function createSessionStore(storage: KVStorage, idGen?: () => string): Se
  * right home) but they are still THAT user's content — the next account to
  * sign in on this machine must not find them waiting in the sidebar.
  */
-export function clearAllSessions(): void {
+let activeRuntimeStore: SessionStore | undefined;
+let activeRuntimeKey: string | undefined;
+let activeRuntimeConfig: HistoryConfig | undefined;
+
+/** Forget only the current runtime's scoped transcript and the old shared key.
+ * A failed delete is visible; another account still opens a distinct namespace. */
+export function clearAllSessions(): boolean {
+  activeRuntimeStore?.clearMemory(); activeRuntimeStore = undefined;
+  if (activeRuntimeConfig) forgetHistoryIdentity(activeRuntimeConfig); activeRuntimeConfig = undefined;
+  const key = activeRuntimeKey; activeRuntimeKey = undefined;
   try {
-    globalThis.localStorage?.removeItem(STORE_KEY);
-    globalThis.localStorage?.removeItem("bv.account.email");
-  } catch {
-    /* no storage — nothing persisted to clear */
-  }
+    const storage = globalThis.localStorage;
+    if (!storage) return true;
+    if (key) storage.removeItem(key);
+    // The unscoped v1 record has no verified owner. Ordinary logout must not
+    // erase it; it is reserved for explicit owner-verified recovery/erasure.
+    storage.removeItem("bv.account.email");
+    return (!key || storage.getItem(key) === null) && storage.getItem("bv.account.email") === null;
+  } catch { return false; }
 }
 
-/** Runtime resolver — localStorage in the webview, memory when unavailable. */
-export function resolveSessionStore(): SessionStore {
+/** Unknown token identity/storage failure never falls back to the old shared
+ * record. Legacy bytes remain untouched for owner-verified recovery. */
+export function resolveSessionStore(scope: { apiUrl: string; token?: string }): SessionStore {
+  const key = verifiedNamespace(scope);
+  activeRuntimeConfig = scope;
+  activeRuntimeKey = key ?? undefined;
   try {
-    const ls = globalThis.localStorage;
-    // Probe: some webview states throw on access.
-    ls.getItem(STORE_KEY);
-    return createSessionStore(ls);
+    const storage = globalThis.localStorage;
+    if (!key) throw new Error("history identity unavailable");
+    storage.getItem(key);
+    activeRuntimeStore = createSessionStore(storage, undefined, { key, legacy: storage.getItem(STORE_KEY) !== null });
   } catch {
     const mem = new Map<string, string>();
-    return createSessionStore({
-      getItem: (k) => mem.get(k) ?? null,
-      setItem: (k, v) => void mem.set(k, v),
-    });
+    activeRuntimeStore = createSessionStore({ getItem: name => mem.get(name) ?? null, setItem: (name, value) => void mem.set(name, value) }, undefined, { volatile: true });
   }
+  return activeRuntimeStore;
 }

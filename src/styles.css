@@ -17,13 +17,13 @@
   --steel-700: #262a35;
   --steel-600: #363b48;
   --steel-500: #4a5160;
-  --steel-400: #6b7382;
+  --steel-400: #9aa5b7;
   --steel-300: #98a1b2;
   --steel-200: #c6cdda;
   --text: #e7ebf2;
   --text-muted: #98a1b2;
-  --text-dim: #6b7382;
-  --arc-blue: #3b82f6;
+  --text-dim: #9aa5b7;
+  --arc-blue: #2563eb;
   --arc-blue-lit: #60a5fa;
   --ember: #f97316;
   --ember-dim: #b45c22;
@@ -33,7 +33,36 @@
   --radius: 10px;
   --radius-sm: 7px;
   --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --muted: var(--text-muted);
+  --arc: var(--arc-blue);
+  --gunmetal: var(--steel-700);
+  --danger-fill: #b91c1c;
+  color-scheme: dark;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif;
+}
+
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --obsidian: #f7f8fc;
+  --obsidian-raised: #ffffff;
+  --obsidian-inset: #eef1f7;
+  --steel-900: #e9edf4;
+  --steel-800: #dce2ec;
+  --steel-700: #b8c2d2;
+  --steel-600: #8895aa;
+  --steel-500: #65748a;
+  --steel-400: #526078;
+  --steel-300: #45536b;
+  --steel-200: #34425a;
+  --text: #182439;
+  --text-muted: #42516a;
+  --text-dim: #53627a;
+  --arc-blue: #1d4ed8;
+  --arc-blue-lit: #1d4ed8;
+  --ember: #a14409;
+  --ember-dim: #a14409;
+  --molten: #b91c1c;
 }
 
 * {
@@ -51,7 +80,7 @@ body {
   background: var(--obsidian);
   color: var(--text);
   font-family: var(--sans);
-  font-size: 14px;
+  font-size: 0.875rem;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   user-select: none;
@@ -59,6 +88,7 @@ body {
 
 button,
 input,
+select,
 textarea {
   font-family: inherit;
   font-size: inherit;
@@ -73,14 +103,14 @@ textarea {
 /* ── shell: 3-pane grid ──────────────────────────────────────────────── */
 .shell {
   display: grid;
-  grid-template-columns: var(--rail-w) 1fr var(--inspector-w);
+  grid-template-columns: var(--rail-w) minmax(0, 1fr) var(--inspector-w);
   height: 100%;
 }
 
 /* ── left rail ───────────────────────────────────────────────────────── */
 .rail {
   background: var(--obsidian-inset);
-  border-right: 1px solid var(--steel-800);
+  border-inline-end: 1px solid var(--steel-800);
   display: flex;
   flex-direction: column;
   padding: 16px 14px;
@@ -101,7 +131,7 @@ textarea {
   background: linear-gradient(135deg, var(--ember), var(--arc-blue));
 }
 .rail-section-label {
-  font-size: 11px;
+  font-size: 0.6875rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-dim);
@@ -111,7 +141,7 @@ textarea {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--text-muted);
 }
 .conn-dot {
@@ -126,7 +156,7 @@ textarea {
 }
 .rail-btn {
   width: 100%;
-  text-align: left;
+  text-align: start;
   background: var(--steel-800);
   border: 1px solid var(--steel-700);
   color: var(--text);
@@ -154,7 +184,7 @@ textarea {
   gap: 5px;
 }
 .keys-empty {
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-dim);
   line-height: 1.5;
 }
@@ -168,12 +198,12 @@ textarea {
   padding: 6px 8px;
 }
 .key-provider {
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-muted);
   flex: 1;
 }
 .key-masked {
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--text-dim);
 }
 .key-remove {
@@ -181,7 +211,7 @@ textarea {
   border: none;
   color: var(--text-dim);
   cursor: pointer;
-  font-size: 15px;
+  font-size: 0.9375rem;
   line-height: 1;
   padding: 0 2px;
 }
@@ -200,7 +230,7 @@ textarea {
   border-radius: var(--radius-sm);
   padding: 7px 9px;
   outline: none;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: inherit;
   user-select: text;
 }
@@ -224,7 +254,7 @@ textarea {
   cursor: not-allowed;
 }
 .keys-note {
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--text-dim);
   line-height: 1.4;
 }
@@ -236,7 +266,7 @@ textarea {
   gap: 8px;
 }
 .laneb-subtitle {
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--text-dim);
   line-height: 1.4;
   margin-top: -2px;
@@ -261,12 +291,12 @@ textarea {
   gap: 8px;
 }
 .laneb-name {
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text);
   flex: 1;
 }
 .laneb-badge {
-  font-size: 10px;
+  font-size: 0.625rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   padding: 2px 6px;
@@ -281,12 +311,12 @@ textarea {
   color: var(--text-dim);
 }
 .laneb-version {
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--text-muted);
 }
 /* ToS-risk note — steel, never green (rule f + palette). */
 .laneb-risk {
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--steel-400);
   line-height: 1.4;
 }
@@ -297,8 +327,8 @@ textarea {
   padding: 6px 9px;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  font-size: 12px;
-  text-align: left;
+  font-size: 0.75rem;
+  text-align: start;
 }
 .laneb-btn:hover {
   background: var(--steel-700);
@@ -314,11 +344,11 @@ textarea {
   padding: 7px 8px;
 }
 .laneb-cmd-hint {
-  font-size: 10px;
+  font-size: 0.625rem;
   color: var(--text-dim);
 }
 .laneb-cmd code {
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--ember);
   user-select: text;
   word-break: break-all;
@@ -329,11 +359,11 @@ textarea {
   gap: 3px;
 }
 .laneb-notfound {
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--text-dim);
 }
 .laneb-usekey {
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--arc-blue-lit);
   user-select: text;
   word-break: break-all;
@@ -347,12 +377,12 @@ textarea {
 }
 .savings-amount {
   font-family: var(--mono);
-  font-size: 20px;
+  font-size: 1.25rem;
   color: var(--ember);
   font-weight: 600;
 }
 .savings-sub {
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-dim);
   margin-top: 2px;
 }
@@ -384,7 +414,7 @@ textarea {
   color: #edeee6;
 }
 .chat-presence-label {
-  font-size: 13px;
+  font-size: 0.8125rem;
   overflow-wrap: anywhere;
   display: -webkit-box;
   -webkit-box-orient: vertical;
@@ -441,14 +471,14 @@ textarea {
   max-width: 88%;
   background: var(--steel-900);
   border: 1px solid var(--steel-700);
-  border-left: 2px solid var(--arc-blue-lit);
+  border-inline-start: 2px solid var(--arc-blue-lit);
   border-radius: var(--radius);
   padding: 13px 15px;
   white-space: pre-wrap;
   user-select: text;
 }
 .msg-label {
-  font-size: 11px;
+  font-size: 0.6875rem;
   text-transform: uppercase;
   letter-spacing: 0.07em;
   color: var(--text-dim);
@@ -483,16 +513,16 @@ textarea {
 }
 .model-name {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--arc-blue-lit);
 }
 .model-cost {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--text-dim);
 }
 .model-answer {
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--text-muted);
   white-space: pre-wrap;
   user-select: text;
@@ -508,7 +538,7 @@ textarea {
   gap: 10px;
   color: var(--ember);
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .spinner {
   width: 13px;
@@ -526,7 +556,7 @@ textarea {
 .saved-footer {
   align-self: flex-start;
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--ember);
 }
 
@@ -537,16 +567,16 @@ textarea {
   margin-top: 6px;
 }
 .chip {
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-muted);
-  padding-left: 12px;
+  padding-inline-start: 12px;
   position: relative;
   user-select: text;
 }
 .chip::before {
   content: "";
   position: absolute;
-  left: 2px;
+  inset-inline-start: 2px;
   top: 8px;
   width: 4px;
   height: 4px;
@@ -613,7 +643,7 @@ textarea {
   color: var(--text-muted);
   padding: 5px 14px;
   cursor: pointer;
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 .mode-toggle button.active {
   background: var(--arc-blue);
@@ -627,26 +657,26 @@ textarea {
   width: 190px;
   outline: none;
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 0.75rem;
   user-select: text;
 }
 .company-input:focus {
   border-color: var(--arc-blue);
 }
 .composer-hint {
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--ember);
 }
 
 /* ── right inspector ─────────────────────────────────────────────────── */
 .inspector {
   background: var(--obsidian-inset);
-  border-left: 1px solid var(--steel-800);
+  border-inline-start: 1px solid var(--steel-800);
   padding: 16px 15px;
   overflow-y: auto;
 }
 .inspector h2 {
-  font-size: 13px;
+  font-size: 0.8125rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-dim);
@@ -658,7 +688,7 @@ textarea {
   gap: 10px;
   padding: 7px 0;
   border-bottom: 1px solid var(--steel-800);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .kv .k {
   color: var(--text-muted);
@@ -666,14 +696,14 @@ textarea {
 .kv .v {
   font-family: var(--mono);
   color: var(--text);
-  text-align: right;
+  text-align: end;
 }
 .kv .v.escalated {
   color: var(--ember);
 }
 .inspector-empty {
   color: var(--text-dim);
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.6;
 }
 .attempt {
@@ -683,7 +713,7 @@ textarea {
   padding: 9px 10px;
   margin-top: 8px;
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 .attempt .a-top {
   display: flex;
@@ -712,7 +742,7 @@ textarea {
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
 }
 .login-card h1 {
-  font-size: 18px;
+  font-size: 1.125rem;
   margin: 0 0 4px;
   display: flex;
   align-items: center;
@@ -720,7 +750,7 @@ textarea {
 }
 .login-card .sub {
   color: var(--text-dim);
-  font-size: 13px;
+  font-size: 0.8125rem;
   margin-bottom: 20px;
 }
 .field {
@@ -728,7 +758,7 @@ textarea {
 }
 .field label {
   display: block;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-muted);
   margin-bottom: 5px;
 }
@@ -766,7 +796,7 @@ textarea {
   color: var(--molten);
   border-radius: var(--radius-sm);
   padding: 9px 11px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   margin-bottom: 14px;
 }
 
@@ -782,7 +812,7 @@ textarea {
   border: none;
   border-bottom: 2px solid transparent;
   color: var(--text-dim);
-  font-size: 12px;
+  font-size: 0.75rem;
   text-transform: uppercase;
   letter-spacing: 0.07em;
   padding: 4px 6px 8px;
@@ -796,7 +826,7 @@ textarea {
   color: var(--text-muted);
 }
 .insp-h {
-  font-size: 12px;
+  font-size: 0.75rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-dim);
@@ -807,7 +837,7 @@ textarea {
 }
 .policy-hint {
   color: var(--text-dim);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.5;
   margin-bottom: 10px;
 }
@@ -820,11 +850,11 @@ textarea {
   border-bottom: 1px solid var(--steel-800);
 }
 .policy-kind {
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-muted);
 }
 .policy-badge {
-  font-size: 10.5px;
+  font-size: 0.65625rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   padding: 2px 7px;
@@ -855,11 +885,11 @@ textarea {
   align-items: center;
   padding: 5px 0;
   border-bottom: 1px solid var(--steel-800);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 .audit-ts {
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: 0.6875rem;
 }
 .audit-kind {
   color: var(--text-muted);
@@ -869,7 +899,7 @@ textarea {
 }
 .audit-outcome {
   color: var(--arc-blue-lit);
-  font-size: 11px;
+  font-size: 0.6875rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
@@ -879,8 +909,8 @@ textarea {
 
 /* governed badge on Lane-B copy button */
 .laneb-gov-badge {
-  margin-left: 7px;
-  font-size: 9.5px;
+  margin-inline-start: 7px;
+  font-size: 0.59375rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--ember);
@@ -890,7 +920,7 @@ textarea {
 }
 .laneb-gate-err {
   color: var(--molten);
-  font-size: 12px;
+  font-size: 0.75rem;
   margin-top: 6px;
 }
 
@@ -939,14 +969,14 @@ textarea {
   margin-bottom: 12px;
 }
 .approve-title {
-  font-size: 16px;
+  font-size: 1rem;
   margin: 0 0 6px;
   text-align: center;
   color: var(--text);
 }
 .approve-body {
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: 0.8125rem;
   text-align: center;
   line-height: 1.5;
   margin-bottom: 14px;
@@ -954,7 +984,7 @@ textarea {
 .approve-detail {
   background: var(--obsidian-inset);
   border: 1px solid var(--steel-800);
-  border-left: 2px solid var(--ember);
+  border-inline-start: 2px solid var(--ember);
   border-radius: var(--radius-sm);
   padding: 10px 12px;
   margin-bottom: 16px;
@@ -963,7 +993,7 @@ textarea {
   display: flex;
   gap: 10px;
   padding: 3px 0;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .approve-k {
   color: var(--text-dim);
@@ -984,7 +1014,7 @@ textarea {
   border-radius: var(--radius-sm);
   cursor: pointer;
   font-weight: 600;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .approve-reject {
   background: var(--steel-800);
@@ -1001,7 +1031,8 @@ textarea {
   color: #fff;
 }
 .approve-approve:hover {
-  background: var(--arc-blue-lit);
+  background: var(--arc-blue);
+  filter: brightness(.9);
 }
 
 /* ── MCP servers section (rail) ─────────────────────────────────────────────── */
@@ -1016,7 +1047,7 @@ textarea {
   gap: 5px;
 }
 .mcp-empty {
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-dim);
   line-height: 1.5;
 }
@@ -1041,11 +1072,11 @@ textarea {
   color: var(--arc-blue-lit);
 }
 .mcp-name {
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text);
 }
 .mcp-cmd {
-  font-size: 10px;
+  font-size: 0.625rem;
   color: var(--text-dim);
   white-space: nowrap;
   overflow: hidden;
@@ -1064,7 +1095,7 @@ textarea {
   padding-top: 8px;
 }
 .mcp-tools-head {
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--text-muted);
 }
 .mcp-tool-row {
@@ -1082,11 +1113,11 @@ textarea {
   justify-content: space-between;
 }
 .mcp-tool-name {
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--arc-blue-lit);
 }
 .mcp-tool-desc {
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--text-dim);
   line-height: 1.4;
 }
@@ -1095,7 +1126,7 @@ textarea {
   min-height: 44px;
   resize: vertical;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 0.6875rem;
   background: var(--steel-900);
   color: var(--text);
   border: 1px solid var(--steel-700);
@@ -1115,7 +1146,7 @@ textarea {
   border: 1px solid var(--steel-700);
   border-radius: var(--radius-sm);
   color: var(--text);
-  font-size: 12px;
+  font-size: 0.75rem;
   padding: 5px 10px;
   cursor: pointer;
 }
@@ -1128,11 +1159,11 @@ textarea {
   cursor: default;
 }
 .mcp-result {
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.5;
   color: var(--text);
   background: var(--obsidian-inset);
-  border-left: 3px solid var(--steel-600);
+  border-inline-start: 3px solid var(--steel-600);
   border-radius: var(--radius-sm);
   padding: 7px 9px;
   white-space: pre-wrap;
@@ -1158,8 +1189,8 @@ textarea {
   align-items: center;
   gap: 12px;
   padding: 0 14px;
-  background: #0b0d13;
-  border-bottom: 1px solid #14171f;
+  background: var(--obsidian-raised);
+  border-bottom: 1px solid var(--steel-800);
   -webkit-app-region: drag;
 }
 .tb-lights {
@@ -1176,16 +1207,16 @@ textarea {
 .tb-l2 { background: #febc2e; }
 .tb-l3 { background: #57aaf7; }
 .tb-crumb {
-  font-size: 11.5px;
-  color: #69718a;
-  margin-left: 6px;
+  font-size: 0.71875rem;
+  color: var(--text-dim);
+  margin-inline-start: 6px;
 }
 .tb-spacer { flex: 1; }
 .tb-settings {
   -webkit-app-region: no-drag;
   font: inherit;
-  font-size: 12px;
-  color: #69718a;
+  font-size: 0.75rem;
+  color: var(--text-dim);
   background: transparent;
   border: none;
   cursor: pointer;
@@ -1193,8 +1224,8 @@ textarea {
   border-radius: 6px;
 }
 .tb-settings:hover {
-  color: #e8eaf0;
-  background: #12151d;
+  color: var(--text);
+  background: var(--steel-900);
 }
 
 .win .shell {
@@ -1205,8 +1236,8 @@ textarea {
 /* Surface switch — Chat / Code. */
 .seg {
   display: flex;
-  background: #0d0f15;
-  border: 1px solid #1a1e28;
+  background: var(--obsidian-inset);
+  border: 1px solid var(--steel-700);
   border-radius: 999px;
   padding: 2px;
   margin: 0 2px 12px;
@@ -1214,27 +1245,27 @@ textarea {
 .seg-btn {
   flex: 1;
   font: inherit;
-  font-size: 12px;
+  font-size: 0.75rem;
   padding: 5px 0;
   border: none;
   border-radius: 7px;
   background: transparent;
-  color: #69718a;
+  color: var(--text-dim);
   cursor: pointer;
   white-space: nowrap;
 }
 .seg-btn.active {
-  background: #1a1f2b;
-  color: #e8eaf0;
+  background: var(--steel-800);
+  color: var(--text);
 }
 .rail-btn.primary {
-  border-color: #232a3a;
-  background: #12151d;
-  color: #e8eaf0;
+  border-color: var(--steel-700);
+  background: var(--steel-900);
+  color: var(--text);
 }
 .rail-btn.primary:hover {
   border-color: #3b82f6;
-  color: #7dd3fc;
+  color: var(--arc-blue-lit);
 }
 
 /* Code surface: the Lane-B panel takes the whole center column. */
@@ -1260,8 +1291,8 @@ textarea {
   max-width: 92%;
   max-height: 86%;
   overflow-y: auto;
-  background: #0b0c11;
-  border: 1px solid #232a3a;
+  background: var(--obsidian-raised);
+  border: 1px solid var(--steel-700);
   border-radius: 14px;
 }
 .sheet-head {
@@ -1269,24 +1300,24 @@ textarea {
   align-items: center;
   gap: 12px;
   padding: 14px 18px;
-  border-bottom: 1px solid #14171f;
+  border-bottom: 1px solid var(--steel-800);
   position: sticky;
   top: 0;
-  background: #0b0c11;
+  background: var(--obsidian-raised);
 }
 .sheet-title {
-  font-size: 15px;
+  font-size: 0.9375rem;
   font-weight: 600;
 }
 .sheet-close {
   font: inherit;
-  font-size: 11px;
-  color: #8b93a7;
+  font-size: 0.6875rem;
+  color: var(--text-muted);
   background: transparent;
   border: none;
   cursor: pointer;
 }
-.sheet-close:hover { color: #e8eaf0; }
+.sheet-close:hover { color: var(--text); }
 .sheet-body {
   padding: 16px 18px 22px;
   display: flex;
@@ -1307,10 +1338,10 @@ textarea {
 .session-item {
   display: flex;
   align-items: center;
-  text-align: left;
+  text-align: start;
   font: inherit;
-  font-size: 12.5px;
-  color: var(--muted, #8b93a7);
+  font-size: 0.78125rem;
+  color: var(--text-muted);
   background: transparent;
   border: none;
   border-radius: 8px;
@@ -1319,11 +1350,11 @@ textarea {
   width: 100%;
 }
 .session-item:hover {
-  background: #10131a;
+  background: var(--steel-900);
 }
 .session-item.active {
-  background: #131722;
-  color: #e8eaf0;
+  background: var(--steel-800);
+  color: var(--text);
 }
 .session-title {
   white-space: nowrap;
@@ -1335,7 +1366,7 @@ textarea {
   display: flex;
   align-items: center;
   gap: 8px;
-  border-top: 1px solid #14171f;
+  border-top: 1px solid var(--steel-800);
   padding-top: 10px;
   margin-top: 2px;
   min-width: 0;
@@ -1344,13 +1375,13 @@ textarea {
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  background: #12151d;
-  border: 1px solid #232a3a;
+  background: var(--steel-900);
+  border: 1px solid var(--steel-700);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 10px;
-  color: #7dd3fc;
+  font-size: 0.625rem;
+  color: var(--arc-blue-lit);
   flex: none;
 }
 .account-meta {
@@ -1358,14 +1389,14 @@ textarea {
   min-width: 0;
 }
 .account-email {
-  font-size: 12px;
+  font-size: 0.75rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .account-sub {
-  font-size: 10px;
-  color: #8b93a7;
+  font-size: 0.625rem;
+  color: var(--text-muted);
 }
 
 /* Composer as chips (design v3): pill lane buttons, pill send, ⇧⏎ hint. */
@@ -1373,8 +1404,8 @@ textarea {
   border-radius: 999px;
 }
 .enter-hint {
-  font-size: 10px;
-  color: #8b93a7;
+  font-size: 0.625rem;
+  color: var(--text-muted);
   white-space: nowrap;
   align-self: center;
   flex: none;
@@ -1390,15 +1421,15 @@ textarea {
   flex-direction: column;
   gap: 6px;
   padding: 14px 0 4px;
-  border-bottom: 1px solid #14171f;
+  border-bottom: 1px solid var(--steel-800);
 }
 .sheet-sec:last-child {
   border-bottom: none;
 }
 .sheet-sec-label {
-  font-size: 9.5px;
+  font-size: 0.59375rem;
   letter-spacing: 0.14em;
-  color: var(--muted, #8b93a7);
+  color: var(--text-muted);
 }
 .set-row {
   display: flex;
@@ -1412,26 +1443,26 @@ textarea {
 }
 .set-title {
   display: block;
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 600;
 }
 .set-sub {
-  font-size: 12px;
-  color: #69718a;
+  font-size: 0.75rem;
+  color: var(--text-dim);
 }
 .set-btn {
   font: inherit;
-  font-size: 12px;
-  color: var(--muted, #8b93a7);
+  font-size: 0.75rem;
+  color: var(--text-muted);
   background: transparent;
-  border: 1px solid #232a3a;
+  border: 1px solid var(--steel-700);
   border-radius: 999px;
   padding: 5px 13px;
   cursor: pointer;
   flex: none;
 }
 .set-btn:hover {
-  color: #7dd3fc;
+  color: var(--arc-blue-lit);
   border-color: var(--arc, #3b82f6);
 }
 .policy-list {
@@ -1448,8 +1479,8 @@ textarea {
   min-width: 0;
 }
 .policy-kind {
-  font-size: 11px;
-  color: var(--muted, #8b93a7);
+  font-size: 0.6875rem;
+  color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1460,7 +1491,7 @@ textarea {
 }
 .kill-btn {
   font: inherit;
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
   color: var(--molten, #ff4d4d);
   background: transparent;
@@ -1478,26 +1509,26 @@ textarea {
   border-color: rgba(255, 77, 77, 0.45);
 }
 .kill-scope {
-  font-size: 11.5px;
+  font-size: 0.71875rem;
   line-height: 1.9;
-  color: #c9cfda;
-  background: #07080c;
-  border: 1px solid #1a1e28;
+  color: var(--text);
+  background: var(--obsidian-inset);
+  border: 1px solid var(--steel-700);
   border-radius: 10px;
   padding: 12px 14px;
   margin-top: 10px;
-  text-align: left;
+  text-align: start;
 }
 .kill-scope-note {
-  color: #69718a;
+  color: var(--text-dim);
   margin-top: 6px;
 }
 .kill-confirm {
   font: inherit;
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 600;
   color: #fff;
-  background: linear-gradient(135deg, #d43a3a, #ff4d4d);
+  background: var(--danger-fill);
   border: none;
   border-radius: 999px;
   padding: 9px 20px;
@@ -1511,7 +1542,7 @@ textarea {
   width: 34px;
   height: 20px;
   border-radius: 999px;
-  background: #232a3a;
+  background: var(--steel-700);
   border: none;
   position: relative;
   cursor: pointer;
@@ -1521,12 +1552,12 @@ textarea {
 .toggle::after {
   content: "";
   position: absolute;
-  left: 2px;
+  inset-inline-start: 2px;
   top: 2px;
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: #5a6175;
+  background: var(--text-muted);
   transition: transform 0.2s, background 0.2s;
 }
 .toggle.on {
@@ -1557,8 +1588,8 @@ textarea {
   gap: 4px;
 }
 .company-summary {
-  font-size: 11.5px;
-  color: var(--muted, #8b93a7);
+  font-size: 0.71875rem;
+  color: var(--text-muted);
   padding-bottom: 12px;
 }
 .company-row {
@@ -1566,23 +1597,23 @@ textarea {
   align-items: center;
   gap: 12px;
   min-height: 46px;
-  border-top: 1px solid #14171f;
+  border-top: 1px solid var(--steel-800);
 }
 .company-meta {
   flex: 1;
   min-width: 0;
 }
 .company-name {
-  font-size: 13.5px;
+  font-size: 0.84375rem;
 }
 .company-sub {
-  font-size: 11px;
-  color: #69718a;
+  font-size: 0.6875rem;
+  color: var(--text-dim);
   margin-top: 2px;
 }
 .company-status {
-  font-size: 11px;
-  color: var(--muted, #8b93a7);
+  font-size: 0.6875rem;
+  color: var(--text-muted);
   flex: none;
 }
 .company-status.bad {
@@ -1590,8 +1621,8 @@ textarea {
 }
 .company-empty,
 .company-error {
-  font-size: 12.5px;
-  color: #69718a;
+  font-size: 0.78125rem;
+  color: var(--text-dim);
   padding: 10px 0;
 }
 .company-error {
@@ -1606,7 +1637,7 @@ textarea {
   gap: 6px;
   padding-top: 16px;
   margin-top: 12px;
-  border-top: 1px solid #14171f;
+  border-top: 1px solid var(--steel-800);
 }
 .changes-row {
   display: flex;
@@ -1616,12 +1647,12 @@ textarea {
 .changes-path {
   flex: 1;
   min-width: 0;
-  background: #07080c;
+  background: var(--obsidian-inset);
   border: 1px solid var(--gunmetal, #232836);
   border-radius: 8px;
-  color: var(--text, #e8eaf0);
+  color: var(--text);
   font-family: var(--mono, ui-monospace), monospace;
-  font-size: 11.5px;
+  font-size: 0.71875rem;
   padding: 7px 10px;
 }
 .changes-path:focus {
@@ -1633,8 +1664,8 @@ textarea {
   flex-direction: column;
 }
 .changes-summary {
-  font-size: 11px;
-  color: var(--muted, #8b93a7);
+  font-size: 0.6875rem;
+  color: var(--text-muted);
   padding: 6px 0 2px;
 }
 .changes-item {
@@ -1642,10 +1673,10 @@ textarea {
   align-items: center;
   gap: 10px;
   min-height: 30px;
-  border-top: 1px solid #12151d;
+  border-top: 1px solid var(--steel-900);
 }
 .changes-status {
-  font-size: 10.5px;
+  font-size: 0.65625rem;
   color: var(--ember, #ff7a1a);
   width: 22px;
   flex: none;
@@ -1653,23 +1684,23 @@ textarea {
 .changes-file {
   flex: 1;
   min-width: 0;
-  font-size: 11.5px;
+  font-size: 0.71875rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .changes-counts {
-  font-size: 11px;
-  color: #7dd3fc;
+  font-size: 0.6875rem;
+  color: var(--arc-blue-lit);
   flex: none;
 }
 .changes-counts.faint {
-  color: #5a6175;
+  color: var(--text-muted);
 }
 .changes-empty,
 .changes-error {
-  font-size: 11.5px;
-  color: #69718a;
+  font-size: 0.71875rem;
+  color: var(--text-dim);
   padding: 8px 0;
 }
 .changes-error {
@@ -1692,3 +1723,55 @@ textarea {
 }
 .compare-controls > button:disabled { opacity: 0.6; cursor: wait; }
 .compare-controls .company-input { max-width: 100%; }
+
+/* Locale direction, keyboard visibility and bounded recovery messages. */
+:focus-visible { outline: 2px solid var(--arc-blue-lit); outline-offset: 3px; }
+.locale-picker { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.locale-picker select { max-width: 100%; background: var(--obsidian); color: inherit; padding: 6px; }
+.storage-notice { font-size: 0.6875rem; color: var(--steel-400); padding: 6px; overflow-wrap: anywhere; }
+.storage-notice button { margin-inline-start: 8px; }
+pre, code, .mcp-args, .changes-path { direction: ltr; unicode-bidi: isolate; text-align: start; }
+[dir="rtl"] .approve-card, [dir="rtl"] .sheet { text-align: start; }
+button, select, input { min-block-size: 32px; }
+@media (max-width: 850px) {
+  .shell { grid-template-columns: minmax(140px, 180px) minmax(0, 1fr); height: auto; flex: 1; }
+  .inspector { display: flex; grid-column: 1 / -1; min-height: 220px; border-top: 1px solid var(--steel-700); }
+  .rail { max-width: none; }
+  .win { height: auto; min-height: 100vh; }
+  .chat { min-height: 60vh; }
+  .composer-row { flex-wrap: wrap; }
+}
+
+/* Text growth, keyboard focus and bidirectional layouts share both palettes. */
+.theme-picker { display: grid; gap: 4px; margin-block: 12px; }
+.rail, .chat, .inspector, .set-meta, .sheet-body, .composer-row { min-width: 0; }
+.set-row, .sheet-head, .company-row, .composer-row { flex-wrap: wrap; }
+.set-sub, .set-title, .company-summary, .company-name, .storage-notice, .tb-crumb { overflow-wrap: anywhere; }
+button { white-space: normal; overflow-wrap: anywhere; }
+button:disabled, input:disabled, select:disabled, textarea:disabled { cursor: not-allowed; opacity: .65; }
+:is(button,input,select,textarea,a,[tabindex]):focus-visible { outline: 2px solid var(--arc-blue-lit); outline-offset: 3px; }
+.sheet { max-height: calc(100dvh - 24px); }
+.sheet-head { height: auto; min-height: 48px; }
+.titlebar { height: auto; min-height: 40px; }
+pre, code, .changes-path, .mcp-args, .key-input { direction: ltr; unicode-bidi: isolate; }
+[dir="rtl"] .toggle.on::after { transform: translateX(-14px); }
+:lang(hi) { --sans: "Kohinoor Devanagari", "Nirmala UI", system-ui, sans-serif; }
+:lang(ko) { --sans: "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; word-break: keep-all; overflow-wrap: anywhere; }
+:lang(zh) { --sans: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; line-break: strict; }
+:lang(ar) { --sans: "SF Arabic", "Geeza Pro", system-ui, sans-serif; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+}
+@media (max-width: 560px) {
+  .shell { grid-template-columns: minmax(0, 1fr); }
+  .inspector { grid-column: 1; }
+  .rail { max-height: 40vh; border-inline-end: 0; border-bottom: 1px solid var(--steel-700); }
+  .sheet { width: calc(100% - 16px); }
+}
+
+.approve-card { max-height: calc(100dvh - 24px); overflow-y: auto; }
+.approve-btns, .mode-toggle, .seg { flex-wrap: wrap; }
+.seg-btn, .set-btn, .company-status, .policy-badge, .laneb-badge { white-space: normal; overflow-wrap: anywhere; }
+[dir="rtl"] .msg-user { border-radius: 13px 13px 13px 3px; }
+
+.send-btn { height: auto; min-height: 44px; align-self: stretch; }

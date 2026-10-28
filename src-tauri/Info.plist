@@ -7,6 +7,18 @@
   <array>
     <string>en</string>
     <string>tr</string>
+    <string>es-419</string>
+    <string>pt-BR</string>
+    <string>de</string>
+    <string>fr</string>
+    <string>ja</string>
+    <string>ar</string>
+    <string>it</string>
+    <string>ko</string>
+    <string>id</string>
+    <string>pl</string>
+    <string>hi</string>
+    <string>zh-Hans</string>
   </array>
 </dict>
 </plist>

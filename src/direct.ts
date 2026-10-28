@@ -1,3 +1,5 @@
+import { withinRequestBudget, boundedJson } from "./request-budget";
+import { redactSummary } from "./governance";
 /**
  * Lane-A direct — single-shot BYOK completions straight to a provider's API,
  * bypassing the Braavolabs server entirely. A VERBATIM port of the CLI's
@@ -118,19 +120,29 @@ export async function directChat(
   apiKey: string,
   model: string,
   question: string,
-  o: { fetchImpl?: FetchLike } = {},
+  o: { fetchImpl?: FetchLike; signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<DirectChatResult> {
   const fetchImpl = o.fetchImpl ?? (globalThis.fetch as FetchLike);
   const spec = SPECS[provider];
-  const res = await fetchImpl(spec.url, {
-    method: "POST",
-    headers: spec.headers(apiKey),
-    body: JSON.stringify(spec.body(model, question)),
-  });
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const message = json?.error?.message ?? json?.error ?? res.statusText ?? `request failed (${res.status})`;
-    throw new DirectApiError(provider, res.status, String(message));
+  const maskExactKey = (text: unknown) => apiKey ? String(text).split(apiKey).join("[redacted]") : String(text);
+  const safe = (text: unknown) => redactSummary(maskExactKey(text));
+  try {
+    return await withinRequestBudget(async signal => {
+      const res = await fetchImpl(spec.url, {
+        method: "POST", redirect: "error", headers: spec.headers(apiKey),
+        body: JSON.stringify(spec.body(model, question)), signal,
+      });
+      const json = await boundedJson(res, signal);
+      signal.throwIfAborted();
+      if (!res.ok) {
+        throw new DirectApiError(provider, res.status, safe(json?.error?.message ?? json?.error ?? res.statusText ?? `request failed (${res.status})`));
+      }
+      return { content: maskExactKey(spec.parse(json)), model, provider };
+    }, o);
+  } catch (error) {
+    if (error instanceof DirectApiError) throw error;
+    if (error instanceof DOMException && ["AbortError", "TimeoutError"].includes(error.name)) throw error;
+    // Fetch adapters can echo headers/keys too; sanitize every exception exit.
+    throw new Error(safe(error instanceof Error ? error.message : error));
   }
-  return { content: spec.parse(json), model, provider };
 }

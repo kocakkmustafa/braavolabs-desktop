@@ -1,3 +1,4 @@
+import { rememberHistoryIdentity } from "../sessions";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
@@ -6,7 +7,7 @@ import { ApiError } from "../client";
 import * as clientModule from "../client";
 import type { Config } from "../config";
 import { toLoginError } from "../render";
-import { makeT } from "../i18n";
+import { makeT, LOCALES, type Locale } from "../i18n";
 
 const source = ts.createSourceFile("ui.ts", readFileSync(new URL("../ui.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
 const functions = ["renderLogin", "mapLoginErrorText"].map(name => {
@@ -44,7 +45,7 @@ class Element {
   }
 }
 
-function fixture(locale: "en" | "tr" = "en") {
+function fixture(locale: Locale = "en") {
   const nodes: Element[] = [];
   const el = (tag: string, cls = "", text = "") => {
     const node = new Element(tag.toUpperCase(), cls); node.textContent = text; nodes.push(node); return node;
@@ -54,7 +55,7 @@ function fixture(locale: "en" | "tr" = "en") {
   const accountStore = vi.fn(); const cfg: Config = { apiUrl: "https://api.braavolabs.com/api/v1" };
   const ui = runInNewContext(`${compiled}\n({renderLogin,mapLoginErrorText});`, {
     ...clientModule, el, document: { createTextNode: (text: string) => el("text", "", text) },
-    runWorkspaceTeardown() {}, initReducedMotion() {}, login, saveApiUrl,
+    rememberHistoryIdentity, runWorkspaceTeardown() {}, initReducedMotion() {}, languageSelector: () => el("select"), themeSelector: () => el("select"), login, saveApiUrl,
     ApiError, toLoginError, renderWorkspace, localStorage: { setItem: accountStore },
   }) as { renderLogin(deps: unknown): void; mapLoginErrorText: (t: ReturnType<typeof makeT>, view: ReturnType<typeof toLoginError>) => string };
   const deps = { root: el("div"), cfg, t: makeT(locale), persist };
@@ -258,3 +259,14 @@ describe("actual desktop login UI source functions", () => {
     });
   }
 });
+
+for (const locale of LOCALES.filter(value => value !== "en" && value !== "tr")) {
+  it(`${locale} wires each native validation flag to the correct localized input message`, () => {
+    for (const [id, flag, key] of [["login-email", "valueMissing", "requiredEmail"], ["login-password", "valueMissing", "requiredPassword"], ["login-email", "typeMismatch", "invalidEmail"]] as const) {
+      const f = fixture(locale), field = f.field(id); field.validity[flag] = true; field.fire("invalid");
+      expect(field.validationMessage).toBe(makeT(locale)(`login.${key}`));
+      expect(field.validationMessage).not.toBe(makeT("en")(`login.${key}`));
+      expect(f.login).not.toHaveBeenCalled();
+    }
+  });
+}

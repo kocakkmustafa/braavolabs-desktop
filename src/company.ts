@@ -1,3 +1,4 @@
+import { getLocale } from "./i18n";
 /**
  * Company surface — pure view mappers (design v3 "Company" mode).
  *
@@ -18,8 +19,8 @@ export interface CompanyView {
   status: string;
   /** idle = steel, running = ember, done = arc — matches the StatusDot rule. */
   tone: "steel" | "ember" | "arc" | "molten";
-  agentCount: number;
-  pipelineCount: number;
+  agentCount: number | null;
+  pipelineCount: number | null;
   /** True only when a pause action can succeed (server 404s otherwise). */
   canPause: boolean;
   /** True only when a resume action can succeed. */
@@ -45,7 +46,7 @@ export interface JobView {
 }
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
-const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+const count = (v: unknown): number | null => typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null;
 
 function toneFor(status: string): CompanyView["tone"] {
   switch (status.toUpperCase()) {
@@ -69,7 +70,7 @@ export function toCompanyViews(raw: unknown): CompanyView[] {
     const c = r as Record<string, unknown>;
     const id = str(c.id);
     if (!id) continue;
-    const status = str(c.status) || "DRAFT";
+    const status = str(c.status);
     // The list endpoint returns counts under `_count` (Prisma) on some shapes
     // and flattened on others — accept both rather than showing 0 for a company
     // that clearly has agents.
@@ -79,8 +80,8 @@ export function toCompanyViews(raw: unknown): CompanyView[] {
       name: str(c.name) || id,
       status,
       tone: toneFor(status),
-      agentCount: num(c.agentCount) || num(counts.agents),
-      pipelineCount: num(c.pipelineCount) || num(counts.pipelines),
+      agentCount: count(c.agentCount) ?? count(counts.agents),
+      pipelineCount: count(c.pipelineCount) ?? count(counts.pipelines),
       canPause: status.toUpperCase() === "ACTIVE",
       canResume: status.toUpperCase() === "PAUSED",
     });
@@ -119,11 +120,9 @@ export function relativeAge(iso: string | null, now: number): string {
   const then = Date.parse(iso);
   if (!Number.isFinite(then)) return "";
   const mins = Math.floor(Math.abs(now - then) / 60000);
-  if (mins < 1) return "now";
-  if (mins < 60) return `${mins}m`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h`;
-  return `${Math.floor(hours / 24)}d`;
+  const unit = mins < 60 ? "minute" : mins < 1440 ? "hour" : "day";
+  const value = mins < 60 ? mins : mins < 1440 ? Math.floor(mins / 60) : Math.floor(mins / 1440);
+  return new Intl.NumberFormat(getLocale(), { style: "unit", unit, unitDisplay: "narrow" }).format(value);
 }
 
 /** One-line summary for the header: "3 companies · 2 active · 7 jobs". */

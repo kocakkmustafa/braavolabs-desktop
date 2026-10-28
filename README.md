@@ -3,6 +3,8 @@
 Native desktop app (Tauri v2) for multi-model chat, cascade, and savings —
 the same Braavolabs server that powers the CLI, in an obsidian three-pane UI.
 
+Support: [support@yulalab.com](mailto:support@yulalab.com).
+
 > **Server = orchestration.** The Braavolabs server owns multi-model routing,
 > cascade, and savings. The desktop adds two **Lane-A** side-channels that do
 > NOT touch the server — **Local (Ollama)** and **BYOK Direct** — but even these
@@ -14,7 +16,7 @@ the same Braavolabs server that powers the CLI, in an obsidian three-pane UI.
 ## Architecture
 
 ```
-packages/desktop/
+desktop/
 ├── index.html              webview entry (mirrors the Tauri CSP)
 ├── vite.config.ts          builds ui → dist/, hosts the vitest suite
 ├── src/                    frontend (TypeScript, no framework)
@@ -44,24 +46,23 @@ packages/desktop/
 │   ├── mcp.ts              MCP stdio client: register servers, tools/list, gated
 │   │                       tools/call (JSON-RPC 2.0, partial-line, timeout→kill).
 │   │                       Rust-host session / memory-mirror fallback. Tested (21).
-│   ├── i18n.ts             single messages object, en + tr (i18n-ready).
-│   ├── ui.ts               thin DOM shell (3-pane + keys + Lane-B + approval
-│   │                       modal + Activity/audit tab) — not unit-tested.
+│   ├── i18n.ts             eight catalogues, explicit locale preference, Intl and RTL.
+│   ├── ui.ts               DOM shell (3-pane + keys + Lane-B + approval modal);
+│   │                       source-executing handler regression tests.
 │   ├── main.ts             entry: hydrate → login or workspace.
 │   ├── styles.css          obsidian palette (arc-blue / ember / molten; NO green).
-│   └── __tests__/          115 tests (client / render / store / i18n / keyvault /
-│                           local / direct / identity / spawn / governance / mcp).
+│   └── __tests__/          client / UI handlers / render / store / i18n / keyvault /
+│                           local / direct / identity / spawn / governance / mcp.
 └── src-tauri/              Rust host (STANDALONE cargo package)
     ├── Cargo.toml          tauri = "2"; not part of any cargo workspace.
-    ├── tauri.conf.json      window + CSP (self + braavolabs.com + Ollama
-    │                        localhost + 3 BYOK provider API hosts).
+    ├── tauri.conf.json      window + CSP (self + HTTPS endpoints + loopback).
     ├── capabilities/default.json  core webview permissions for "main".
     ├── icons/              app icons (ember mark).
     └── src/{main,lib}.rs   window + token + BYOK-key OS-scoped commands +
                             Lane-B spawn_probe + the GOVERNANCE gate (policy
                             mirror, one-time tokens, 0600 audit log, command
                             choke point) + the MCP stdio client (mcp.json,
-                            spawn + JSON-RPC session, gated tools/call) + 16 Rust
+                            spawn + JSON-RPC session, gated tools/call) and Rust
                             unit tests. THIN on AI, but legitimately owns
                             permission/sandbox + host-side process enforcement.
 ```
@@ -128,7 +129,7 @@ Braavolabs server (above); **Local** and **Direct** bypass it entirely.
 
 ### Local · Ollama (`local.ts`)
 
-Keyless, offline. Talks straight to a local Ollama daemon:
+After an initial account sign-in and model installation, Local is keyless and runs without the Braavolabs API. Sign-in itself requires a connection. It talks straight to a local Ollama daemon:
 
 | Call | Endpoint | Notes |
 |---|---|---|
@@ -158,12 +159,12 @@ composer's optional model field — the defaults above are pinned so a build nev
 silently changes behavior.
 
 **Key storage (OS keychain, S-010).** The Rust host stores BYOK keys — and the
-auth token/refresh — in the **OS keychain** on the platforms this app ships to:
-the **macOS Keychain** and the **Windows Credential Manager** (via the `keyring`
-crate), encrypted at rest and OS-gated. On any other platform, or if the keychain
-is unreachable, it falls back to a single owner-only `vault.json` (`0600` on
-unix); the `secret_backend_secure` command reports which backend is live so the
-UI never over-claims protection. The keychain isn't enumerable, so a
+auth token/refresh — in the **macOS Keychain** or **Windows Credential Manager**
+on those operating systems (via the `keyring`
+crate), encrypted at rest and OS-gated. On macOS/Windows, an unreachable keychain
+returns an error; there is no plaintext fallback. Other platforms use a single
+owner-only `vault.json` (`0600` on unix); `secret_backend_secure` reports the
+backend to the UI. The keychain isn't enumerable, so a
 `keys-index.json` holds provider → **masked** fingerprint (`first4…last4`) ONLY —
 never a secret — which is all Settings → **BYOK keys** ever reads for its list.
 The raw value leaves the store solely via `key_get`, retrieved **one-time at
@@ -171,9 +172,10 @@ dispatch** and passed straight into the provider's auth header — never rendere
 the DOM, never logged. Any legacy `keys.json` / `secrets.json` (the earlier 0600
 plaintext files) are migrated into the keychain and deleted on first access
 (backend write precedes file removal, so a mid-migration crash can only leave the
-old file, never lose a secret). Only the three provider API hosts above are added
-to the CSP `connect-src`; the closed `default-src 'self'` / `object-src 'none'` /
-`frame-ancestors 'none'` policy is otherwise preserved.
+old file, never lose a secret). The current Tauri `connect-src` permits HTTPS
+endpoints and loopback, including configured self-hosts. Direct provider request
+URLs remain defined in `src/direct.ts`; `default-src 'self'`, `object-src 'none'`
+and `frame-ancestors 'none'` are preserved.
 
 ---
 
@@ -264,20 +266,21 @@ The dialog runs async off the main thread (non-blocking `show()` + oneshot chann
 so it can't deadlock the event loop.
 
 The dialog body is derived from the **enforced binding fields** — the actual
-`argv` + `cwd` (for a command), `server` + `tool` (for an MCP call), `path` (for a
+`argv` + `cwd` (for a command), the complete immutable invocation (for MCP), `path` (for a
 file write) — the exact things the token binds to and the host runs. It is **never**
 the webview's free-text `summary`: a compromised webview could set `summary` to
 "Sync notes folder" while requesting `rm -rf` in `argv`, so the human must see
-what actually runs. Each field is sanitized to a single bounded line (control
-chars/newlines stripped, length-capped) so the webview can't inject fake dialog
+what actually runs. Generic fields are sanitized to a bounded line; MCP uses
+complete JSON-quoted fields and refuses a preview that cannot fit so the webview can't inject fake dialog
 chrome. The in-app arc-rim modal remains a rich preview, but the native dialog is
 the **trust anchor** — a webview can neither forge an OS click nor control what the
 dialog says. The Lane-A Direct, Lane-B launch, and Local lanes funnel through this
 gate.
 
-> **Human gate:** the native dialog's actual rendering + click flow is verified in
-> a GUI session (`cargo tauri dev`), like every other desktop runtime surface —
-> the host wiring, fail-closed timeout, and token logic are unit-/compile-verified.
+> **Human gate:** the native dialog's actual rendering and click flow require
+> verification in a GUI session (`cargo tauri dev`). Host wiring, fail-closed
+> timeout and token logic have headless tests; those do not establish current
+> native UI acceptance.
 
 ### 3. Append-only audit ledger (0600, secret-free)
 
@@ -341,54 +344,91 @@ id-matching helpers have 7 Rust cases).
 
 ### The moat applies to MCP too
 
-A `tools/call` is a **side effect**, so it passes the same governance gate as
-every other lane (§ Governance). `tools/list` is read-only discovery and is
-**not** gated; `tools/call` is `mcp.tool` → **require-approval**:
+Both discovery and calls launch a native process and require native approval.
+The Rust host prepares a one-use, 120-second invocation: resolved executable,
+launch argv, working directory, inherited environment snapshot and JSON tool
+arguments. The complete JSON-quoted effective fields appear in the native
+preview; oversized previews are refused. The renderer executes with only the
+token. The legacy name-only tool-call IPC no longer exists.
 
-```
-request('mcp.tool', {server, tool}) → approval modal → one-time token
-        → mcp_call_tool(token, …)  →  host consumes the token  →  spawn + call
-```
+Registry edits (including A→B→A), credential changes, explicit rejection and Kill
+invalidate outstanding plans. Final validation, token consumption and OS spawn
+share one host lock. Raw arguments and environment stay out of audit/relay; an
+action ID links the redacted lifecycle records. This is an ordinary OS process,
+not a sandbox or a verified cloud account. Unix executable device/inode identity is also checked. External binary replacement between
+check and exec, interpreters, scripts and descendants remain residual risks.
+Native concurrency, dialogs and real process teardown require separate
+acceptance. Windows MCP launch is held closed in host prepare/execute until
+executable-identity and native approval acceptance; provider/chat modes remain
+available. The capability read is descriptive and cannot mint a grant; headless adapters do not establish these properties.
 
-Crucially, the token is **consumed host-side** (Rust), bound to `{server, tool}`,
-exactly like `governed_command`. The webview never spends it — so a compromised
-webview cannot run a tool without a real host-side consume, and a replayed,
-forged, or mis-bound token is refused *before the server is ever spawned* (tested:
-no-token → no-spawn; token-for-tool-A → refused for tool-B; replay-after-consume
-→ refused). Tool errors are honest and **molten**-rimmed; a success is neutral
-steel — there is no green anywhere.
+Kill aborts local HTTP work, revokes host approvals, requests managed command/MCP
+cancellation, kills managed PTYs and stops the companion locally. Independent
+cleanup continues when another part fails. Remote provider work, external
+terminals and descendants may continue; cancellation does not prove no billing.
+Direct/Local and server dispatch use a 120-second whole-response deadline; JSON
+provider/local bodies and native retained output are capped at 1 MiB. Native RPC/command waits run on
+blocking workers so the IPC dispatcher can process Kill. MCP stdin uses one
+bounded writer queue/ack with the same deadline/cancel checks; a blocked write
+does not own the reader/deadline loop. There is
+no automatic inference retry after these failures.
+
+Local transcripts retain up to 50 chats, 200 entries/chat and 4,000 characters per
+entry. The UI reports truncation, quota failure and unreadable history, and can
+export retained content. Quota failure keeps the conversation in memory without
+automatically evicting 3/4 of persisted history. A corrupt original is preserved
+for export/recovery; this is bounded convenience history, not an archive. New
+runtime history is partitioned by API base + userId/tenantId only after a
+successful login/profile reply matches the exact API/token snapshot. Decoded
+JWT labels are never an identity proof or permission to load disk history.
+Hydrated boot checks the existing authenticated /users/me route with a 5-second
+bound; offline/failed/unknown identity leaves existing bytes untouched and uses
+volatile history for new Local work. A changed token/API requires a fresh
+verified binding before another namespace can be opened. The old shared v1 record is preserved
+and never silently loaded as another account; recovering it requires owner
+verification. Ordinary scoped logout never deletes that ownerless legacy
+record. Logout reports scoped disk cleanup failure; in-memory history is cleared.
+
+The supported catalogues are `tr`, `en`, `es-419`, `pt-BR`, `de`, `fr`, `ja`, `ar`.
+A saved explicit choice takes precedence over device negotiation. Arabic sets
+RTL; code/JSON remains LTR. Numbers, USD and times use Intl. Native approval
+buttons and host field labels use the chosen locale without changing authority.
+Catalogue parity and helper tests do not replace native-speaker, keyboard,
+screen-reader or native WebView acceptance.
 
 ---
 
 ## Develop & verify (headless)
 
 ```bash
-pnpm --filter @braavolabs/desktop test    # vitest — 115 tests
-pnpm --filter @braavolabs/desktop build   # tsc --noEmit && vite build → dist/
-pnpm --filter @braavolabs/desktop lint    # tsc --noEmit
+# From this repository's root; use each run's report for current test counts.
+pnpm test                               # vitest
+pnpm build                              # tsc --noEmit && vite build → dist/
+pnpm lint                               # tsc --noEmit
 
 # Rust host (cargo/rustc live in ~/.cargo/bin — not on PATH by default):
 export PATH="$HOME/.cargo/bin:$PATH"
-cd packages/desktop/src-tauri && cargo check   # requires dist/ to exist first
-cargo test --lib                               # 16 governance + MCP unit tests
+cd src-tauri
+cargo check --locked                    # requires dist/ to exist first
+cargo test --locked --lib                # default suite skips real Keychain test
 ```
 
 `cargo check` compiles `tauri::generate_context!`, which reads
 `build.frontendDist = "../dist"` — run the frontend `build` first so `dist/`
 exists.
 
-## Secret storage (OS keychain, S-010 — DONE)
+## Secret storage (OS keychain, S-010 implementation)
 
 Two kinds of secret, same host-side backend:
 
 - **Auth token + refresh** → `secure_store_{get,set,clear}` (accounts `auth.token` / `auth.refreshToken`).
 - **BYOK provider keys** → `key_{add,list,remove,get}` (accounts `byok.<provider>`).
 
-Both live in the **OS keychain** on the shipping platforms — **macOS Keychain**
-and **Windows Credential Manager** (via the `keyring` crate) — encrypted at rest
+Both use the **macOS Keychain** or **Windows Credential Manager** on those
+operating systems (via the `keyring` crate), encrypted at rest
 and OS-gated. This is **fail-closed**: on macOS/Windows a keychain hiccup returns
-an error, it never silently writes plaintext. On non-shipping platforms
-(Linux/other) it falls back to a single `0600` `vault.json`; `secret_backend_secure`
+an error, it never silently writes plaintext. On Linux/other platforms it uses
+a single `0600` `vault.json`; `secret_backend_secure`
 reports which backend is live so the UI never over-claims. `key_list` reads only
 the masked `keys-index.json` (provider → `first4…last4`, never a secret); the raw
 value leaves the host solely via `key_get`, one-time at direct-dispatch. Legacy
@@ -397,9 +437,10 @@ value leaves the host solely via `key_get`, one-time at direct-dispatch. Legacy
 `.corrupt`, never deleted). Outside Tauri (vitest / `vite` browser preview) the TS
 store uses an in-memory map, so a secret never lands on disk in dev/test.
 
-**Threat-model scope (honest).** The keychain protects secrets **at rest** — from
-disk theft, other local processes, Time Machine/backups, and forensic recovery —
-which the old plaintext files did not.
+**Protection scope.** The native backend uses OS credential storage rather than
+plaintext application files on macOS/Windows. Actual access and backup protection
+depend on the OS policy and environment; source and mock tests do not establish
+blanket isolation from other processes or forensic recovery.
 
 **Runtime gate (R4 — closed).** `key_get` is **no longer un-gated**: it now consumes
 a one-time `direct.dispatch` governance token **bound to the requested provider**
@@ -414,21 +455,112 @@ today, but only after a real, provider-bound, human-approved grant).
 
 ## Human gates (NOT done here — require a GUI session / signing identity / live services)
 
-- `cargo tauri dev` / `cargo tauri build` — launches the actual window; needs a
-  desktop session. (`pnpm --filter @braavolabs/desktop dev:ui` serves just
-  the frontend in a browser for UI iteration.)
+- `cargo tauri dev` launches the actual window and needs a desktop session.
+  `cargo tauri build` produces native artifacts; successful compilation does not
+  establish GUI or signed-distribution acceptance. (`pnpm --filter
+  @braavolabs/desktop dev:ui` serves just the frontend in a browser.)
 - **Live Lane-A dispatch** — driving a real Ollama daemon (Local) or a real BYOK
   key against a provider (Direct) needs those services present; the request
   shaping is unit-tested with injected fetch, but an end-to-end round-trip is a
   GUI/live-service gate.
 - **Signed build** — Apple Developer ID / Windows code-signing cert.
 - **Notarization** — Apple notary submission + stapling.
-- **OS-keychain on Windows** — the storage is DONE and unit-tested; the macOS
-  Keychain round-trip is verified locally (`cargo test --ignored keychain_roundtrip`).
-  The Windows Credential Manager path shares the same `keyring` API but its live
-  round-trip needs a Windows session to confirm.
+- **Real OS credential storage on macOS and Windows** — production storage has
+  mock-backed tests; default `cargo test --locked` does not establish live OS
+  acceptance. The test-only `keychain_fixture` module has standalone mock tests
+  (`rustc --edition 2021 --test src-tauri/src/keychain_fixture.rs`) and a macOS
+  live test that is both `#[ignore]` and guarded by an explicit opt-in.
+  When separately authorized, from `src-tauri`:
+  ```bash
+  BRAAVO_SYNTHETIC_KEYCHAIN_TEST=allow-one-owned-fixture \
+    cargo test --locked keychain_fixture::macos::keychain_roundtrip -- \
+    --ignored --exact --test-threads=1
+  ```
+  This creates one fresh account `test.s010.roundtrip.desktop-keychain-test.<nonce>`
+  under service `braavolabs-desktop`, using an atomic add that refuses collisions.
+  It reads only the newly owned item's synthetic value, deletes by that owned
+  native reference and verifies metadata-only absence. It never selects auth or
+  BYOK accounts. Errors, unwinding panics and cooperative SIGINT/SIGTERM requests
+  go through checked cleanup; cleanup failure fails acceptance and reports only
+  the fixture identifier. SIGKILL, abort or OS failure can still leave a fixture;
+  never delete an unknown/pre-existing item to recover it. This is OS primitive
+  acceptance, not app login/BYOK persistence or provider acceptance.
+  The live fixture is macOS-only: Windows needs a separately reviewed adapter
+  that can preserve existing credentials and a real Windows session. The former
+  fixed-name, overwriting Keychain/Credential Manager test was removed. Production
+  storage and its native permission policies are unchanged.
 - **Real OS sandbox** — wrapping the `governed_command` choke point in a
   platform sandbox (container / macOS seatbelt / Windows AppContainer). The
   governance enforcement points (policy, one-time tokens, audit, workdir
   allowlist, argv arrays, env-clean, timeout) are in place today; OS-level
   isolation around them is the remaining hardening — see "Governance & sandbox".
+
+
+## Direct distribution outside app stores
+
+A local build, a signing identity, an OS credential fixture, notarization and a
+public release each provide different evidence. Authorize the exact action and
+artifact before signing, using credentials, uploading or running real accounts.
+Existing signed packages and installed apps remain protected; a valid old app
+signature does not identify a new build's source.
+
+### macOS app and DMG
+
+1. Freeze the source commit/tree and lockfile hashes. Confirm the version in
+   `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json` agrees.
+   Record the intended bundle ID `com.braavolabs.desktop`, architecture(s) and
+   current source assets. Use the canonical checkout and one bounded output
+   location; preserve any existing build cache and unique artifacts.
+2. Inspect existing identity metadata with `security find-identity -v -p
+   codesigning`. Select the intended team's **Developer ID Application** identity
+   for the app, rather than a development or installer identity. Metadata presence
+   does not prove permission to use its private key. Do not create/import a
+   certificate, unlock a keychain, export a key or change a profile to clear a
+   blocker. Apple describes the distinct certificate roles in its
+   [Developer ID guide](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/).
+3. After separate native-build/signing approval, the existing
+   `pnpm tauri:build:mac` script builds `universal-apple-darwin`. A deliberately
+   selected single architecture must have a separate acceptance label. Tauri
+   accepts an existing signing identity through `APPLE_SIGNING_IDENTITY`;
+   keep identity selection local and do not add credentials to the repo.
+   The build configuration already enables hardened runtime. Before running a
+   bundle command, establish whether existing notarization settings would also
+   cause an Apple upload; that upload needs its own approval. See
+   [Tauri's local signing guide](https://v2.tauri.app/distribute/sign/macos/).
+4. Bind each produced app/archive to the source receipt: SHA256, size, bundle ID,
+   version, architectures, signing team, hardened runtime and timestamp. Verify
+   the new app with `codesign --verify --deep --strict --all-architectures` and
+   inspect its non-secret signature metadata. A failed Apple system control
+   makes that execution context inconclusive; stop without changing trust or
+   re-signing an old installed app. Keep unsigned/ad-hoc and Developer ID
+   artifacts explicitly distinguishable.
+5. Notarization is an Apple upload. Use only a separately authorized, existing
+   Apple authentication path; do not create a key, password or keychain profile.
+   Record the exact submitted archive hash and submission result, then validate
+   the stapled ticket and Gatekeeper assessment of the final delivered artifact.
+   Follow [Apple's distribution guidance](https://developer.apple.com/developer-id/).
+   Missing notarization access remains a blocker even when identity metadata and
+   local signature checks pass. No Mac App Store upload is part of this path.
+6. Run separately approved native user acceptance on that exact artifact: launch,
+   error handling, account transition and companion reconnect/cancel behavior.
+   The one-owned-item synthetic Keychain fixture described above proves only an
+   OS primitive round trip. Real login/BYOK persistence and provider requests
+   need their own scope; provider costs require an explicit bound. Browser/mock
+   results and an old installed app cannot replace this artifact's acceptance.
+7. Approve the final artifact hashes and destination before public release.
+   Keep a source-to-artifact receipt and hash-check cleanup of this run's own
+   temporary output; retain unique signed packages and protected user data.
+
+### Windows and Linux
+
+| Target | Existing build evidence path | Additional distribution acceptance |
+| --- | --- | --- |
+| Windows x64 | `.github/workflows/ci.yml` defines native tests and NSIS build on `windows-2022`, with a SHA256 receipt and recorded Authenticode status. | Recording a status does not require it to be `Valid`. Verify the intended signer and final installer on Windows, then installation/launch/uninstall and real Credential Manager behavior. The macOS fixture does not cover Windows. |
+| Linux amd64 | `.github/workflows/release-linux.yml` builds `.deb` and AppImage, verifies files/architecture and runs a native Linux smoke. | Bind the selected source and final hashes to installation/launch on the supported host. Store and public-host uploads need a separate destination decision. |
+
+Remote workflows are not a prerequisite for local signing. This repository is
+private: confirm cost/authorization before dispatching CI, opening a PR or
+pushing a release tag. The Linux release workflow can run for `v*` tags or manual
+dispatch; do not use a tag as a harmless documentation check. A Windows CI build
+is not physical Windows distribution acceptance. Neither route authorizes store
+upload, profile changes or new signing credentials.
