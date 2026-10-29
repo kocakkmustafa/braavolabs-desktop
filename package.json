@@ -17,7 +17,7 @@
     "tauri:build:mac:unsigned": "APPLE_SIGNING_IDENTITY=- tauri build --target universal-apple-darwin"
   },
   "dependencies": {
-    "zod": "^3.24.0"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4",
