@@ -1289,6 +1289,76 @@ mod tests {
         });
     }
 
+    /// Company panel routes against a REAL daemon (CLI feat/chat). Opt-in, same env
+    /// var as `live_daemon_e2e`; needs at least one company (e.g. `braavo company
+    /// init Test --watch https://example.com` in the throwaway HOME).
+    #[test]
+    #[ignore]
+    fn live_daemon_panel_e2e() {
+        let dir = std::env::var("BRAAVO_E2E_DAEMON_DIR").expect("set BRAAVO_E2E_DAEMON_DIR");
+        let ep = read_endpoint(Path::new(&dir)).expect("daemon state + token");
+        let home = Path::new(&dir).parent().and_then(Path::parent).expect("<HOME>/.braavo/daemon").to_path_buf();
+        rt().block_on(async {
+            let list = request(&ep, "GET", "/v1/companies", None).await.unwrap();
+            assert_eq!(list.status, 200, "{list:?}");
+            let companies = list.body["companies"].as_array().unwrap().clone();
+            assert!(!companies.is_empty(), "create a company first");
+            let mut with_findings = 0;
+            for c in &companies {
+                let id = c["id"].as_str().unwrap();
+                let panel = request(&ep, "GET", &format!("/v1/companies/{id}/panel"), None).await.unwrap();
+                assert_eq!(panel.status, 200, "{panel:?}");
+                assert!(panel.body["tree"].is_array() && panel.body["agents"].is_array());
+                let f = read_findings(&home, id, "market-analyst").unwrap();
+                if !f.text.is_empty() {
+                    with_findings += 1;
+                    assert!(f.text.contains("## "), "{f:?}");
+                }
+            }
+            println!("companies: {}, with market-analyst findings: {with_findings}", companies.len());
+
+            let id = companies[0]["id"].as_str().unwrap();
+            let panel = request(&ep, "GET", &format!("/v1/companies/{id}/panel"), None).await.unwrap().body;
+            let agent = panel["agents"][0]["id"].as_str().unwrap().to_string();
+            let routine = panel["routines"][0]["id"].as_str().map(str::to_string);
+
+            // Events: subscribe, mutate, see agent.status + company.changed, unsubscribe.
+            let subs = DaemonSubscriptions::default();
+            let rx = subs.0.register("ev_e2e").unwrap();
+            let mut events = Vec::new();
+            let listen = async {
+                let mut stream = connect(&ep).await?;
+                events_on(&mut stream, &ep, rx, |e| events.push(e)).await
+            };
+            let act = async {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let paused = request(&ep, "PATCH", &format!("/v1/agents/{agent}"), Some(&serde_json::json!({ "status": "paused" }))).await.unwrap();
+                assert_eq!(paused.body["agent"]["status"], "paused", "{paused:?}");
+                let resumed = request(&ep, "PATCH", &format!("/v1/agents/{agent}"), Some(&serde_json::json!({ "status": "idle" }))).await.unwrap();
+                assert_ne!(resumed.body["agent"]["status"], "paused");
+                let refused = request(&ep, "PATCH", &format!("/v1/agents/{agent}"), Some(&serde_json::json!({ "effort": "turbo" }))).await.unwrap();
+                assert_eq!(refused.status, 400, "{refused:?}");
+                if let Some(rt_id) = &routine {
+                    let run = request(&ep, "POST", &format!("/v1/routines/{rt_id}/run"), None).await.unwrap();
+                    assert_eq!(run.status, 200, "{run:?}");
+                    println!("run now: {}", run.body);
+                }
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                assert!(subs.0.cancel("ev_e2e"));
+            };
+            let (reply, _) = futures_util::future::join(listen, act).await;
+            assert_eq!(reply.unwrap().status, 499);
+            let names: Vec<_> = events.iter().map(|e| e.event.as_str()).collect();
+            println!("events: {names:?}");
+            assert!(names.contains(&"agent.status") && names.contains(&"company.changed"), "{names:?}");
+            if routine.is_some() {
+                assert!(names.contains(&"routine.executed"), "{names:?}");
+            }
+            // Outside the panel contract: still refused before any connection.
+            assert_eq!(request(&ep, "GET", &format!("/v1/companies/{id}/org"), None).await.unwrap_err(), ERR_ROUTE);
+        });
+    }
+
     #[test]
     fn run_now_gets_a_longer_bound() {
         assert_eq!(route_timeout("POST", "/v1/routines/rt_1/run"), RUN_ROUTINE_TIMEOUT);
