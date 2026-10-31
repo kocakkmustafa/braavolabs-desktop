@@ -3850,6 +3850,7 @@ pub fn run() {
         .manage(Governance(Mutex::new(GateState::default())))
         .manage(pty::PtyHostState::default()) // R6 Lane-B real-PTY session registry
         .manage(daemon::DaemonStreams::default()) // in-flight daemon chat turns (cancel on kill/exit)
+        .manage(daemon::DaemonSubscriptions::default()) // company panel event streams (closed on exit)
         .manage(BrowserHostState::default()) // R6 Lane-C governed CDP browser connection
         .invoke_handler(tauri::generate_handler![
             secure_store_get,
@@ -3889,7 +3890,10 @@ pub fn run() {
             daemon::daemon_status,
             daemon::daemon_request,
             daemon::daemon_send_message,
-            daemon::daemon_stream_cancel
+            daemon::daemon_stream_cancel,
+            daemon::daemon_events_subscribe,
+            daemon::daemon_events_unsubscribe,
+            daemon::daemon_findings
         ])
         .build(tauri::generate_context!())
         .expect("error while building the Braavolabs desktop application")
@@ -3904,6 +3908,9 @@ pub fn run() {
                 }
                 if let Some(streams) = app_handle.try_state::<daemon::DaemonStreams>() {
                     streams.cancel_all();
+                }
+                if let Some(subs) = app_handle.try_state::<daemon::DaemonSubscriptions>() {
+                    subs.0.cancel_all();
                 }
             }
         });

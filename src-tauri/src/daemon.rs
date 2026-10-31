@@ -36,6 +36,9 @@ use futures_util::future::{select, Either};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Whole-request bound for the JSON endpoints.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// "Run now" executes a routine inline: web preflight over every watched page
+/// plus, on a change, one model call. Bounded, but well above a JSON call.
+const RUN_ROUTINE_TIMEOUT: Duration = Duration::from_secs(600);
 /// Max silence between bytes of a streamed turn. Reasoning models can think for
 /// a while before the first delta, so this is generous; the user can always abort.
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -122,8 +125,10 @@ fn valid_query(query: &str, allowed_keys: &[&str]) -> bool {
     })
 }
 
-/// Only the chat routes of the contract. Everything else (companies, routines,
-/// events, a turn via the generic command, any other host) is refused.
+/// The chat routes of the contract plus the company panel routes (plan 2.5,
+/// slices D1/D2). Everything else (other company/routine routes, the event
+/// stream, a turn via the generic command, any other host) is refused; events
+/// go only through `daemon_events_subscribe`.
 pub fn validate_route(method: &str, path_and_query: &str) -> Result<(), String> {
     let refuse = || Err(ERR_ROUTE.to_string());
     let (path, query) = match path_and_query.split_once('?') {
@@ -144,6 +149,12 @@ pub fn validate_route(method: &str, path_and_query: &str) -> Result<(), String> 
         ("GET" | "PATCH" | "DELETE", ["v1", "conversations", id]) => *id != "import" && valid_id(id) && query.is_none(),
         ("POST", ["v1", "conversations", id, "abort"]) => valid_id(id) && query.is_none(),
         ("GET", ["v1", "search"]) => query_ok(&["q", "limit"]),
+        // Company panel (D1/D2).
+        ("GET" | "POST", ["v1", "companies"]) => query.is_none(),
+        ("GET", ["v1", "companies", id, "panel"]) => valid_id(id) && query.is_none(),
+        ("POST", ["v1", "companies", id, "hire"]) => valid_id(id) && query.is_none(),
+        ("PATCH", ["v1", "agents", id]) => valid_id(id) && query.is_none(),
+        ("POST", ["v1", "routines", id, "run"]) => valid_id(id) && query.is_none(),
         _ => false,
     };
     if ok {
@@ -389,9 +400,18 @@ pub async fn request_on<S: AsyncRead + AsyncWrite + Unpin>(
     }
     let req = build_request(method, path, ep, "application/json", bytes.as_deref());
     stream.write_all(&req).await.map_err(|_| ERR_NOT_RUNNING.to_string())?;
-    let (head, initial) = read_head(stream, REQUEST_TIMEOUT).await?;
+    let (head, initial) = read_head(stream, route_timeout(method, path)).await?;
     let raw = read_body(stream, &head, initial).await?;
     Ok(Reply { status: head.status, body: parse_json_body(&raw) })
+}
+
+/// Whole-request bound per route: "run now" waits for the routine to finish.
+pub fn route_timeout(method: &str, path: &str) -> Duration {
+    let parts: Vec<&str> = path.split('?').next().unwrap_or("").trim_start_matches('/').split('/').collect();
+    match (method, parts.as_slice()) {
+        ("POST", ["v1", "routines", _, "run"]) => RUN_ROUTINE_TIMEOUT,
+        _ => REQUEST_TIMEOUT,
+    }
 }
 
 /// One JSON request to an allow-listed route.
@@ -401,7 +421,7 @@ pub async fn request(ep: &Endpoint, method: &str, path: &str, body: Option<&Valu
         let mut stream = connect(ep).await?;
         request_on(&mut stream, ep, method, path, body).await
     };
-    match tokio::time::timeout(REQUEST_TIMEOUT, fut).await {
+    match tokio::time::timeout(route_timeout(method, path), fut).await {
         Ok(r) => r,
         Err(_) => Err(ERR_TIMEOUT.to_string()),
     }
@@ -596,6 +616,127 @@ pub async fn stream_turn<F: FnMut(StreamEvent)>(
     stream_on(&mut stream, ep, conversation_id, content, cancel, emit).await
 }
 
+// ── Event stream (`GET /v1/events`) ──────────────────────────────────────────
+
+/// Why a subscription ended. The webview reconnects on anything but `cancelled`.
+pub const EVENTS_ENDED: &str = "ended";
+pub const EVENTS_CANCELLED: &str = "cancelled";
+
+/// Subscribe on an already-connected socket and forward every event until the
+/// daemon closes the stream or `cancel` fires. The daemon sends no heartbeat,
+/// so there is no idle timeout once the stream is open: the only bound is the
+/// head (a daemon that never answers is reported as a timeout).
+pub async fn events_on<S, F>(stream: &mut S, ep: &Endpoint, mut cancel: oneshot::Receiver<()>, mut emit: F) -> Result<Reply, String>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnMut(StreamEvent),
+{
+    let req = build_request("GET", "/v1/events", ep, "text/event-stream", None);
+    stream.write_all(&req).await.map_err(|_| ERR_NOT_RUNNING.to_string())?;
+    let (head, initial) = {
+        let head = std::pin::pin!(read_head(stream, REQUEST_TIMEOUT));
+        match select(head, &mut cancel).await {
+            Either::Left((r, _)) => r?,
+            Either::Right(_) => return Ok(Reply { status: 499, body: Value::String(EVENTS_CANCELLED.into()) }),
+        }
+    };
+    let is_sse = head.header("content-type").map_or(false, |v| v.to_ascii_lowercase().starts_with("text/event-stream"));
+    if !(200..300).contains(&head.status) || !is_sse {
+        let raw = read_body(stream, &head, initial).await?;
+        return Ok(Reply { status: head.status, body: parse_json_body(&raw) });
+    }
+    let mut decoder = BodyDecoder::for_head(&head);
+    let mut parser = SseParser::default();
+    let mut decoded = Vec::new();
+    decoder.feed(&initial, &mut decoded)?;
+    for ev in parser.feed(&decoded)? {
+        emit(ev);
+    }
+    let mut tmp = [0u8; 8192];
+    while !decoder.done() {
+        let read = std::pin::pin!(stream.read(&mut tmp));
+        let n = match select(read, &mut cancel).await {
+            Either::Left((Ok(n), _)) => n,
+            Either::Left((Err(_), _)) => break,
+            Either::Right(_) => return Ok(Reply { status: 499, body: Value::String(EVENTS_CANCELLED.into()) }),
+        };
+        if n == 0 {
+            break;
+        }
+        decoded.clear();
+        decoder.feed(&tmp[..n], &mut decoded)?;
+        for ev in parser.feed(&decoded)? {
+            emit(ev);
+        }
+    }
+    Ok(Reply { status: head.status, body: Value::String(EVENTS_ENDED.into()) })
+}
+
+/// Event subscriptions, keyed by a webview-chosen id; separate from turns so a
+/// chat kill never collides with (or is mistaken for) a panel subscription.
+#[derive(Default)]
+pub struct DaemonSubscriptions(pub DaemonStreams);
+
+// ── Findings memory (read-only, strictly scoped) ─────────────────────────────
+
+/// Findings files are append-only logs; the panel shows the tail.
+pub const MAX_FINDINGS_BYTES: u64 = 256 * 1024;
+
+/// Role names as the daemon writes them (`appendFinding` lower-cases and keeps
+/// `[a-z0-9-]`). Nothing else — no dots, slashes or upper case — is accepted.
+fn valid_role(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// `<home>/.braavo/memory/<companyId>/findings/<role>.md`, built only from the
+/// two validated ids. The webview never supplies a path.
+pub fn findings_path(home: &Path, company_id: &str, role: &str) -> Result<PathBuf, String> {
+    if !valid_id(company_id) || !valid_role(role) {
+        return Err(ERR_ROUTE.to_string());
+    }
+    Ok(home.join(".braavo").join("memory").join(company_id).join("findings").join(format!("{role}.md")))
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct Findings {
+    pub text: String,
+    /// True when only the tail of a larger file is returned.
+    pub truncated: bool,
+}
+
+/// Read the tail of a findings file. A missing file is "no findings yet"
+/// (empty text). The resolved file must be a regular file that stays inside
+/// `<home>/.braavo/memory` (a symlink pointing elsewhere is refused).
+pub fn read_findings(home: &Path, company_id: &str, role: &str) -> Result<Findings, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let path = findings_path(home, company_id, role)?;
+    let empty = Findings { text: String::new(), truncated: false };
+    let Ok(real) = std::fs::canonicalize(&path) else { return Ok(empty) };
+    let root = std::fs::canonicalize(home.join(".braavo").join("memory")).map_err(|_| ERR_ROUTE.to_string())?;
+    if !real.starts_with(&root) {
+        return Err(ERR_ROUTE.to_string());
+    }
+    let mut file = std::fs::File::open(&real).map_err(|_| format!("{ERR_PROTOCOL}: findings unreadable"))?;
+    let meta = file.metadata().map_err(|_| format!("{ERR_PROTOCOL}: findings unreadable"))?;
+    if !meta.is_file() {
+        return Err(ERR_ROUTE.to_string());
+    }
+    let truncated = meta.len() > MAX_FINDINGS_BYTES;
+    if truncated {
+        file.seek(SeekFrom::Start(meta.len() - MAX_FINDINGS_BYTES)).map_err(|_| format!("{ERR_PROTOCOL}: findings unreadable"))?;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_FINDINGS_BYTES).read_to_end(&mut bytes).map_err(|_| format!("{ERR_PROTOCOL}: findings unreadable"))?;
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if truncated {
+        // Start at a whole line rather than mid-character / mid-sentence.
+        if let Some(pos) = text.find('\n') {
+            text.drain(..=pos);
+        }
+    }
+    Ok(Findings { text, truncated })
+}
+
 // ── Tauri commands ───────────────────────────────────────────────────────────
 
 use tauri::{AppHandle, Manager, State};
@@ -666,6 +807,47 @@ pub async fn daemon_send_message(
     result
 }
 
+/// Subscribe to `GET /v1/events`; each event goes to `on_event`. Resolves when
+/// the daemon ends the stream (`body: "ended"`), on unsubscribe (`499`), or with
+/// the error reply / host error that prevented it.
+#[tauri::command]
+pub async fn daemon_events_subscribe(
+    app: AppHandle,
+    subs: State<'_, DaemonSubscriptions>,
+    subscription_id: String,
+    on_event: tauri::ipc::Channel<StreamEvent>,
+) -> Result<Reply, String> {
+    if !valid_id(&subscription_id) {
+        return Err(ERR_ROUTE.to_string());
+    }
+    let ep = endpoint_for(&app)?;
+    let Some(cancel) = subs.0.register(&subscription_id) else {
+        return Ok(Reply { status: 409, body: serde_json::json!({ "error": "already subscribed", "code": "busy" }) });
+    };
+    let result = async {
+        let mut stream = connect(&ep).await?;
+        events_on(&mut stream, &ep, cancel, |ev| {
+            let _ = on_event.send(ev);
+        })
+        .await
+    }
+    .await;
+    subs.0.finish(&subscription_id);
+    result
+}
+
+#[tauri::command]
+pub fn daemon_events_unsubscribe(subs: State<'_, DaemonSubscriptions>, subscription_id: String) -> bool {
+    subs.0.cancel(&subscription_id)
+}
+
+/// The tail of `~/.braavo/memory/<companyId>/findings/<role>.md` (markdown).
+#[tauri::command]
+pub fn daemon_findings(app: AppHandle, company_id: String, role: String) -> Result<Findings, String> {
+    let home = app.path().home_dir().map_err(|_| ERR_NOT_RUNNING.to_string())?;
+    read_findings(&home, &company_id, &role)
+}
+
 /// Drop the stream for one conversation (the daemon aborts on disconnect).
 #[tauri::command]
 pub fn daemon_stream_cancel(streams: State<'_, DaemonStreams>, conversation_id: String) -> bool {
@@ -725,14 +907,39 @@ mod tests {
             ("DELETE", "/v1/conversations/cv_abc"),
             ("POST", "/v1/conversations/cv_abc/abort"),
             ("GET", "/v1/search?q=hello%20world&limit=20"),
+            // Company panel (D1/D2).
+            ("GET", "/v1/companies"),
+            ("POST", "/v1/companies"),
+            ("GET", "/v1/companies/co_1f2e-ab/panel"),
+            ("POST", "/v1/companies/co_1/hire"),
+            ("PATCH", "/v1/agents/ag_1"),
+            ("POST", "/v1/routines/rt_1/run"),
         ] {
             assert!(validate_route(m, p).is_ok(), "{m} {p}");
         }
         for (m, p) in [
             ("POST", "/v1/conversations/cv_abc/messages"), // turns only via the stream command
-            ("GET", "/v1/events"),
-            ("GET", "/v1/companies"),
-            ("POST", "/v1/routines/x/run"),
+            ("GET", "/v1/events"), // only via daemon_events_subscribe
+            // Company routes outside the panel contract stay closed.
+            ("GET", "/v1/companies/co_1/org"),
+            ("POST", "/v1/companies/co_1/agents"),
+            ("GET", "/v1/companies/co_1/routines"),
+            ("POST", "/v1/companies/co_1/routines"),
+            ("GET", "/v1/routines/rt_1/executions"),
+            ("GET", "/v1/routines/rt_1/run"),
+            ("DELETE", "/v1/companies/co_1"),
+            ("PATCH", "/v1/companies/co_1"),
+            ("GET", "/v1/agents/ag_1"),
+            ("DELETE", "/v1/agents/ag_1"),
+            ("POST", "/v1/agents/ag_1"),
+            ("GET", "/v1/companies?all=1"),
+            ("GET", "/v1/companies/co_1/panel?x=1"),
+            ("GET", "/v1/companies/../panel"),
+            ("GET", "/v1/companies/co_1/panel/"),
+            ("GET", "/v1/companies/co 1/panel"),
+            ("POST", "/v1/companies/co_1/hire/now"),
+            ("PATCH", "/v1/agents/ag_1%2F..%2Fx"),
+            ("POST", "/v1/routines/rt.1/run"),
             ("GET", "http://evil.example/v1/models"),
             ("GET", "/v1/conversations/../companies"),
             ("GET", "/v1/conversations/a b"),
@@ -1080,6 +1287,162 @@ mod tests {
 
             assert_eq!(request(&ep, "DELETE", &format!("/v1/conversations/{id}"), None).await.unwrap().status, 204);
         });
+    }
+
+    #[test]
+    fn run_now_gets_a_longer_bound() {
+        assert_eq!(route_timeout("POST", "/v1/routines/rt_1/run"), RUN_ROUTINE_TIMEOUT);
+        assert_eq!(route_timeout("GET", "/v1/companies/co_1/panel"), REQUEST_TIMEOUT);
+        assert_eq!(route_timeout("PATCH", "/v1/agents/ag_1"), REQUEST_TIMEOUT);
+    }
+
+    fn temp_home(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("bv-findings-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn findings_path_is_built_only_from_validated_ids() {
+        let home = Path::new("/home/u");
+        assert_eq!(
+            findings_path(home, "co_123e4567-e89b", "market-analyst").unwrap(),
+            Path::new("/home/u/.braavo/memory/co_123e4567-e89b/findings/market-analyst.md")
+        );
+        for (company, role) in [
+            ("..", "market-analyst"),
+            ("co_1/../../etc", "market-analyst"),
+            ("co_1", "../../token"),
+            ("co_1", "market-analyst.md"),
+            ("co_1", "Market-Analyst"),
+            ("co_1", "a/b"),
+            ("co_1", ""),
+            ("", "ceo"),
+            ("co 1", "ceo"),
+            ("/etc", "passwd"),
+            ("co_1", &"r".repeat(65)),
+            (&"c".repeat(129), "ceo"),
+        ] {
+            assert_eq!(findings_path(home, company, role).unwrap_err(), ERR_ROUTE, "{company} {role}");
+        }
+    }
+
+    #[test]
+    fn read_findings_missing_tail_and_refusals() {
+        let home = temp_home("read");
+        // No memory dir at all: "no findings yet", not an error.
+        assert_eq!(read_findings(&home, "co_1", "market-analyst").unwrap(), Findings { text: String::new(), truncated: false });
+        let dir = home.join(".braavo/memory/co_1/findings");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("market-analyst.md"), "## 2026-11-01 · Prices\n- a\n").unwrap();
+        let got = read_findings(&home, "co_1", "market-analyst").unwrap();
+        assert_eq!(got, Findings { text: "## 2026-11-01 · Prices\n- a\n".into(), truncated: false });
+        // A large log returns only its tail, starting at a whole line.
+        let big = format!("{}\nLAST LINE\n", "x".repeat(MAX_FINDINGS_BYTES as usize + 100));
+        std::fs::write(dir.join("release-tracker.md"), &big).unwrap();
+        let tail = read_findings(&home, "co_1", "release-tracker").unwrap();
+        assert!(tail.truncated);
+        assert_eq!(tail.text, "LAST LINE\n");
+        // Invalid ids never touch the disk.
+        assert_eq!(read_findings(&home, "co_1", "../token").unwrap_err(), ERR_ROUTE);
+        // A directory where the file should be is refused, not read.
+        std::fs::create_dir_all(dir.join("ceo.md")).unwrap();
+        assert_eq!(read_findings(&home, "co_1", "ceo").unwrap_err(), ERR_ROUTE);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_findings_refuses_a_symlink_out_of_memory() {
+        let home = temp_home("link");
+        let dir = home.join(".braavo/memory/co_1/findings");
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret = home.join(".braavo/daemon-token-lookalike");
+        std::fs::write(&secret, "do-not-read").unwrap();
+        std::os::unix::fs::symlink(&secret, dir.join("market-analyst.md")).unwrap();
+        assert_eq!(read_findings(&home, "co_1", "market-analyst").unwrap_err(), ERR_ROUTE);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn events_stream_forwards_until_the_daemon_closes() {
+        let (port, server) = serve_once(chunked(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+            &[
+                ": connected\n\n",
+                "event: company.changed\ndata: {\"type\":\"company.changed\",\"companyId\":\"co_1\"}\n\nevent: agent.st",
+                "atus\ndata: {\"type\":\"agent.status\",\"agentId\":\"ag_1\",\"status\":\"paused\"}\n\n",
+            ],
+        ));
+        let ep = Endpoint::for_test(port, TOKEN);
+        let (_tx, rx) = oneshot::channel();
+        let mut seen = Vec::new();
+        let reply = rt()
+            .block_on(async {
+                let mut stream = connect(&ep).await?;
+                events_on(&mut stream, &ep, rx, |e| seen.push(e)).await
+            })
+            .unwrap();
+        assert_eq!(reply, Reply { status: 200, body: Value::String(EVENTS_ENDED.into()) });
+        assert_eq!(seen.iter().map(|e| e.event.as_str()).collect::<Vec<_>>(), ["company.changed", "agent.status"]);
+        assert_eq!(seen[1].data["status"], "paused");
+        let req = server.join().unwrap();
+        assert!(req.starts_with("GET /v1/events HTTP/1.1\r\n"));
+        assert!(req.contains("Accept: text/event-stream\r\n"));
+        assert!(!req.to_ascii_lowercase().contains("origin:"));
+    }
+
+    #[test]
+    fn events_unsubscribe_drops_the_stream() {
+        rt().block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut tmp = [0u8; 4096];
+                let _ = sock.read(&mut tmp).await;
+                sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n: connected\n\n").await.unwrap();
+                let mut rest = [0u8; 16];
+                loop {
+                    match sock.read(&mut rest).await {
+                        Ok(0) | Err(_) => break true,
+                        Ok(_) => continue,
+                    }
+                }
+            });
+            let ep = Endpoint::for_test(port, TOKEN);
+            let subs = DaemonSubscriptions::default();
+            let rx = subs.0.register("ev_1").unwrap();
+            assert!(subs.0.register("ev_1").is_none(), "one stream per subscription id");
+            let run = async {
+                let mut stream = connect(&ep).await?;
+                events_on(&mut stream, &ep, rx, |_| {}).await
+            };
+            let stopper = async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                assert!(subs.0.cancel("ev_1"));
+            };
+            let (reply, _) = futures_util::future::join(run, stopper).await;
+            assert_eq!(reply.unwrap(), Reply { status: 499, body: Value::String(EVENTS_CANCELLED.into()) });
+            assert!(server.await.unwrap(), "server saw the disconnect");
+        });
+    }
+
+    #[test]
+    fn events_refusal_is_a_json_reply() {
+        let (port, server) = serve_once(b"HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: 24\r\n\r\n{\"error\":\"unauthorized\"}");
+        let ep = Endpoint::for_test(port, TOKEN);
+        let (_tx, rx) = oneshot::channel();
+        let reply = rt()
+            .block_on(async {
+                let mut stream = connect(&ep).await?;
+                events_on(&mut stream, &ep, rx, |_| {}).await
+            })
+            .unwrap();
+        assert_eq!(reply.status, 401);
+        assert_eq!(reply.body["error"], "unauthorized");
+        server.join().unwrap();
     }
 
     #[test]
