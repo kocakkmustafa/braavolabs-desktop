@@ -28,6 +28,8 @@ import {
   resumeCompany,
 } from "./client";
 import { performSignOut } from "./session";
+import { resolvePanelTransport } from "./company-panel/api";
+import type { CompanyPanelHandle } from "./company-panel/mount";
 import {
   toSavingsView,
   toCascadeView,
@@ -677,6 +679,32 @@ export function renderWorkspace(deps: UiDeps): void {
   // server via the pure mappers in company.ts — nothing is invented here.
   const companyPane = el("div", "company-pane");
   companyPane.style.display = "none";
+  // Plan 2.5 (D1/D2): the local daemon's company panel, the first React island
+  // (K9). Only inside Tauri — the daemon is reachable solely through the Rust
+  // proxy. The cloud list below keeps its own box.
+  const panelTransport = resolvePanelTransport();
+  const companyPanelHost = el("div", "company-panel-host");
+  const cloudBox = el("div", "company-cloud");
+  if (panelTransport) companyPane.append(companyPanelHost, el("div", "rail-section-label cp-cloud-label", t("panel.cloudSection")));
+  companyPane.append(cloudBox);
+  let companyPanel: CompanyPanelHandle | null = null;
+  let companyPanelLoading = false;
+  let companyPanelWanted = false;
+  const setCompanyPanelActive = (active: boolean) => {
+    companyPanelWanted = active;
+    if (!panelTransport || workspaceDisposed) return;
+    if (companyPanel) { companyPanel.setActive(active); return; }
+    if (!active || companyPanelLoading) return;
+    companyPanelLoading = true;
+    // React loads on first entry only: most sessions never open this surface.
+    void import("./company-panel/mount").then(({ mountCompanyPanel }) => {
+      if (workspaceDisposed) return;
+      companyPanel = mountCompanyPanel(companyPanelHost, { t, locale: getLocale(), transport: panelTransport });
+      companyPanel.setActive(companyPanelWanted);
+    }).catch(() => {
+      companyPanelHost.replaceChildren(el("div", "company-error", t("panel.loadFailed")));
+    }).finally(() => { companyPanelLoading = false; });
+  };
 
   const spacer = el("div", "rail-spacer");
 
@@ -1132,16 +1160,16 @@ export function renderWorkspace(deps: UiDeps): void {
   // --- company surface ---
   let companyBusy = false;
   const renderCompany = (companies: CompanyView[], jobs: JobView[], error?: string) => {
-    companyPane.replaceChildren();
+    cloudBox.replaceChildren();
 
     if (error) {
       const err = el("div", "company-error", error);
-      companyPane.append(err);
+      cloudBox.append(err);
       return;
     }
 
     const sum = companySummary(companies, jobs);
-    companyPane.append(
+    cloudBox.append(
       el(
         "div",
         "company-summary mono",
@@ -1156,10 +1184,10 @@ export function renderWorkspace(deps: UiDeps): void {
 
     if (companies.length === 0) {
       // Authoring lives on the web; the desktop reads and controls.
-      companyPane.append(el("div", "company-empty", t("company.empty")));
+      cloudBox.append(el("div", "company-empty", t("company.empty")));
     }
 
-    companyPane.append(el("div", "rail-section-label", t("company.companies")));
+    cloudBox.append(el("div", "rail-section-label", t("company.companies")));
     for (const c of companies) {
       const row = el("div", "company-row");
       row.append(el("span", `dot dot-${c.tone === "arc" ? "done" : c.tone === "ember" ? "run" : c.tone === "molten" ? "risk" : "idle"}`));
@@ -1198,12 +1226,12 @@ export function renderWorkspace(deps: UiDeps): void {
         });
         row.append(btn);
       }
-      companyPane.append(row);
+      cloudBox.append(row);
     }
 
-    companyPane.append(el("div", "rail-section-label", t("company.jobs")));
+    cloudBox.append(el("div", "rail-section-label", t("company.jobs")));
     if (jobs.length === 0) {
-      companyPane.append(el("div", "company-empty", t("company.noJobs")));
+      cloudBox.append(el("div", "company-empty", t("company.noJobs")));
     }
     const now = Date.now();
     for (const j of jobs) {
@@ -1236,12 +1264,12 @@ export function renderWorkspace(deps: UiDeps): void {
           stateText,
         ),
       );
-      companyPane.append(row);
+      cloudBox.append(row);
     }
   };
 
   const loadCompany = async () => {
-    companyPane.replaceChildren(el("div", "company-empty", t("company.loading")));
+    cloudBox.replaceChildren(el("div", "company-empty", t("company.loading")));
     try {
       const [rawCompanies, rawJobs] = await Promise.all([
         listCompanies(cfg, { save: deps.persist }),
@@ -1280,6 +1308,7 @@ export function renderWorkspace(deps: UiDeps): void {
     // Fetch on entry, not on mount: the Company surface costs two requests and
     // most sessions never open it.
     if (s === "company") void loadCompany();
+    setCompanyPanelActive(s === "company");
     if (s === "code" && changesPathInput.value.trim()) void loadChanges();
   };
   segChatBtn.addEventListener("click", () => applySurface("chat"));
@@ -2050,6 +2079,8 @@ export function renderWorkspace(deps: UiDeps): void {
     if (activeDispatchStopper === stopDispatch) activeDispatchStopper = null;
     void deps.gov.invalidate().catch(() => {});
     workspaceDisposed = true;
+    companyPanel?.unmount();
+    companyPanel = null;
     clearCompareOperation();
     for (const motion of motions) motion.dispose();
     motions.clear();
