@@ -98,7 +98,7 @@ export class DaemonError extends Error {
 
 const KNOWN_CODES = new Set<DaemonErrorCode>(["missing-key", "model-required", "provider", "busy"]);
 
-function errorFromReply(reply: DaemonReply): DaemonError {
+export function errorFromReply(reply: DaemonReply): DaemonError {
   const body = (reply.body && typeof reply.body === "object" ? reply.body : {}) as { error?: unknown; code?: unknown };
   const message = typeof body.error === "string" ? body.error.slice(0, 500) : `daemon error ${reply.status}`;
   const raw = typeof body.code === "string" ? body.code : "";
@@ -112,7 +112,7 @@ function errorFromReply(reply: DaemonReply): DaemonError {
 }
 
 /** Host failures arrive as plain strings (see daemon.rs ERR_*). */
-function errorFromHost(error: unknown): DaemonError {
+export function errorFromHost(error: unknown): DaemonError {
   if (error instanceof DaemonError) return error;
   const text = String(error instanceof Error ? error.message : error);
   if (text.startsWith("daemon-not-running")) return new DaemonError(0, "not-running", text);
