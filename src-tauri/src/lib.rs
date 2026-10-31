@@ -68,6 +68,11 @@ mod pty;
 // wiring (token spend + connection registry + audit) lives below. See browser.rs.
 mod browser;
 
+// Plan 1.3: loopback client for the local `braavo daemon` (chat engine). The
+// daemon refuses webview fetches (Origin header), so chat calls go through these
+// allow-listed commands; the bearer token is read per call and never leaves Rust.
+mod daemon;
+
 /// Token bundle mirrored to the CLI's config field names ({token, refreshToken})
 /// so the two clients share one mental model. Serialized as camelCase so the
 /// JS store (store.ts) reads `token` / `refreshToken` directly.
@@ -3844,6 +3849,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init()) // S-012 native approval dialog
         .manage(Governance(Mutex::new(GateState::default())))
         .manage(pty::PtyHostState::default()) // R6 Lane-B real-PTY session registry
+        .manage(daemon::DaemonStreams::default()) // in-flight daemon chat turns (cancel on kill/exit)
         .manage(BrowserHostState::default()) // R6 Lane-C governed CDP browser connection
         .invoke_handler(tauri::generate_handler![
             secure_store_get,
@@ -3879,7 +3885,11 @@ pub fn run() {
             mcp_remove_server,
             mcp_list_tools,
             mcp_prepare_call,
-            mcp_call_tool
+            mcp_call_tool,
+            daemon::daemon_status,
+            daemon::daemon_request,
+            daemon::daemon_send_message,
+            daemon::daemon_stream_cancel
         ])
         .build(tauri::generate_context!())
         .expect("error while building the Braavolabs desktop application")
@@ -3891,6 +3901,9 @@ pub fn run() {
                 if let Some(gov) = app_handle.try_state::<Governance>() { if let Ok(mut gate) = gov.0.lock() { gate.invalidate_all(); } }
                 if let Some(state) = app_handle.try_state::<pty::PtyHostState>() {
                     state.kill_all();
+                }
+                if let Some(streams) = app_handle.try_state::<daemon::DaemonStreams>() {
+                    streams.cancel_all();
                 }
             }
         });
