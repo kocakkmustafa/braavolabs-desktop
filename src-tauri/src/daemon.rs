@@ -955,6 +955,133 @@ mod tests {
         });
     }
 
+    /// End-to-end against a REAL `braavo daemon run` (CLI branch feat/chat).
+    /// Opt-in: `BRAAVO_E2E_DAEMON_DIR=<HOME>/.braavo/daemon cargo test -- --ignored live_daemon`.
+    /// Point it at a throwaway HOME: it creates, imports and deletes conversations.
+    #[test]
+    #[ignore]
+    fn live_daemon_e2e() {
+        let dir = std::env::var("BRAAVO_E2E_DAEMON_DIR").expect("set BRAAVO_E2E_DAEMON_DIR");
+        let ep = read_endpoint(Path::new(&dir)).expect("daemon state + token");
+        rt().block_on(async {
+            let health = request(&ep, "GET", "/v1/health", None).await.unwrap();
+            assert_eq!(health.status, 200, "{health:?}");
+            let models = request(&ep, "GET", "/v1/models", None).await.unwrap();
+            assert_eq!(models.status, 200);
+            assert!(models.body["suggestions"].is_object(), "{:?}", models.body);
+
+            let created = request(&ep, "POST", "/v1/conversations", Some(&serde_json::json!({ "title": "e2e", "provider": "ANTHROPIC", "model": "claude-test" }))).await.unwrap();
+            assert_eq!(created.status, 201, "{created:?}");
+            let id = created.body["conversation"]["id"].as_str().unwrap().to_string();
+            assert!(validate_route("GET", &format!("/v1/conversations/{id}")).is_ok(), "daemon ids pass the allow-list");
+
+            // No key in the throwaway HOME: refused before any stream starts.
+            let (_tx, rx) = oneshot::channel();
+            let mut events = Vec::new();
+            let turn = stream_turn(&ep, &id, "hello", rx, |e| events.push(e)).await.unwrap();
+            assert_eq!(turn.status, 400, "{turn:?}");
+            assert_eq!(turn.body["code"], "missing-key");
+            assert!(events.is_empty());
+
+            let import = serde_json::json!({ "source": "desktop-localstorage", "conversations": [
+                { "externalId": "s-e2e-1", "title": "imported", "messages": [{ "role": "user", "content": "quasar lighthouse" }, { "role": "assistant", "content": "ok" }] }
+            ] });
+            let first = request(&ep, "POST", "/v1/conversations/import", Some(&import)).await.unwrap();
+            assert_eq!((first.status, first.body["imported"].as_u64(), first.body["skipped"].as_u64()), (200, Some(1), Some(0)), "{first:?}");
+            let again = request(&ep, "POST", "/v1/conversations/import", Some(&import)).await.unwrap();
+            assert_eq!((again.body["imported"].as_u64(), again.body["skipped"].as_u64()), (Some(0), Some(1)), "idempotent on externalId");
+            let imported_id = first.body["ids"][0].as_str().unwrap().to_string();
+
+            let found = request(&ep, "GET", "/v1/search?q=quasar&limit=5", None).await.unwrap();
+            assert_eq!(found.status, 200);
+            assert_eq!(found.body["results"][0]["conversationId"], imported_id.as_str(), "{found:?}");
+
+            let list = request(&ep, "GET", "/v1/conversations?limit=50", None).await.unwrap();
+            assert!(list.body["conversations"].as_array().unwrap().len() >= 2);
+            let patched = request(&ep, "PATCH", &format!("/v1/conversations/{id}"), Some(&serde_json::json!({ "model": "claude-other" }))).await.unwrap();
+            assert_eq!(patched.body["conversation"]["model"], "claude-other");
+            let aborted = request(&ep, "POST", &format!("/v1/conversations/{id}/abort"), None).await.unwrap();
+            assert_eq!(aborted.body["aborted"], false, "nothing in flight");
+            for cid in [&id, &imported_id] {
+                let gone = request(&ep, "DELETE", &format!("/v1/conversations/{cid}"), None).await.unwrap();
+                assert_eq!(gone.status, 204);
+            }
+        });
+    }
+
+    /// Streaming end-to-end against a real daemon whose OLLAMA provider is a
+    /// local fake (OpenAI-compatible SSE on :11434; prompts containing "slow"
+    /// stream slowly). Opt-in, same env var as `live_daemon_e2e`.
+    #[test]
+    #[ignore]
+    fn live_daemon_stream_e2e() {
+        let dir = std::env::var("BRAAVO_E2E_DAEMON_DIR").expect("set BRAAVO_E2E_DAEMON_DIR");
+        let ep = read_endpoint(Path::new(&dir)).expect("daemon state + token");
+        rt().block_on(async {
+            let models = request(&ep, "GET", "/v1/models", None).await.unwrap();
+            assert_eq!(models.body["local"]["OLLAMA"][0], "fake-llm", "{:?}", models.body);
+            let created = request(&ep, "POST", "/v1/conversations", Some(&serde_json::json!({ "provider": "OLLAMA", "model": "fake-llm" }))).await.unwrap();
+            let id = created.body["conversation"]["id"].as_str().unwrap().to_string();
+
+            // 1. A full turn: user message, deltas, usage, done.
+            let (_tx, rx) = oneshot::channel();
+            let mut events = Vec::new();
+            let reply = stream_turn(&ep, &id, "hi", rx, |e| events.push(e)).await.unwrap();
+            assert_eq!(reply.status, 200, "{reply:?}");
+            let names: Vec<_> = events.iter().map(|e| e.event.clone()).collect();
+            assert_eq!(names.first().map(String::as_str), Some("message"), "{names:?}");
+            assert_eq!(names.last().map(String::as_str), Some("done"), "{names:?}");
+            let text: String = events.iter().filter(|e| e.event == "delta").filter_map(|e| e.data["text"].as_str()).collect();
+            assert_eq!(text, "Hello from fake");
+            assert_eq!(events.last().unwrap().data["stopReason"], "end_turn");
+
+            // 2. Slow turn: busy while streaming, then a host-side disconnect aborts it.
+            let streams = DaemonStreams::default();
+            let rx = streams.register(&id).unwrap();
+            let mut partial = String::new();
+            let slow = stream_turn(&ep, &id, "please be slow", rx, |e| {
+                if e.event == "delta" { partial.push_str(e.data["text"].as_str().unwrap_or("")); }
+            });
+            let probe = async {
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                let (_tx2, rx2) = oneshot::channel();
+                let busy = stream_turn(&ep, &id, "second", rx2, |_| {}).await.unwrap();
+                assert!(streams.cancel(&id));
+                busy
+            };
+            let (slow_reply, busy) = futures_util::future::join(slow, probe).await;
+            assert_eq!(busy.status, 409, "{busy:?}");
+            assert_eq!(busy.body["code"], "busy");
+            assert_eq!(slow_reply.unwrap().status, 499);
+            assert!(!partial.is_empty());
+
+            // The daemon kept the partial answer as an aborted assistant message.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let got = request(&ep, "GET", &format!("/v1/conversations/{id}"), None).await.unwrap();
+            let messages = got.body["messages"].as_array().unwrap();
+            let last = messages.last().unwrap();
+            assert_eq!(last["role"], "assistant", "{messages:?}");
+            assert_eq!(last["stopReason"], "aborted", "{messages:?}");
+            assert!(last["content"].as_str().unwrap().starts_with("w0 "));
+
+            // 3. Graceful abort over the API while a slow turn streams: done(aborted).
+            let (_tx3, rx3) = oneshot::channel();
+            let mut tail = Vec::new();
+            let slow2 = stream_turn(&ep, &id, "slow again", rx3, |e| tail.push(e));
+            let aborter = async {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                request(&ep, "POST", &format!("/v1/conversations/{id}/abort"), None).await.unwrap()
+            };
+            let (r2, aborted) = futures_util::future::join(slow2, aborter).await;
+            assert_eq!(aborted.body["aborted"], true, "{aborted:?}");
+            assert_eq!(r2.unwrap().status, 200);
+            assert_eq!(tail.last().unwrap().event, "done", "{tail:?}");
+            assert_eq!(tail.last().unwrap().data["stopReason"], "aborted");
+
+            assert_eq!(request(&ep, "DELETE", &format!("/v1/conversations/{id}"), None).await.unwrap().status, 204);
+        });
+    }
+
     #[test]
     fn turn_validation() {
         assert!(validate_turn("cv_1", "hi").is_ok());
