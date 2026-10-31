@@ -11,6 +11,7 @@ import { createSessionStore } from "../sessions";
 import { createTauriGovernance } from "../governance";
 import { toCascadeView, toCompareView } from "../render";
 import { compareMotion } from "../brand-motion";
+import { DaemonError } from "../daemon-client";
 
 // Execute the actual UI closures. Only paint, native confirmation and provider
 // transport are synthetic; owner checks and transcript persistence are real.
@@ -27,9 +28,9 @@ function local(name: string) {
   return found;
 }
 const gates = ["gateAction", "gateForToken"].map(name => source.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === name)!.getText(source)).join("\n");
-const compiled = ts.transpileModule(`${gates}\nlet mode='cascade', dispatching=false, chatMotionVersion=0, workspaceDisposed=false, activeSession=null, nextDispatchRemote=false;\n${local("dispatchController")}
-${local("compareOperation")}\n${local("clearCompareOperation")}\n${local("stopDispatch")}
-${local("cancelCurrentCompare")}\n${local("record")}\n${local("startNewSession")}\n${local("loadSession")}\n${local("run")}\n({ run, cancel:cancelCurrentCompare, newChat:startNewSession, load:loadSession, stop:stopDispatch, dispose:()=>{workspaceDisposed=true;clearCompareOperation()}, setMode:(value)=>{mode=value} });`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+const compiled = ts.transpileModule(`${gates}\nlet mode='cascade', dispatching=false, chatMotionVersion=0, workspaceDisposed=false, activeSession=null, nextDispatchRemote=false, daemonTurn=null, activeDaemonConv=null, daemonOnline=true;\n${local("dispatchController")}
+${local("compareOperation")}\n${local("clearCompareOperation")}\n${local("stopDaemonTurn")}\n${local("stopDispatch")}
+${local("cancelCurrentCompare")}\n${local("record")}\n${local("startNewSession")}\n${local("loadSession")}\n${local("daemonErrorText")}\n${local("runDaemonTurn")}\n${local("run")}\n({ run, cancel:cancelCurrentCompare, newChat:startNewSession, load:loadSession, stop:stopDispatch, dispose:()=>{workspaceDisposed=true;clearCompareOperation()}, setMode:(value)=>{mode=value} });`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function delayed<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -64,6 +65,20 @@ function fixture(mode = "cascade") {
   const companyInput = { value: "A-company" };
   const ta = { value: "A-prompt", focus() {} };
   const deps = { cfg, gov, vault: { get }, persist, t: (key: string) => key };
+  // Local braavo daemon (plan 1.3) — the client is the tested daemon-client
+  // surface; here only its transport outcome is synthetic.
+  const daemon = {
+    createConversation: vi.fn(async (input: { title?: string; provider: string; model: string }) => ({ id: "cv_A", title: input.title ?? "", provider: input.provider, model: input.model })),
+    updateConversation: vi.fn(async (id: string, patch: { provider: string; model: string }) => ({ id, title: "", ...patch })),
+    sendMessage: vi.fn(async (_id: string, _text: string, handlers: { onDelta?: (chunk: string, full: string) => void }): Promise<any> => {
+      handlers.onDelta?.("A-", "A-"); return { text: "A-answer", stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 2 } };
+    }),
+    abort: vi.fn(async () => true),
+    cancelStream: vi.fn(async () => true),
+  };
+  const renderErrorCard = vi.fn(), refreshDaemonConversations = vi.fn(async () => {});
+  const readDaemonModel = vi.fn((): { provider: string; model: string } | { error: string } => ({ provider: "OLLAMA", model: "synthetic-model" }));
+  const showDaemonHint = vi.fn();
   const ui = runInNewContext(compiled, {
     ...client, deps, cfg, sessionStore, t: deps.t,
     ta, companyInput, compareControls,
@@ -73,12 +88,14 @@ function fixture(mode = "cascade") {
     document: { createTextNode: (text: string) => ({ textContent: text }) }, thinkingMotions: new Map(),
     el: element, scrollToEnd() {}, setChatMotion() {}, syncCrumb() {}, refreshSessionList() {}, trackMotion() {},
     createOwnedBrandMotion: () => null, answerMotion: () => "success", compareMotion, compareProgressMotion: () => "thinking",
-    renderErrorCard() {}, renderCascadeAnswer, renderCascadeInspector() {}, renderPlainAnswer, renderCompareAnswer, renderCompareInspector() {}, renderSourceInspector() {},
+    renderErrorCard: (_scroll: unknown, message: string) => renderErrorCard(message), renderCascadeAnswer, renderCascadeInspector() {}, renderPlainAnswer, renderCompareAnswer, renderCompareInspector() {}, renderSourceInspector() {},
     bumpActivity() {}, refreshSavings, removeThinking: (row: ReturnType<typeof element>) => row.remove(),
     toCascadeView, toCompareView, cascade, startCompare, pollCompare, cancelCompare,
     resolveOllamaHost: () => "http://localhost:11434", resolveOllamaModel, ollamaChat,
     isDirectProvider: () => true, resolveDirectModel: () => "synthetic-model", directChat,
     OllamaUnreachableError: class extends Error {}, DirectApiError: class extends Error {},
+    daemon, DaemonError, readDaemonModel, showDaemonHint, connectDaemon: vi.fn(async () => {}),
+    deriveTitle: (text: string) => text, kv: element, historySearch: element(), refreshDaemonConversations,
   }) as { run(): Promise<void>; cancel(): void; newChat(): void; load(id: string): void; stop(): void; dispose(): void; setMode(mode: string): void };
   ui.setMode(mode);
   const switchOwner = (boundary: "logout" | "B" | "base" | "dispose" | "same-pair") => {
@@ -90,7 +107,7 @@ function fixture(mode = "cascade") {
       void persist(cfg);
     }
   };
-  return { ...ui, cfg, deps, native, companyInput, compareControls, ta, grant, fetchImpl, cascade, resolveOllamaModel, ollamaChat, directChat, get, startCompare, pollCompare, cancelCompare, cancelBtn, hint, renderCascadeAnswer, renderPlainAnswer, renderCompareAnswer, refreshSavings, sessionStore, sendBtn, switchOwner };
+  return { ...ui, daemon, renderErrorCard, refreshDaemonConversations, readDaemonModel, showDaemonHint, cfg, deps, native, companyInput, compareControls, ta, grant, fetchImpl, cascade, resolveOllamaModel, ollamaChat, directChat, get, startCompare, pollCompare, cancelCompare, cancelBtn, hint, renderCascadeAnswer, renderPlainAnswer, renderCompareAnswer, refreshSavings, sessionStore, sendBtn, switchOwner };
 }
 
 describe("actual workspace operation ownership", () => {
@@ -407,5 +424,59 @@ describe("reviewed Compare cancellation feedback races", () => {
     expect(f.hint.style.display).toBe("none"); expect(f.hint.textContent).toBe(""); expect(f.cancelBtn.style.display).toBe("none");
     polling.resolve({ status: "CANCELLED" }); await pending;
     expect(f.hint.style.display).toBe("none"); expect(f.renderCompareAnswer).not.toHaveBeenCalled();
+  });
+});
+
+describe("daemon chat lane (plan 1.3)", () => {
+  it("creates the conversation in the daemon, streams the turn and keeps no local transcript", async () => {
+    const f = fixture("daemon"); await f.run();
+    expect(f.daemon.createConversation).toHaveBeenCalledWith({ title: "A-prompt", provider: "OLLAMA", model: "synthetic-model" });
+    expect(f.daemon.sendMessage).toHaveBeenCalledWith("cv_A", "A-prompt", expect.any(Object));
+    expect(f.sessionStore.list()).toEqual([]);
+    expect(JSON.stringify(f.native.mock.calls.find(call => call[0] === "request_action"))).toContain("local.dispatch");
+    expect(f.renderErrorCard).not.toHaveBeenCalled();
+    expect(f.refreshDaemonConversations).toHaveBeenCalled();
+    expect(f.sendBtn.disabled).toBe(false);
+  });
+  it("blocks a daemon turn without a usable model before governance or clearing the draft", async () => {
+    const f = fixture("daemon");
+    f.readDaemonModel.mockReturnValue({ error: "chat.daemonNoModels" });
+    await f.run();
+    expect(f.showDaemonHint).toHaveBeenCalledWith("chat.daemonNoModels");
+    expect(f.native).not.toHaveBeenCalled(); expect(f.daemon.createConversation).not.toHaveBeenCalled();
+    expect(f.ta.value).toBe("A-prompt");
+  });
+  it("Kill aborts the daemon turn (abort + disconnect) and ignores its late result", async () => {
+    const f = fixture("daemon"), response = delayed<any>();
+    f.daemon.sendMessage.mockImplementation(() => response.promise);
+    const pending = f.run(); await vi.waitFor(() => expect(f.daemon.sendMessage).toHaveBeenCalled());
+    f.stop();
+    expect(f.daemon.abort).toHaveBeenCalledWith("cv_A");
+    expect(f.daemon.cancelStream).toHaveBeenCalledWith("cv_A");
+    response.resolve({ text: "late", stopReason: "aborted" }); await pending;
+    expect(f.renderErrorCard).not.toHaveBeenCalled();
+    expect(f.sessionStore.list()).toEqual([]);
+    expect(f.sendBtn.disabled).toBe(false);
+  });
+  it("Stop asks the daemon to abort gracefully and keeps the stream open for the partial answer", async () => {
+    const f = fixture("daemon"), response = delayed<any>();
+    f.daemon.sendMessage.mockImplementation(() => response.promise);
+    const pending = f.run(); await vi.waitFor(() => expect(f.daemon.sendMessage).toHaveBeenCalled());
+    f.cancel();
+    expect(f.daemon.abort).toHaveBeenCalledWith("cv_A");
+    expect(f.daemon.cancelStream).not.toHaveBeenCalled();
+    response.resolve({ text: "partial", stopReason: "aborted" }); await pending;
+    expect(f.renderErrorCard).not.toHaveBeenCalled();
+  });
+  it.each([
+    [new DaemonError(409, "busy", "a turn is already streaming"), "chat.daemonBusy"],
+    [new DaemonError(400, "missing-key", "no anthropic key; run: braavo keys add anthropic"), "chat.daemonMissingKey"],
+    [new DaemonError(0, "not-running", "daemon-not-running"), "chat.daemonOffline"],
+  ])("maps %s to an honest error card", async (error, key) => {
+    const f = fixture("daemon");
+    f.daemon.sendMessage.mockImplementation(async () => { throw error; });
+    await f.run();
+    expect(f.renderErrorCard).toHaveBeenCalledWith(key);
+    expect(f.sendBtn.disabled).toBe(false);
   });
 });

@@ -1335,6 +1335,11 @@ textarea {
   overflow-y: auto;
   max-height: 38vh;
 }
+.history-search {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 4px;
+}
 .session-item {
   display: flex;
   align-items: center;
