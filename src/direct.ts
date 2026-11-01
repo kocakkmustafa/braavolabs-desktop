@@ -28,11 +28,12 @@ export function isDirectProvider(p: string): p is DirectProvider {
 }
 
 /**
- * Documented defaults (as of writing) — stable, dated model IDs, not
- * "whatever is newest". Always overridable via an explicit model.
+ * Documented defaults (as of writing) — pinned model IDs, not
+ * "whatever is newest". Always overridable via an explicit model. claude-3-5-sonnet is retired, so the
+ * Anthropic default is the current Sonnet.
  */
 export const DIRECT_DEFAULT_MODEL: Record<DirectProvider, string> = {
-  anthropic: "claude-3-5-sonnet-20241022",
+  anthropic: "claude-sonnet-5-5",
   openai: "gpt-4o-mini",
   groq: "llama-3.1-8b-instant",
 };
@@ -72,7 +73,7 @@ const SPECS: Record<DirectProvider, ProviderSpec> = {
     }),
     body: (model, question) => ({
       model,
-      max_tokens: 1024,
+      max_tokens: 4096, // thinking is on by default on current models; 1024 could end before any text
       messages: [{ role: "user", content: question }],
     }),
     parse: (json) => {
