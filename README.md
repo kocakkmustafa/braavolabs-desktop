@@ -150,7 +150,7 @@ claim of "latest" — override per-call in the composer):
 
 | Provider | Endpoint | Auth header | Default model (override-able) |
 |---|---|---|---|
-| `anthropic` | `api.anthropic.com/v1/messages` | `x-api-key` (+ `anthropic-version`) | `claude-3-5-sonnet-20241022` |
+| `anthropic` | `api.anthropic.com/v1/messages` | `x-api-key` (+ `anthropic-version`) | `claude-sonnet-5-5` |
 | `openai` | `api.openai.com/v1/chat/completions` | `Authorization: Bearer` | `gpt-4o-mini` |
 | `groq` | `api.groq.com/openai/v1/chat/completions` | `Authorization: Bearer` | `llama-3.1-8b-instant` |
 

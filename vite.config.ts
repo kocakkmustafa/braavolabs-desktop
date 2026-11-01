@@ -23,6 +23,6 @@ export default defineConfig({
     // no LLM-in-the-loop).
     environment: "node",
     globals: true,
-    include: ["src/**/*.test.ts"],
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
   },
 });

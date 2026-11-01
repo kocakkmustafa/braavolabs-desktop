@@ -28,6 +28,8 @@ import {
   resumeCompany,
 } from "./client";
 import { performSignOut } from "./session";
+import { resolvePanelTransport } from "./company-panel/api";
+import type { CompanyPanelHandle } from "./company-panel/mount";
 import {
   toSavingsView,
   toCascadeView,
@@ -93,9 +95,24 @@ import {
   resolveSessionStore,
   rememberHistoryIdentity,
   groupSessions,
+  deriveTitle,
   type ChatSession,
   type SessionRole,
 } from "./sessions";
+import {
+  createDaemonClient,
+  resolveDaemonTransport,
+  modelOptions,
+  parseModelRef,
+  migrateLocalSessions,
+  mergeHistory,
+  DaemonError,
+  type Conversation,
+  type DaemonClient,
+  type HistoryItem,
+  type ModelOption,
+  type SearchResult,
+} from "./daemon-client";
 import {
   resolvePrefs,
   applyReducedMotion,
@@ -240,8 +257,8 @@ export interface UiDeps {
   onSignOutError?: (message: string) => void;
 }
 
-/** Dispatch lane: server cascade/compare, local Ollama, or BYOK direct. */
-type Mode = "compare" | "cascade" | "local" | "direct";
+/** Dispatch lane: server cascade/compare, local Ollama, BYOK direct, or the local braavo daemon. */
+type Mode = "compare" | "cascade" | "local" | "direct" | "daemon";
 
 const el = <K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -519,15 +536,42 @@ export function renderWorkspace(deps: UiDeps): void {
     const link = document.createElement("a"); link.href = url; link.download = "braavolabs-transcript.json"; link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   });
+  // Local braavo daemon (plan 1.3): when it answers, chat history lives in its
+  // SQLite store and turns stream through it. Reached only via the Rust host
+  // (daemon-client.ts); absent outside Tauri, offline until probed.
+  const daemonTransport = resolveDaemonTransport();
+  const daemon: DaemonClient | null = daemonTransport ? createDaemonClient(daemonTransport) : null;
+  let daemonOnline = false;
+  let daemonConversations: Conversation[] = [];
+  let activeDaemonConv: Conversation | null = null;
+  let daemonTurn: { conversationId: string } | null = null;
+  let daemonModelOptions: ModelOption[] = [];
+  let migrationNote = "";
   const updateStorageNotice = () => {
     const status = sessionStore.status();
-    storageNotice.textContent = t(status.persistence === "corrupt" ? "sessions.corrupt"
+    const localText = t(status.persistence === "corrupt" ? "sessions.corrupt"
       : status.persistence === "failed" ? "sessions.unsaved" : status.persistence === "volatile" ? "sessions.volatile" : status.truncated ? "sessions.truncated" : "sessions.limits");
+    if (daemonOnline) {
+      storageNotice.textContent = t("sessions.daemonStore");
+      if (migrationNote) storageNotice.append(el("span", undefined, ` ${migrationNote}`));
+      if (sessionStore.list().length) {
+        storageNotice.append(el("span", undefined, ` ${localText}`));
+        if (status.legacy) storageNotice.append(el("span", undefined, t("sessions.legacy")));
+        storageNotice.append(exportHistory);
+      }
+      return;
+    }
+    storageNotice.textContent = localText;
     if (status.legacy) storageNotice.append(el("span", undefined, t("sessions.legacy")));
     storageNotice.append(exportHistory);
   };
   let activeSession: ChatSession | null = null;
   const sessionsSec = el("div", "sessions-sec");
+  const historySearch = el("input", "company-input history-search") as HTMLInputElement;
+  historySearch.type = "search";
+  historySearch.placeholder = t("sessions.search");
+  historySearch.setAttribute("aria-label", t("sessions.search"));
+  historySearch.style.display = "none"; // daemon search only
 
   // Configuration moved out of the rail and into Settings (design v3): the
   // rail is for what you're working on, Settings for how the app is wired.
@@ -635,6 +679,32 @@ export function renderWorkspace(deps: UiDeps): void {
   // server via the pure mappers in company.ts — nothing is invented here.
   const companyPane = el("div", "company-pane");
   companyPane.style.display = "none";
+  // Plan 2.5 (D1/D2): the local daemon's company panel, the first React island
+  // (K9). Only inside Tauri — the daemon is reachable solely through the Rust
+  // proxy. The cloud list below keeps its own box.
+  const panelTransport = resolvePanelTransport();
+  const companyPanelHost = el("div", "company-panel-host");
+  const cloudBox = el("div", "company-cloud");
+  if (panelTransport) companyPane.append(companyPanelHost, el("div", "rail-section-label cp-cloud-label", t("panel.cloudSection")));
+  companyPane.append(cloudBox);
+  let companyPanel: CompanyPanelHandle | null = null;
+  let companyPanelLoading = false;
+  let companyPanelWanted = false;
+  const setCompanyPanelActive = (active: boolean) => {
+    companyPanelWanted = active;
+    if (!panelTransport || workspaceDisposed) return;
+    if (companyPanel) { companyPanel.setActive(active); return; }
+    if (!active || companyPanelLoading) return;
+    companyPanelLoading = true;
+    // React loads on first entry only: most sessions never open this surface.
+    void import("./company-panel/mount").then(({ mountCompanyPanel }) => {
+      if (workspaceDisposed) return;
+      companyPanel = mountCompanyPanel(companyPanelHost, { t, locale: getLocale(), transport: panelTransport });
+      companyPanel.setActive(companyPanelWanted);
+    }).catch(() => {
+      companyPanelHost.replaceChildren(el("div", "company-error", t("panel.loadFailed")));
+    }).finally(() => { companyPanelLoading = false; });
+  };
 
   const spacer = el("div", "rail-spacer");
 
@@ -662,7 +732,7 @@ export function renderWorkspace(deps: UiDeps): void {
   );
   account.append(avatar, accountMeta);
 
-  rail.append(brand, seg, newChatBtn, memoryBtn, sessionsSec, connSec, spacer, savingsCard, account, signOutBtn);
+  rail.append(brand, seg, newChatBtn, memoryBtn, historySearch, sessionsSec, connSec, spacer, savingsCard, account, signOutBtn);
 
   // --- center chat ---
   const chat = el("div", "chat");
@@ -715,35 +785,65 @@ export function renderWorkspace(deps: UiDeps): void {
   directModelInput.setAttribute("aria-label", t("chat.directModel"));
   directModelInput.style.display = "none";
 
+  // Daemon: model from GET /v1/models (the user's own keys/local models, K3)
+  // plus an optional typed PROVIDER/model for providers without a known model.
+  const daemonModelSel = el("select", "company-input") as HTMLSelectElement;
+  daemonModelSel.setAttribute("aria-label", t("chat.daemonModel")); daemonModelSel.dir = "ltr";
+  daemonModelSel.style.display = "none";
+  const daemonModelInput = el("input", "company-input") as HTMLInputElement;
+  daemonModelInput.dir = "ltr";
+  daemonModelInput.placeholder = t("chat.daemonModelCustom");
+  daemonModelInput.setAttribute("aria-label", t("chat.daemonModelCustom"));
+  daemonModelInput.style.display = "none";
+
   const modeToggle = el("div", "mode-toggle");
   const cascadeBtn = el("button", undefined, t("chat.modeCascade"));
   const compareBtn = el("button", undefined, t("chat.modeCompare"));
   const localBtn = el("button", undefined, t("chat.modeLocal"));
   const directBtn = el("button", undefined, t("chat.modeDirect"));
+  const daemonBtn = el("button", undefined, t("chat.modeDaemon"));
   cascadeBtn.classList.add("active");
-  for (const button of [cascadeBtn, compareBtn, localBtn, directBtn]) button.setAttribute("aria-pressed", String(button === cascadeBtn));
+  for (const button of [cascadeBtn, compareBtn, localBtn, directBtn, daemonBtn]) button.setAttribute("aria-pressed", String(button === cascadeBtn));
+  let modeChosenByUser = false;
   const applyMode = (m: Mode) => {
     mode = m;
-    for (const [button, value] of [[cascadeBtn, "cascade"], [compareBtn, "compare"], [localBtn, "local"], [directBtn, "direct"]] as const) button.setAttribute("aria-pressed", String(value === m));
+    for (const [button, value] of [[cascadeBtn, "cascade"], [compareBtn, "compare"], [localBtn, "local"], [directBtn, "direct"], [daemonBtn, "daemon"]] as const) button.setAttribute("aria-pressed", String(value === m));
     cascadeBtn.classList.toggle("active", m === "cascade");
     compareBtn.classList.toggle("active", m === "compare");
     localBtn.classList.toggle("active", m === "local");
     directBtn.classList.toggle("active", m === "direct");
+    daemonBtn.classList.toggle("active", m === "daemon");
     companyInput.style.display = m === "compare" ? "block" : "none";
     compareControls.element.style.display = m === "compare" ? "" : "none";
     if (m !== "compare") compareControls.invalidate();
     localModelInput.style.display = m === "local" ? "block" : "none";
     directProviderSel.style.display = m === "direct" ? "block" : "none";
     directModelInput.style.display = m === "direct" ? "block" : "none";
+    daemonModelSel.style.display = m === "daemon" && daemonModelOptions.length ? "block" : "none";
+    daemonModelInput.style.display = m === "daemon" ? "block" : "none";
+    if (m !== "daemon" && daemonHintShown) { hint.textContent = ""; hint.style.display = "none"; daemonHintShown = false; }
   };
-  cascadeBtn.addEventListener("click", () => applyMode("cascade"));
-  compareBtn.addEventListener("click", () => applyMode("compare"));
-  localBtn.addEventListener("click", () => applyMode("local"));
-  directBtn.addEventListener("click", () => applyMode("direct"));
-  modeToggle.append(cascadeBtn, compareBtn, localBtn, directBtn);
+  /** True while the composer hint shows a daemon setup message (cleared on mode change). */
+  let daemonHintShown = false;
+  const showDaemonHint = (message: string) => {
+    hint.textContent = message;
+    hint.style.display = "block";
+    daemonHintShown = true;
+  };
+  const pickMode = (m: Mode) => { modeChosenByUser = true; applyMode(m); };
+  cascadeBtn.addEventListener("click", () => pickMode("cascade"));
+  compareBtn.addEventListener("click", () => pickMode("compare"));
+  localBtn.addEventListener("click", () => pickMode("local"));
+  directBtn.addEventListener("click", () => pickMode("direct"));
+  daemonBtn.addEventListener("click", () => {
+    pickMode("daemon");
+    // Re-probe on every explicit pick: the user may have just started it.
+    void connectDaemon(true);
+  });
+  modeToggle.append(cascadeBtn, compareBtn, localBtn, directBtn, daemonBtn);
 
   const topRow = el("div", "composer-row");
-  topRow.append(modeToggle, companyInput, localModelInput, directProviderSel, directModelInput);
+  topRow.append(modeToggle, companyInput, localModelInput, directProviderSel, directModelInput, daemonModelSel, daemonModelInput);
 
   const ta = el("textarea") as HTMLTextAreaElement;
   ta.placeholder = t("chat.placeholder");
@@ -763,15 +863,26 @@ export function renderWorkspace(deps: UiDeps): void {
     hint.textContent = "";
     hint.style.display = "none";
   };
+  /** Stop the in-flight daemon turn: graceful abort (partial answer kept) plus a host-side disconnect. */
+  const stopDaemonTurn = (disconnect: boolean) => {
+    const turn = daemonTurn;
+    if (!turn || !daemon) return;
+    void daemon.abort(turn.conversationId).catch(() => daemon.cancelStream(turn.conversationId));
+    if (disconnect) { daemonTurn = null; void daemon.cancelStream(turn.conversationId); }
+  };
   const stopDispatch = () => {
     chatMotionVersion += 1;
+    stopDaemonTurn(true);
     dispatchController?.abort(); dispatchController = null;
     clearCompareOperation(); dispatching = false; sendBtn.disabled = false;
     for (const row of thinkingMotions.keys()) removeThinking(row);
     setChatMotion("idle", t("chat.stopped"));
   };
   activeDispatchStopper = stopDispatch;
-  const cancelCurrentCompare = () => { void compareOperation?.cancel(); };
+  const cancelCurrentCompare = () => {
+    if (daemonTurn) { cancelBtn.disabled = true; stopDaemonTurn(false); return; }
+    void compareOperation?.cancel();
+  };
   cancelBtn.addEventListener("click", cancelCurrentCompare);
   const enterHint = el("span", "enter-hint mono", t("chat.enterHint"));
   const bottomRow = el("div", "composer-row");
@@ -897,7 +1008,7 @@ export function renderWorkspace(deps: UiDeps): void {
           }
           void b?.emitAudit(`steer: remote prompt accepted (${mode})`).catch(() => {});
           nextDispatchRemote = true;
-          record("user", `↯ ${m}`); // ↯ marks remote origin in the transcript
+          if (mode !== "daemon") record("user", `↯ ${m}`); // ↯ marks remote origin in the transcript (the daemon stores its own)
           ta.value = m;
           void run();
         },
@@ -1049,16 +1160,16 @@ export function renderWorkspace(deps: UiDeps): void {
   // --- company surface ---
   let companyBusy = false;
   const renderCompany = (companies: CompanyView[], jobs: JobView[], error?: string) => {
-    companyPane.replaceChildren();
+    cloudBox.replaceChildren();
 
     if (error) {
       const err = el("div", "company-error", error);
-      companyPane.append(err);
+      cloudBox.append(err);
       return;
     }
 
     const sum = companySummary(companies, jobs);
-    companyPane.append(
+    cloudBox.append(
       el(
         "div",
         "company-summary mono",
@@ -1073,10 +1184,10 @@ export function renderWorkspace(deps: UiDeps): void {
 
     if (companies.length === 0) {
       // Authoring lives on the web; the desktop reads and controls.
-      companyPane.append(el("div", "company-empty", t("company.empty")));
+      cloudBox.append(el("div", "company-empty", t("company.empty")));
     }
 
-    companyPane.append(el("div", "rail-section-label", t("company.companies")));
+    cloudBox.append(el("div", "rail-section-label", t("company.companies")));
     for (const c of companies) {
       const row = el("div", "company-row");
       row.append(el("span", `dot dot-${c.tone === "arc" ? "done" : c.tone === "ember" ? "run" : c.tone === "molten" ? "risk" : "idle"}`));
@@ -1115,12 +1226,12 @@ export function renderWorkspace(deps: UiDeps): void {
         });
         row.append(btn);
       }
-      companyPane.append(row);
+      cloudBox.append(row);
     }
 
-    companyPane.append(el("div", "rail-section-label", t("company.jobs")));
+    cloudBox.append(el("div", "rail-section-label", t("company.jobs")));
     if (jobs.length === 0) {
-      companyPane.append(el("div", "company-empty", t("company.noJobs")));
+      cloudBox.append(el("div", "company-empty", t("company.noJobs")));
     }
     const now = Date.now();
     for (const j of jobs) {
@@ -1153,12 +1264,12 @@ export function renderWorkspace(deps: UiDeps): void {
           stateText,
         ),
       );
-      companyPane.append(row);
+      cloudBox.append(row);
     }
   };
 
   const loadCompany = async () => {
-    companyPane.replaceChildren(el("div", "company-empty", t("company.loading")));
+    cloudBox.replaceChildren(el("div", "company-empty", t("company.loading")));
     try {
       const [rawCompanies, rawJobs] = await Promise.all([
         listCompanies(cfg, { save: deps.persist }),
@@ -1197,6 +1308,7 @@ export function renderWorkspace(deps: UiDeps): void {
     // Fetch on entry, not on mount: the Company surface costs two requests and
     // most sessions never open it.
     if (s === "company") void loadCompany();
+    setCompanyPanelActive(s === "company");
     if (s === "code" && changesPathInput.value.trim()) void loadChanges();
   };
   segChatBtn.addEventListener("click", () => applySurface("chat"));
@@ -1262,8 +1374,46 @@ export function renderWorkspace(deps: UiDeps): void {
     return item;
   };
 
+  const historyItem = (h: HistoryItem): HTMLElement => {
+    if (h.kind === "local") {
+      const s = sessionStore.get(h.id);
+      if (s) return sessionItem(s);
+    }
+    const item = el("button", "session-item");
+    if (activeDaemonConv?.id === h.id) item.classList.add("active");
+    item.append(el("span", "session-title", h.title || t("sessions.untitled")));
+    item.addEventListener("click", () => void loadDaemonConversation(h.id));
+    return item;
+  };
+
+  let searchResults: SearchResult[] | null = null;
   const refreshSessionList = () => {
     sessionsSec.replaceChildren();
+    if (daemonOnline && searchResults) {
+      if (!searchResults.length) sessionsSec.append(el("div", "rail-section-label", t("sessions.noResults")));
+      for (const r of searchResults) {
+        const item = el("button", "session-item");
+        if (activeDaemonConv?.id === r.conversationId) item.classList.add("active");
+        const title = daemonConversations.find(c => c.id === r.conversationId)?.title;
+        item.append(el("span", "session-title", title || t("sessions.untitled")));
+        item.title = r.snippet;
+        item.addEventListener("click", () => void loadDaemonConversation(r.conversationId));
+        sessionsSec.append(item);
+      }
+      return;
+    }
+    if (daemonOnline) {
+      const { today, earlier } = groupSessions(mergeHistory(daemonConversations, sessionStore.list()), Date.now());
+      if (today.length) {
+        sessionsSec.append(el("div", "rail-section-label", t("sessions.today")));
+        for (const h of today) sessionsSec.append(historyItem(h));
+      }
+      if (earlier.length) {
+        sessionsSec.append(el("div", "rail-section-label", t("sessions.earlier")));
+        for (const h of earlier) sessionsSec.append(historyItem(h));
+      }
+      return;
+    }
     const { today, earlier } = groupSessions(sessionStore.list(), Date.now());
     if (today.length) {
       sessionsSec.append(el("div", "rail-section-label", t("sessions.today")));
@@ -1277,7 +1427,142 @@ export function renderWorkspace(deps: UiDeps): void {
 
   const syncCrumb = () => {
     if (surface !== "chat") return;
-    crumb.textContent = activeSession?.title || t("app.name");
+    crumb.textContent = activeDaemonConv?.title || activeSession?.title || t("app.name");
+  };
+
+  // --- local daemon: probe, migrate, models, conversations, search ---
+  const refreshDaemonConversations = async () => {
+    if (!daemon || !daemonOnline) return;
+    try {
+      const list = await daemon.listConversations({ limit: 50 });
+      if (workspaceDisposed) return;
+      daemonConversations = list;
+    } catch { /* keep the last list; the next turn or probe retries */ }
+    refreshSessionList();
+  };
+  const fillDaemonModels = (options: ModelOption[]) => {
+    const previous = daemonModelSel.value;
+    daemonModelOptions = options;
+    daemonModelSel.replaceChildren();
+    options.forEach((o, index) => {
+      const opt = el("option", undefined, o.label) as HTMLOptionElement;
+      opt.value = String(index);
+      daemonModelSel.append(opt);
+    });
+    if (previous && Number(previous) < options.length) daemonModelSel.value = previous;
+    daemonModelSel.style.display = mode === "daemon" && options.length ? "block" : "none";
+  };
+  const refreshDaemonModels = async () => {
+    if (!daemon) return;
+    try { fillDaemonModels(modelOptions(await daemon.models())); }
+    catch { fillDaemonModels([]); }
+  };
+  /** Selected model: a typed PROVIDER/model wins over the suggestion list. */
+  const readDaemonModel = (): { provider: string; model: string } | { error: string } => {
+    const typed = daemonModelInput.value.trim();
+    if (typed) return parseModelRef(typed) ?? { error: t("chat.daemonModelInvalid") };
+    const option = daemonModelOptions[Number(daemonModelSel.value)];
+    return option ? { provider: option.provider, model: option.model } : { error: t("chat.daemonNoModels") };
+  };
+  const showDaemonModel = (provider: string | null, model: string | null) => {
+    if (!provider || !model) return;
+    const index = daemonModelOptions.findIndex(o => o.provider === provider && o.model === model);
+    if (index >= 0) { daemonModelSel.value = String(index); daemonModelInput.value = ""; }
+    else daemonModelInput.value = `${provider}/${model}`;
+  };
+  let daemonProbe: Promise<void> | null = null;
+  const connectDaemon = (explicit = false): Promise<void> => daemonProbe ??= (async () => {
+    try {
+      if (!daemon) { daemonOnline = false; return; }
+      const status = await daemon.status();
+      if (workspaceDisposed) return;
+      daemonOnline = status.running;
+      if (!daemonOnline) return;
+      // One-time move of the localStorage transcript into the daemon. Each
+      // session is cleared only after the daemon confirmed it; re-runs skip.
+      const report = await migrateLocalSessions(daemon, sessionStore, { exclude: activeSession ? [activeSession.id] : [] }).catch(() => null);
+      if (workspaceDisposed) return;
+      if (report?.failed) migrationNote = t("sessions.importPartial");
+      else if (report?.cleared) migrationNote = t("sessions.imported", { n: report.cleared });
+      await Promise.all([refreshDaemonModels(), refreshDaemonConversations()]);
+    } catch {
+      daemonOnline = false;
+    } finally {
+      daemonProbe = null;
+      if (!workspaceDisposed) {
+        historySearch.style.display = daemonOnline ? "" : "none";
+        if (daemonOnline && !modeChosenByUser && mode === "cascade" && !dispatching) applyMode("daemon");
+        if (mode === "daemon") {
+          if (!daemonOnline) showDaemonHint(t("chat.daemonOffline"));
+          else if (!daemonModelOptions.length && !daemonModelInput.value.trim()) showDaemonHint(t("chat.daemonNoModels"));
+          else if (daemonHintShown) { hint.textContent = ""; hint.style.display = "none"; daemonHintShown = false; }
+        } else if (explicit && !daemonOnline) showDaemonHint(t("chat.daemonOffline"));
+        updateStorageNotice();
+        refreshSessionList();
+      }
+    }
+  })();
+  let searchTimer: ReturnType<typeof setTimeout> | undefined;
+  let searchVersion = 0;
+  historySearch.addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    const q = historySearch.value.trim();
+    const version = ++searchVersion;
+    if (!q || !daemon) { searchResults = null; refreshSessionList(); return; }
+    searchTimer = setTimeout(async () => {
+      try {
+        const results = await daemon.search(q, 20);
+        if (workspaceDisposed || version !== searchVersion) return;
+        searchResults = results;
+      } catch {
+        if (version !== searchVersion) return;
+        searchResults = [];
+      }
+      refreshSessionList();
+    }, 250);
+  });
+  let daemonLoadVersion = 0;
+  const loadDaemonConversation = async (id: string) => {
+    if (!daemon) return;
+    const version = ++daemonLoadVersion;
+    let loaded: Awaited<ReturnType<DaemonClient["getConversation"]>>;
+    try { loaded = await daemon.getConversation(id); }
+    catch (e) {
+      if (workspaceDisposed || version !== daemonLoadVersion) return;
+      showDaemonHint(daemonErrorText(e));
+      return;
+    }
+    if (workspaceDisposed || version !== daemonLoadVersion) return;
+    chatMotionVersion += 1;
+    clearCompareOperation();
+    dispatching = false;
+    sendBtn.disabled = false;
+    setChatMotion("idle", t("app.tagline"));
+    for (const row of thinkingMotions.keys()) removeThinking(row);
+    activeSession = null;
+    activeDaemonConv = loaded.conversation;
+    scroll.replaceChildren();
+    for (const m of loaded.messages) {
+      if (m.role === "user") scroll.append(el("div", "msg-user", m.content));
+      else renderPlainAnswer(scroll, m.content, t);
+    }
+    showDaemonModel(loaded.conversation.provider, loaded.conversation.model);
+    applyMode("daemon");
+    inspectorBody.replaceChildren(el("div", "inspector-empty", t("inspector.empty")));
+    if (loaded.conversation.provider) renderSourceInspector(inspectorBody, t("chat.daemonSource", { provider: loaded.conversation.provider }), loaded.conversation.model ?? "", t);
+    refreshSessionList();
+    syncCrumb();
+    scrollToEnd();
+  };
+  const daemonErrorText = (e: unknown): string => {
+    if (!(e instanceof DaemonError)) return t("chat.daemonFailed", { detail: redactSummary(String(e instanceof Error ? e.message : e)) });
+    switch (e.code) {
+      case "busy": return t("chat.daemonBusy");
+      case "missing-key": return t("chat.daemonMissingKey", { detail: redactSummary(e.message) });
+      case "model-required": return t("chat.daemonModelRequired");
+      case "not-running": return t("chat.daemonOffline");
+      default: return t("chat.daemonFailed", { detail: redactSummary(e.message) });
+    }
   };
 
   // Replays a stored transcript as plain lines — deliberately NOT the rich
@@ -1293,6 +1578,7 @@ export function renderWorkspace(deps: UiDeps): void {
     setChatMotion("idle", t("app.tagline"));
     for (const row of thinkingMotions.keys()) removeThinking(row);
     activeSession = s;
+    activeDaemonConv = null;
     scroll.replaceChildren();
     for (const e of s.entries) {
       if (e.role === "user") scroll.append(el("div", "msg-user", e.text));
@@ -1312,6 +1598,7 @@ export function renderWorkspace(deps: UiDeps): void {
     setChatMotion("idle", t("app.tagline"));
     for (const row of thinkingMotions.keys()) removeThinking(row);
     activeSession = null; // created lazily on first send, so empty chats don't pile up
+    activeDaemonConv = null; // likewise created by the daemon on first send
     scroll.replaceChildren();
     inspectorBody.replaceChildren(el("div", "inspector-empty", t("inspector.empty")));
     refreshSessionList();
@@ -1360,6 +1647,100 @@ export function renderWorkspace(deps: UiDeps): void {
     }
   };
 
+  /**
+   * One daemon turn. Governed as `local.dispatch` (auto-allow, audited): the
+   * desktop's own action is a loopback call to a local process and it never
+   * handles a provider key; the ledger summary names the model so the record is
+   * truthful about where the turn went. The daemon stores both messages.
+   */
+  const runDaemonTurn = async (
+    text: string,
+    ownsRun: () => boolean,
+    thinkingRow: (label: string) => HTMLElement,
+    setRunMotion: (state: MotionState, label: string) => void,
+    showAnswerMotion: (answer: string) => void,
+  ) => {
+    const fail = (message: string) => {
+      setRunMotion("error", message);
+      renderErrorCard(scroll, message);
+    };
+    if (!daemon || !daemonOnline) {
+      fail(t("chat.daemonOffline"));
+      void connectDaemon(true);
+      return;
+    }
+    const choice = readDaemonModel();
+    if ("error" in choice) { fail(choice.error); return; }
+    const modelLabel = `${choice.provider}/${choice.model}`;
+    const detail: ActionDetail = { summary: t("gov.kindDaemonDispatch", { model: modelLabel }) };
+    const gate = await gateAction(deps, "local.dispatch", detail);
+    if (!ownsRun()) return;
+    if (!gate.ok) { fail(gate.reason); return; }
+    const thinking = thinkingRow(t("chat.daemonThinking", { model: modelLabel }));
+    scroll.append(thinking);
+    scrollToEnd();
+    const card = el("div", "msg-final");
+    card.append(el("div", "msg-label", t("chat.finalAnswer")));
+    const body = document.createTextNode("");
+    card.append(body);
+    let cardShown = false;
+    const showCard = (full: string) => {
+      if (!cardShown) { removeThinking(thinking); scroll.append(card); cardShown = true; }
+      body.textContent = full;
+      scrollToEnd();
+    };
+    let conversationId: string | null = null;
+    try {
+      let conversation = activeDaemonConv;
+      if (!conversation) {
+        conversation = await daemon.createConversation({ title: deriveTitle(text) || undefined, provider: choice.provider, model: choice.model });
+      } else if (conversation.provider !== choice.provider || conversation.model !== choice.model) {
+        conversation = await daemon.updateConversation(conversation.id, { provider: choice.provider, model: choice.model });
+      }
+      if (!ownsRun()) return;
+      activeDaemonConv = conversation;
+      conversationId = conversation.id;
+      syncCrumb();
+      daemonTurn = { conversationId };
+      cancelBtn.textContent = t("chat.stop");
+      cancelBtn.disabled = false;
+      cancelBtn.style.display = "";
+      const result = await daemon.sendMessage(conversationId, text, {
+        onDelta: (_chunk, full) => { if (ownsRun()) showCard(full); },
+      });
+      if (!ownsRun()) return;
+      removeThinking(thinking);
+      if (result.text) showCard(result.text);
+      renderSourceInspector(inspectorBody, t("chat.daemonSource", { provider: choice.provider }), choice.model, t);
+      if (result.usage) inspectorBody.append(kv(t("chat.daemonTokens"), t("chat.daemonUsage", { input: result.usage.inputTokens, output: result.usage.outputTokens })));
+      if (result.error) {
+        fail(daemonErrorText(result.error));
+        await deps.gov.settle("local.dispatch", "error", detail);
+      } else if (result.stopReason === "aborted") {
+        setRunMotion("idle", t("chat.daemonStopped"));
+        await deps.gov.settle("local.dispatch", "error", detail);
+      } else {
+        if (!cardShown) renderPlainAnswer(scroll, "", t);
+        showAnswerMotion(result.text);
+        await deps.gov.settle("local.dispatch", "success", detail);
+      }
+    } catch (e) {
+      if (!ownsRun()) return;
+      removeThinking(thinking);
+      fail(daemonErrorText(e));
+      if (e instanceof DaemonError && e.code === "not-running") {
+        daemonOnline = false;
+        historySearch.style.display = "none";
+        updateStorageNotice();
+      }
+      await deps.gov.settle("local.dispatch", "error", detail);
+    } finally {
+      if (conversationId && daemonTurn?.conversationId === conversationId) daemonTurn = null;
+      cancelBtn.disabled = false;
+      void refreshDaemonConversations();
+    }
+  };
+
   const run = async () => {
     if (workspaceDisposed || dispatching) return;
     const runMode = mode;
@@ -1369,6 +1750,16 @@ export function renderWorkspace(deps: UiDeps): void {
       hint.textContent = t("chat.companyNeeded");
       hint.style.display = "block";
       return;
+    }
+    if (runMode === "daemon") {
+      // Like compare's checks: block an unready daemon lane before governance
+      // or clearing the draft, and say how to fix it.
+      const choice = daemonOnline ? readDaemonModel() : { error: t("chat.daemonOffline") };
+      if ("error" in choice) {
+        showDaemonHint(choice.error);
+        if (!daemonOnline) void connectDaemon(true);
+        return;
+      }
     }
     const runCompanyId = companyInput.value.trim();
     let runSelections: ModelSelection[] | undefined;
@@ -1425,7 +1816,7 @@ export function renderWorkspace(deps: UiDeps): void {
     try {
       // Inside the try: a storage failure here must not strand sendBtn
       // disabled with the user's text already cleared.
-      recordRun("user", text);
+      if (runMode !== "daemon") recordRun("user", text); // daemon turns are stored by the daemon
       const origin = nextDispatchRemote ? "companion" : "local";
       nextDispatchRemote = false;
 
@@ -1563,6 +1954,9 @@ export function renderWorkspace(deps: UiDeps): void {
           }
         }
         if (ownsRun()) bumpActivity();
+      } else if (runMode === "daemon") {
+        await runDaemonTurn(text, ownsRun, thinkingRow, setRunMotion, showAnswerMotion);
+        if (ownsRun()) bumpActivity();
       } else {
         const stub = await startCompare(cfg, { companyId: runCompanyId, query: text,
           ...(runSelections !== undefined ? { selections: runSelections } : {}) }, { signal: controller.signal });
@@ -1685,11 +2079,14 @@ export function renderWorkspace(deps: UiDeps): void {
     if (activeDispatchStopper === stopDispatch) activeDispatchStopper = null;
     void deps.gov.invalidate().catch(() => {});
     workspaceDisposed = true;
+    companyPanel?.unmount();
+    companyPanel = null;
     clearCompareOperation();
     for (const motion of motions) motion.dispose();
     motions.clear();
     thinkingMotions.clear();
     window.removeEventListener("keydown", onWorkspaceKey);
+    clearTimeout(searchTimer);
     if (compBridge || startingCompanion) void stopCompanion();
     else deps.gov = baseGov;
   };
@@ -1697,6 +2094,7 @@ export function renderWorkspace(deps: UiDeps): void {
   void refreshSavings();
   updateStorageNotice();
   refreshSessionList();
+  void connectDaemon();
 }
 
 // ── answer renderers (center) ───────────────────────────────────────────────

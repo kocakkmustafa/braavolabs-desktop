@@ -70,15 +70,15 @@ export function deriveTitle(text: string): string {
 }
 
 /** Split for the sidebar: sessions updated since local midnight vs the rest. */
-export function groupSessions(
-  sessions: ChatSession[],
+export function groupSessions<T extends { updatedAt: number } = ChatSession>(
+  sessions: T[],
   now: number,
-): { today: ChatSession[]; earlier: ChatSession[] } {
+): { today: T[]; earlier: T[] } {
   const midnight = new Date(now);
   midnight.setHours(0, 0, 0, 0);
   const cut = midnight.getTime();
-  const today: ChatSession[] = [];
-  const earlier: ChatSession[] = [];
+  const today: T[] = [];
+  const earlier: T[] = [];
   for (const s of sessions) (s.updatedAt >= cut ? today : earlier).push(s);
   return { today, earlier };
 }

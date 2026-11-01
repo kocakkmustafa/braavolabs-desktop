@@ -28,8 +28,8 @@ describe("provider guards + model resolution", () => {
     expect(resolveDirectModel("anthropic")).toBe(DIRECT_DEFAULT_MODEL.anthropic);
     expect(resolveDirectModel("anthropic", "  ")).toBe(DIRECT_DEFAULT_MODEL.anthropic);
     expect(resolveDirectModel("openai", "gpt-4o")).toBe("gpt-4o");
-    // defaults are dated identifiers, not moving aliases
-    expect(DIRECT_DEFAULT_MODEL.anthropic).toMatch(/\d{8}$/);
+    // A pinned id, never a retired Claude 3.x model.
+    expect(DIRECT_DEFAULT_MODEL.anthropic).toBe("claude-sonnet-5-5");
   });
 });
 
@@ -48,7 +48,7 @@ describe("directChat auth-header shape per provider", () => {
     expect(calls[0].init.headers.Authorization).toBeUndefined();
     expect(calls[0].init.headers["anthropic-version"]).toBe("2023-06-01");
     const body = JSON.parse(calls[0].init.body);
-    expect(body.max_tokens).toBe(1024);
+    expect(body.max_tokens).toBe(4096);
     expect(body.messages).toEqual([{ role: "user", content: "hello" }]);
   });
 
