@@ -83,6 +83,7 @@
   "login.email": "이메일",
   "login.password": "비밀번호",
   "login.apiUrl": "API URL",
+  "login.advanced": "고급",
   "login.submit": "로그인",
   "login.signingIn": "로그인 중…",
   "login.requiredEmail": "이메일 주소를 입력하세요.",

@@ -83,6 +83,7 @@
   "login.email": "电子邮箱",
   "login.password": "密码",
   "login.apiUrl": "API URL",
+  "login.advanced": "高级",
   "login.submit": "登录",
   "login.signingIn": "正在登录…",
   "login.requiredEmail": "请输入电子邮箱地址。",

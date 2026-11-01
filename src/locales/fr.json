@@ -83,6 +83,7 @@
   "login.email": "E-mail",
   "login.password": "Mot de passe",
   "login.apiUrl": "URL de l’API",
+  "login.advanced": "Avancé",
   "login.submit": "Se connecter",
   "login.signingIn": "Connexion…",
   "login.requiredEmail": "Saisissez votre adresse e-mail.",

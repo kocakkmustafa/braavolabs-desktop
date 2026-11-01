@@ -83,6 +83,7 @@
   "login.email": "Email",
   "login.password": "Password",
   "login.apiUrl": "URL API",
+  "login.advanced": "Avanzate",
   "login.submit": "Accedi",
   "login.signingIn": "Accesso in corso…",
   "login.requiredEmail": "Inserisci il tuo indirizzo email.",

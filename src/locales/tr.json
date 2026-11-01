@@ -83,6 +83,7 @@
   "login.email": "E-posta",
   "login.password": "Parola",
   "login.apiUrl": "API adresi",
+  "login.advanced": "Gelişmiş",
   "login.submit": "Giriş yap",
   "login.signingIn": "Giriş yapılıyor…",
   "login.requiredEmail": "E-posta adresinizi girin.",

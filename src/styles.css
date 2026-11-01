@@ -1879,3 +1879,8 @@ pre, code, .changes-path, .mcp-args, .key-input { direction: ltr; unicode-bidi: 
 [dir="rtl"] .msg-user { border-radius: 13px 13px 13px 3px; }
 
 .send-btn { height: auto; min-height: 44px; align-self: stretch; }
+
+/* Sign-in: the API address folds under "Advanced" (self-hosting only). */
+.login-advanced { margin: 4px 0 12px; }
+.login-advanced > summary { cursor: pointer; font-size: 0.75rem; color: var(--text-muted); padding: 4px 0; user-select: none; }
+.login-advanced[open] > summary { margin-bottom: 6px; }

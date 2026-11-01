@@ -82,11 +82,35 @@ export function resolveStore(): SecretStore {
 }
 
 const API_URL_KEY = "braavolabs.apiUrl";
+/** Set when the user saves an API URL from the sign-in form (1.1.0+). */
+const API_URL_EXPLICIT_KEY = "braavolabs.apiUrl.explicit";
 
-/** apiUrl is non-secret → safe to remember in localStorage (when available). */
-export function loadApiUrl(fallback: string): string {
+/** A packaged Tauri app is served from tauri://localhost (macOS/Linux) or tauri.localhost (Windows); dev uses the Vite server. */
+export function isReleaseBuild(): boolean {
+  const l = (globalThis as { location?: { protocol?: string; hostname?: string } }).location;
+  return Boolean(l && (l.protocol === "tauri:" || l.hostname === "tauri.localhost"));
+}
+
+/** Loopback, .local or private-LAN hosts: a development or self-host address. */
+export function isLocalApiUrl(url: string): boolean {
+  let host: string;
+  try { host = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, ""); } catch { return false; }
+  return host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host === "::1" ||
+    /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host);
+}
+
+/**
+ * apiUrl is non-secret → safe to remember in localStorage (when available).
+ * In a release build, a local address left behind by an old development setup
+ * (saved before the explicit marker existed) falls back to the default; one the
+ * user chose in the sign-in form is kept, so self-hosting still works.
+ */
+export function loadApiUrl(fallback: string, opts: { production?: boolean } = {}): string {
   try {
-    return globalThis.localStorage?.getItem(API_URL_KEY) || fallback;
+    const stored = globalThis.localStorage?.getItem(API_URL_KEY);
+    if (!stored) return fallback;
+    if (opts.production && isLocalApiUrl(stored) && globalThis.localStorage?.getItem(API_URL_EXPLICIT_KEY) !== "1") return fallback;
+    return stored;
   } catch {
     return fallback;
   }
@@ -95,6 +119,7 @@ export function loadApiUrl(fallback: string): string {
 export function saveApiUrl(url: string): void {
   try {
     globalThis.localStorage?.setItem(API_URL_KEY, url);
+    globalThis.localStorage?.setItem(API_URL_EXPLICIT_KEY, "1");
   } catch {
     /* localStorage unavailable (SSR/test) — non-fatal */
   }

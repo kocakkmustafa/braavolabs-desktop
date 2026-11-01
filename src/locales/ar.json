@@ -83,6 +83,7 @@
   "login.email": "البريد الإلكتروني",
   "login.password": "كلمة المرور",
   "login.apiUrl": "عنوان API",
+  "login.advanced": "متقدم",
   "login.submit": "تسجيل الدخول",
   "login.signingIn": "جارٍ تسجيل الدخول…",
   "login.requiredEmail": "أدخل عنوان بريدك الإلكتروني.",

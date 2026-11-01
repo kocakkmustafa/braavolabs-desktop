@@ -83,6 +83,7 @@
   "login.email": "Email",
   "login.password": "Kata sandi",
   "login.apiUrl": "URL API",
+  "login.advanced": "Lanjutan",
   "login.submit": "Masuk",
   "login.signingIn": "Sedang masuk…",
   "login.requiredEmail": "Masukkan alamat email Anda.",
