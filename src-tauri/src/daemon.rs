@@ -716,6 +716,11 @@ pub fn read_findings(home: &Path, company_id: &str, role: &str) -> Result<Findin
     if !real.starts_with(&root) {
         return Err(ERR_ROUTE.to_string());
     }
+    // Refuse non-files before opening: Windows fails File::open on a directory,
+    // which would otherwise surface as "unreadable" instead of a refusal.
+    if !std::fs::metadata(&real).map(|m| m.is_file()).unwrap_or(false) {
+        return Err(ERR_ROUTE.to_string());
+    }
     let mut file = std::fs::File::open(&real).map_err(|_| format!("{ERR_PROTOCOL}: findings unreadable"))?;
     let meta = file.metadata().map_err(|_| format!("{ERR_PROTOCOL}: findings unreadable"))?;
     if !meta.is_file() {
