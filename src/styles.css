@@ -1749,6 +1749,12 @@ textarea {
 .cp-skills li { font-size: 0.75rem; padding: 2px 0; }
 .cp-check { display: flex; align-items: baseline; gap: 6px; cursor: pointer; overflow-wrap: anywhere; }
 .cp-check input { flex: none; }
+/* Plan 5.1: the Braavo browser pane. */
+.bp-root { margin-top: 18px; display: flex; flex-direction: column; gap: 8px; }
+.bp-url { flex: 1; min-width: 12rem; }
+.bp-result { border: 1px solid var(--steel-800); border-radius: var(--radius-sm); padding: 10px 12px; background: var(--obsidian-inset); }
+.bp-untrusted { display: inline-block; font-size: 0.65625rem; color: var(--ember); border: 1px solid var(--ember-dim); border-radius: 999px; padding: 1px 8px; margin-bottom: 6px; }
+.bp-text { max-height: 320px; overflow: auto; white-space: pre-wrap; font-size: 0.75rem; overflow-wrap: anywhere; margin: 6px 0 0; }
 .cp-new-task textarea { resize: vertical; width: 100%; }
 .cp-routine { align-items: flex-start; padding: 8px 0; }
 .cp-activity li { font-size: 0.75rem; padding: 4px 0; border-top: 1px solid var(--steel-800); overflow-wrap: anywhere; }

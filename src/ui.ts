@@ -132,6 +132,7 @@ import {
   type BrandMotion, type MotionState,
 } from "./brand-motion";
 import { createVoice } from "./voice";
+import { createBrowserPane } from "./browser-pane";
 
 /** How an approval was settled. `token` is present only when the resolver
  *  ALREADY minted one (companion approve) — the local click mints its own. */
@@ -707,6 +708,16 @@ export function renderWorkspace(deps: UiDeps): void {
   const cloudBox = el("div", "company-cloud");
   if (panelTransport) companyPane.append(companyPanelHost, el("div", "rail-section-label cp-cloud-label", t("panel.cloudSection")));
   companyPane.append(cloudBox);
+  // Plan 5.1: the Braavo browser (own Chromium profile, governed CDP); Tauri only.
+  const tauriInvoke = (globalThis as Record<string, any>)?.__TAURI__?.core?.invoke as ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>) | undefined;
+  if (tauriInvoke) {
+    const browserPane = createBrowserPane({
+      t, invoke: tauriInvoke,
+      gate: (kind, detail) => gateForToken(deps, kind, detail),
+      addToMessage: (text) => { applySurface("chat"); ta.value = ta.value ? `${ta.value}\n\n${text}` : text; ta.dispatchEvent(new Event("input")); ta.focus(); },
+    });
+    companyPane.append(browserPane.element);
+  }
   let companyPanel: CompanyPanelHandle | null = null;
   let companyPanelLoading = false;
   let companyPanelWanted = false;

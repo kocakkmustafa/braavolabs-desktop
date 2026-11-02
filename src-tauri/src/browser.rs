@@ -530,8 +530,181 @@ impl CdpConnection {
     }
 }
 
+// ── Braavo browser (plan 5.1): own profile + URL policy ─────────────────────
+
+/// Banking, payment and government hosts denied until the user edits
+/// `~/.braavo/browser.json` (the same file and defaults as the daemon's agent browser).
+pub const DEFAULT_DENY: &[&str] = &[
+    "*.gov", "*.gov.tr", "*.gov.uk", "*.mil", "*.bank",
+    "turkiye.gov.tr", "paypal.com", "stripe.com", "iyzico.com", "papara.com", "wise.com", "revolut.com",
+];
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BrowserPolicy {
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
+}
+
+impl Default for BrowserPolicy {
+    fn default() -> Self {
+        BrowserPolicy { allow: vec![], deny: DEFAULT_DENY.iter().map(|s| s.to_string()).collect() }
+    }
+}
+
+/// Parse `browser.json`; a missing or broken file (or a missing `deny`) keeps the defaults.
+pub fn parse_policy(text: Option<&str>) -> BrowserPolicy {
+    let Some(v) = text.and_then(|t| serde_json::from_str::<Value>(t).ok()) else { return BrowserPolicy::default() };
+    let list = |key: &str| -> Option<Vec<String>> {
+        v.get(key)?.as_array().map(|a| {
+            a.iter().filter_map(|x| x.as_str()).map(|x| x.trim().to_ascii_lowercase()).filter(|x| !x.is_empty()).take(500).collect()
+        })
+    };
+    BrowserPolicy { allow: list("allow").unwrap_or_default(), deny: list("deny").unwrap_or_else(|| BrowserPolicy::default().deny) }
+}
+
+/// "example.com" = the domain and its subdomains; "*.gov" = suffix; "*" = anything.
+pub fn host_matches(host: &str, pattern: &str) -> bool {
+    let h = host.trim_end_matches('.').to_ascii_lowercase();
+    let p = pattern.trim_end_matches('.').to_ascii_lowercase();
+    if p == "*" {
+        return true;
+    }
+    if let Some(suffix) = p.strip_prefix('*') {
+        return h.ends_with(suffix);
+    }
+    h == p || h.ends_with(&format!(".{p}"))
+}
+
+fn is_private_host(host: &str) -> bool {
+    let h = host.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    if h == "localhost" || h.ends_with(".localhost") || h.ends_with(".local") || h.ends_with(".internal") {
+        return true;
+    }
+    match h.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => {
+            let [a, b, ..] = ip.octets();
+            ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified() || ip.is_multicast() || (a == 100 && (64..=127).contains(&b))
+        }
+        Ok(std::net::IpAddr::V6(ip)) => {
+            let seg = ip.segments()[0];
+            ip.is_loopback() || ip.is_unspecified() || (seg & 0xfe00) == 0xfc00 || (seg & 0xffc0) == 0xfe80 || ip.to_ipv4_mapped().map_or(false, |v4| v4.is_loopback() || v4.is_private())
+        }
+        Err(_) => !h.contains('.'),
+    }
+}
+
+/// Why the Braavo browser may not open `url` (after `is_safe_http_url`), or None.
+/// Host-side twin of the daemon's `blockedReason`: private hosts never, then deny, then allow.
+pub fn policy_block_reason(url: &str, policy: &BrowserPolicy) -> Option<String> {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.contains('@') {
+        return Some("URLs with credentials are blocked".into());
+    }
+    let host = if authority.starts_with('[') {
+        authority.split(']').next().map(|h| format!("{h}]")).unwrap_or_default()
+    } else {
+        authority.rsplit_once(':').map(|(h, _)| h.to_string()).unwrap_or_else(|| authority.to_string())
+    };
+    if host.is_empty() || is_private_host(&host) {
+        return Some("local and private addresses are blocked".into());
+    }
+    if let Some(p) = policy.deny.iter().find(|p| host_matches(&host, p)) {
+        return Some(format!("blocked by the browser deny list ({p})"));
+    }
+    if !policy.allow.is_empty() && !policy.allow.iter().any(|p| host_matches(&host, p)) {
+        return Some("not on the browser allow list".into());
+    }
+    None
+}
+
+/// A Chromium-family browser to run with the Braavo profile (Chrome, Chromium, Edge, Brave).
+pub fn chromium_candidates() -> Vec<std::path::PathBuf> {
+    let mut out = vec![];
+    #[cfg(target_os = "macos")]
+    for app in ["Google Chrome", "Chromium", "Microsoft Edge", "Brave Browser"] {
+        out.push(std::path::PathBuf::from(format!("/Applications/{app}.app/Contents/MacOS/{app}")));
+    }
+    #[cfg(target_os = "windows")]
+    for base in [std::env::var("ProgramFiles").ok(), std::env::var("ProgramFiles(x86)").ok(), std::env::var("LOCALAPPDATA").ok()].into_iter().flatten() {
+        out.push(std::path::PathBuf::from(&base).join("Google\\Chrome\\Application\\chrome.exe"));
+        out.push(std::path::PathBuf::from(&base).join("Microsoft\\Edge\\Application\\msedge.exe"));
+    }
+    #[cfg(target_os = "linux")]
+    for bin in ["/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/microsoft-edge"] {
+        out.push(std::path::PathBuf::from(bin));
+    }
+    out
+}
+
+/// Arguments for a separate, persistent profile with a loopback DevTools port the
+/// browser picks itself (written to `DevToolsActivePort` in the profile).
+pub fn launch_args(profile: &std::path::Path) -> Vec<String> {
+    vec![
+        format!("--user-data-dir={}", profile.display()),
+        "--remote-debugging-address=127.0.0.1".into(),
+        "--remote-debugging-port=0".into(),
+        "--no-first-run".into(),
+        "--no-default-browser-check".into(),
+        "about:blank".into(),
+    ]
+}
+
+/// Poll `DevToolsActivePort` (first line = port) until the browser has written it.
+pub async fn wait_devtools_port(profile: &std::path::Path, timeout: Duration) -> Result<u16, String> {
+    let file = profile.join("DevToolsActivePort");
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Ok(text) = std::fs::read_to_string(&file) {
+            if let Some(port) = text.lines().next().and_then(|l| l.trim().parse::<u16>().ok()).filter(|p| *p > 0) {
+                return Ok(port);
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("the browser did not open its DevTools port".into());
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn braavo_browser_policy_blocks_private_deny_and_off_allow_list() {
+        let def = BrowserPolicy::default();
+        assert_eq!(policy_block_reason("https://example.com/pricing", &def), None);
+        for url in ["http://localhost:3000", "http://127.0.0.1/", "http://169.254.169.254/latest", "http://10.0.0.1", "http://[::1]:8080/", "http://router.local", "http://intranet/"] {
+            assert!(policy_block_reason(url, &def).unwrap().contains("private"), "{url}");
+        }
+        assert!(policy_block_reason("https://user:pw@example.com", &def).unwrap().contains("credentials"));
+        assert!(policy_block_reason("https://www.paypal.com/signin", &def).unwrap().contains("deny list (paypal.com)"));
+        assert!(policy_block_reason("https://www.turkiye.gov.tr", &def).unwrap().contains("deny list"));
+        let allow = parse_policy(Some(r#"{"allow":["Rival.example"],"deny":[]}"#));
+        assert_eq!(policy_block_reason("https://docs.rival.example/x", &allow), None);
+        assert!(policy_block_reason("https://other.example", &allow).unwrap().contains("allow list"));
+        assert_eq!(parse_policy(Some("{broken")), BrowserPolicy::default());
+        assert_eq!(parse_policy(Some(r#"{"allow":["a.com"]}"#)).deny, BrowserPolicy::default().deny);
+    }
+
+    #[test]
+    fn braavo_browser_uses_its_own_profile_and_a_loopback_devtools_port() {
+        let args = launch_args(std::path::Path::new("/tmp/braavo-profile"));
+        assert!(args.contains(&"--user-data-dir=/tmp/braavo-profile".to_string()));
+        assert!(args.contains(&"--remote-debugging-address=127.0.0.1".to_string()));
+        assert!(args.contains(&"--remote-debugging-port=0".to_string()));
+    }
+
+    #[test]
+    fn braavo_browser_reads_the_devtools_port_file() {
+        let dir = std::env::temp_dir().join(format!("braavo-devtools-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("DevToolsActivePort"), "54321\n/devtools/browser/abc\n").unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        assert_eq!(rt.block_on(wait_devtools_port(&dir, Duration::from_millis(300))), Ok(54321));
+        std::fs::remove_file(dir.join("DevToolsActivePort")).unwrap();
+        assert!(rt.block_on(wait_devtools_port(&dir, Duration::from_millis(200))).is_err());
+    }
     use super::*;
 
     // ── is_safe_http_url: byte-parity with governance.ts isSafeHttpUrl ──
