@@ -48,6 +48,13 @@ export function createPanelApi(transport: PanelTransport) {
     hire: (companyId: string, request: HireRequest) => call<unknown>("POST", `/v1/companies/${id(companyId)}/hire`, request),
     updateAgent: (agentId: string, patch: AgentPatch) => call<unknown>("PATCH", `/v1/agents/${id(agentId)}`, patch),
     runRoutine: (routineId: string) => call<{ outcome: string; note?: string }>("POST", `/v1/routines/${id(routineId)}/run`),
+    setCompanyBudget: (companyId: string, monthlyBudgetUsd: number | null) => call<unknown>("PATCH", `/v1/companies/${id(companyId)}`, { monthlyBudgetUsd }),
+    tasks: (companyId: string) => call<unknown>("GET", `/v1/companies/${id(companyId)}/tasks`),
+    createTask: (companyId: string, input: { title: string; body?: string; assignee?: string | null }) => call<unknown>("POST", `/v1/companies/${id(companyId)}/tasks`, input),
+    updateTask: (taskId: string, patch: { status?: "OPEN" | "CANCELLED"; assignee?: string | null }) => call<unknown>("PATCH", `/v1/tasks/${id(taskId)}`, patch),
+    runTask: (taskId: string) => call<unknown>("POST", `/v1/tasks/${id(taskId)}/run`),
+    agentConversations: (agentId: string) => call<unknown>("GET", `/v1/conversations?${new URLSearchParams({ agentId, limit: "20" })}`),
+    createAgentConversation: (agentId: string) => call<unknown>("POST", "/v1/conversations", { agentId }),
     models: () => call<DaemonModels>("GET", "/v1/models"),
     async findings(companyId: string, role: string): Promise<Findings> {
       try { return await transport.findings(companyId, role); }

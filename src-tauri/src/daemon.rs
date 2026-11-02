@@ -126,7 +126,7 @@ fn valid_query(query: &str, allowed_keys: &[&str]) -> bool {
 }
 
 /// The chat routes of the contract plus the company panel routes (plan 2.5,
-/// slices D1/D2). Everything else (other company/routine routes, the event
+/// slices D1/D2) and its budgets and tasks (plan 2.3/2.9). Everything else (other company/routine routes, the event
 /// stream, a turn via the generic command, any other host) is refused; events
 /// go only through `daemon_events_subscribe`.
 pub fn validate_route(method: &str, path_and_query: &str) -> Result<(), String> {
@@ -143,7 +143,7 @@ pub fn validate_route(method: &str, path_and_query: &str) -> Result<(), String> 
     let ok = match (method, parts.as_slice()) {
         ("GET", ["v1", "health"]) => query.is_none(),
         ("GET", ["v1", "models"]) => query.is_none(),
-        ("GET", ["v1", "conversations"]) => query_ok(&["limit", "before"]),
+        ("GET", ["v1", "conversations"]) => query_ok(&["limit", "before", "agentId"]),
         ("POST", ["v1", "conversations"]) => query.is_none(),
         ("POST", ["v1", "conversations", "import"]) => query.is_none(),
         ("GET" | "PATCH" | "DELETE", ["v1", "conversations", id]) => *id != "import" && valid_id(id) && query.is_none(),
@@ -155,6 +155,12 @@ pub fn validate_route(method: &str, path_and_query: &str) -> Result<(), String> 
         ("POST", ["v1", "companies", id, "hire"]) => valid_id(id) && query.is_none(),
         ("PATCH", ["v1", "agents", id]) => valid_id(id) && query.is_none(),
         ("POST", ["v1", "routines", id, "run"]) => valid_id(id) && query.is_none(),
+        // Budgets and tasks (plan 2.3/2.9).
+        ("PATCH", ["v1", "companies", id]) => valid_id(id) && query.is_none(),
+        ("GET", ["v1", "companies", id, "tasks"]) => valid_id(id) && query_ok(&["status"]),
+        ("POST", ["v1", "companies", id, "tasks"]) => valid_id(id) && query.is_none(),
+        ("GET" | "PATCH", ["v1", "tasks", id]) => valid_id(id) && query.is_none(),
+        ("POST", ["v1", "tasks", id, "run"]) => valid_id(id) && query.is_none(),
         _ => false,
     };
     if ok {
@@ -409,7 +415,7 @@ pub async fn request_on<S: AsyncRead + AsyncWrite + Unpin>(
 pub fn route_timeout(method: &str, path: &str) -> Duration {
     let parts: Vec<&str> = path.split('?').next().unwrap_or("").trim_start_matches('/').split('/').collect();
     match (method, parts.as_slice()) {
-        ("POST", ["v1", "routines", _, "run"]) => RUN_ROUTINE_TIMEOUT,
+        ("POST", ["v1", "routines", _, "run"]) | ("POST", ["v1", "tasks", _, "run"]) => RUN_ROUTINE_TIMEOUT,
         _ => REQUEST_TIMEOUT,
     }
 }
@@ -919,6 +925,14 @@ mod tests {
             ("POST", "/v1/companies/co_1/hire"),
             ("PATCH", "/v1/agents/ag_1"),
             ("POST", "/v1/routines/rt_1/run"),
+            ("PATCH", "/v1/companies/co_1"),
+            ("GET", "/v1/companies/co_1/tasks"),
+            ("GET", "/v1/companies/co_1/tasks?status=OPEN"),
+            ("POST", "/v1/companies/co_1/tasks"),
+            ("GET", "/v1/tasks/tk_1"),
+            ("PATCH", "/v1/tasks/tk_1"),
+            ("POST", "/v1/tasks/tk_1/run"),
+            ("GET", "/v1/conversations?agentId=ag_1&limit=20"),
         ] {
             assert!(validate_route(m, p).is_ok(), "{m} {p}");
         }
@@ -933,11 +947,14 @@ mod tests {
             ("GET", "/v1/routines/rt_1/executions"),
             ("GET", "/v1/routines/rt_1/run"),
             ("DELETE", "/v1/companies/co_1"),
-            ("PATCH", "/v1/companies/co_1"),
             ("GET", "/v1/agents/ag_1"),
             ("DELETE", "/v1/agents/ag_1"),
             ("POST", "/v1/agents/ag_1"),
             ("GET", "/v1/companies?all=1"),
+            ("GET", "/v1/companies/co_1/tasks?assignee=x"),
+            ("DELETE", "/v1/tasks/tk_1"),
+            ("POST", "/v1/tasks/tk_1"),
+            ("GET", "/v1/tasks/tk_1/run"),
             ("GET", "/v1/companies/co_1/panel?x=1"),
             ("GET", "/v1/companies/../panel"),
             ("GET", "/v1/companies/co_1/panel/"),

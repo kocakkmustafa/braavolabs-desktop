@@ -86,7 +86,7 @@ export interface DaemonTransport {
 
 /** Contract error codes plus host-side transport failures. */
 export type DaemonErrorCode =
-  | "missing-key" | "model-required" | "provider" | "busy"
+  | "missing-key" | "model-required" | "provider" | "busy" | "budget"
   | "not-running" | "unauthorized" | "not-found" | "invalid" | "timeout" | "unknown";
 
 export class DaemonError extends Error {
@@ -96,7 +96,7 @@ export class DaemonError extends Error {
   }
 }
 
-const KNOWN_CODES = new Set<DaemonErrorCode>(["missing-key", "model-required", "provider", "busy"]);
+const KNOWN_CODES = new Set<DaemonErrorCode>(["missing-key", "model-required", "provider", "busy", "budget"]);
 
 export function errorFromReply(reply: DaemonReply): DaemonError {
   const body = (reply.body && typeof reply.body === "object" ? reply.body : {}) as { error?: unknown; code?: unknown };

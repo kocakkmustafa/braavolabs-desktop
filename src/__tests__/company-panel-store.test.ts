@@ -268,3 +268,85 @@ describe("Tauri panel transport", () => {
     expect(await t.events(() => {}).done).toEqual({ status: 0, body: "daemon-not-running" });
   });
 });
+
+describe("tasks, budgets and agent chats", () => {
+  const TASKS = { tasks: [
+    { id: "tk_1", title: "Draft launch post", status: "OPEN", assignee_agent_id: "ag_1", note: null, updated_at: "2026-11-02T01:00:00Z" },
+    { id: "tk_2", title: "Old", status: "DONE", assignee_agent_id: "ag_3", result: "ok", conversation_id: "cv_9", updated_at: "2026-11-01T01:00:00Z" },
+  ] };
+
+  it("loads tasks with the panel and refreshes after create, run, cancel and budget changes", async () => {
+    const fake = fakeTransport({
+      ...baseRoutes(),
+      "GET /v1/companies/co_1/tasks": ok(TASKS),
+      "POST /v1/companies/co_1/tasks": ok({ task: { id: "tk_3" } }, 201),
+      "POST /v1/tasks/tk_1/run": ok({ outcome: "done" }),
+      "PATCH /v1/tasks/tk_1": ok({ task: {} }),
+      "PATCH /v1/companies/co_1": ok({ company: {} }),
+    });
+    const store = createPanelStore(createPanelApi(fake.transport));
+    store.getState().start();
+    await vi.waitFor(() => expect(store.getState().tasks.map(t => t.id)).toEqual(["tk_1", "tk_2"]));
+
+    expect(await store.getState().createTask({ title: "  ", assignee: null })).toBe(false);
+    expect(store.getState().createTaskError?.code).toBe("invalid");
+    expect(await store.getState().createTask({ title: " Write ", body: " more ", assignee: "ag_1" })).toBe(true);
+    expect(fake.calls.find(c => c.method === "POST" && c.path.endsWith("/tasks"))?.body).toEqual({ title: "Write", body: "more", assignee: "ag_1" });
+
+    await store.getState().runTask("tk_1");
+    await store.getState().setTaskStatus("tk_1", "CANCELLED");
+    expect(fake.calls.find(c => c.method === "PATCH" && c.path === "/v1/tasks/tk_1")?.body).toEqual({ status: "CANCELLED" });
+    expect(await store.getState().setCompanyBudget(25)).toBe(true);
+    expect(fake.calls.find(c => c.method === "PATCH" && c.path === "/v1/companies/co_1")?.body).toEqual({ monthlyBudgetUsd: 25 });
+    expect(fake.calls.filter(c => c.path === "/v1/companies/co_1/tasks" && c.method === "GET").length).toBeGreaterThanOrEqual(5);
+    store.getState().stop();
+  });
+
+  it("keeps a task's run error on that task", async () => {
+    const fake = fakeTransport({
+      ...baseRoutes(),
+      "GET /v1/companies/co_1/tasks": ok(TASKS),
+      "POST /v1/tasks/tk_1/run": ok({ error: "another task is running" }, 409),
+    });
+    const store = createPanelStore(createPanelApi(fake.transport));
+    store.getState().start();
+    await vi.waitFor(() => expect(store.getState().phase).toBe("ready"));
+    await store.getState().runTask("tk_1");
+    expect(store.getState().taskError.tk_1?.code).toBe("busy");
+    expect(store.getState().taskBusy.tk_1).toBeUndefined();
+    store.getState().stop();
+  });
+
+  it("lists the selected agent's conversations and opens an existing or a new one", async () => {
+    const opened: string[] = [];
+    const fake = fakeTransport({
+      ...baseRoutes(),
+      "GET /v1/companies/co_1/tasks": ok({ tasks: [] }),
+      "GET /v1/conversations?agentId=ag_1&limit=20": ok({ conversations: [{ id: "cv_1", title: "Plan", updatedAt: "2026-11-02T00:00:00Z", messageCount: 2 }] }),
+      "POST /v1/conversations": ok({ conversation: { id: "cv_new" } }, 201),
+    });
+    const store = createPanelStore(createPanelApi(fake.transport), { openConversation: id => opened.push(id) });
+    store.getState().start();
+    await vi.waitFor(() => expect(store.getState().phase).toBe("ready"));
+    store.getState().selectAgent("ag_1");
+    await vi.waitFor(() => expect(store.getState().agentChats.map(c => c.id)).toEqual(["cv_1"]));
+    expect(await store.getState().chatWithAgent("ag_1", "cv_1")).toBe(true);
+    expect(await store.getState().chatWithAgent("ag_1")).toBe(true);
+    expect(fake.calls.find(c => c.method === "POST" && c.path === "/v1/conversations")?.body).toEqual({ agentId: "ag_1" });
+    expect(opened).toEqual(["cv_1", "cv_new"]);
+    store.getState().stop();
+  });
+
+  it("shows a budget refusal from the daemon as a budget error", async () => {
+    const fake = fakeTransport({
+      ...baseRoutes(),
+      "POST /v1/conversations": ok({ error: "agent budget used", code: "budget" }, 402),
+    });
+    const store = createPanelStore(createPanelApi(fake.transport), { openConversation: () => {} });
+    store.getState().start();
+    await vi.waitFor(() => expect(store.getState().phase).toBe("ready"));
+    expect(await store.getState().chatWithAgent("ag_1")).toBe(false);
+    expect(store.getState().chatError?.code).toBe("budget");
+    store.getState().stop();
+  });
+});

@@ -699,7 +699,11 @@ export function renderWorkspace(deps: UiDeps): void {
     // React loads on first entry only: most sessions never open this surface.
     void import("./company-panel/mount").then(({ mountCompanyPanel }) => {
       if (workspaceDisposed) return;
-      companyPanel = mountCompanyPanel(companyPanelHost, { t, locale: getLocale(), transport: panelTransport });
+      companyPanel = mountCompanyPanel(companyPanelHost, {
+        t, locale: getLocale(), transport: panelTransport,
+        // "Chat with this agent" / a task's conversation: the daemon chat surface shows it.
+        openConversation: (id) => { applySurface("chat"); void loadDaemonConversation(id); },
+      });
       companyPanel.setActive(companyPanelWanted);
     }).catch(() => {
       companyPanelHost.replaceChildren(el("div", "company-error", t("panel.loadFailed")));
@@ -1560,6 +1564,7 @@ export function renderWorkspace(deps: UiDeps): void {
       case "busy": return t("chat.daemonBusy");
       case "missing-key": return t("chat.daemonMissingKey", { detail: redactSummary(e.message) });
       case "model-required": return t("chat.daemonModelRequired");
+      case "budget": return t("chat.daemonBudget", { detail: redactSummary(e.message) });
       case "not-running": return t("chat.daemonOffline");
       default: return t("chat.daemonFailed", { detail: redactSummary(e.message) });
     }
