@@ -20,5 +20,9 @@
     <string>hi</string>
     <string>zh-Hans</string>
   </array>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Braavolabs uses the microphone only while you dictate a message.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Braavolabs turns your dictation into text with the system's speech recognition.</string>
 </dict>
 </plist>

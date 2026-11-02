@@ -131,6 +131,7 @@ import {
   compareProgressMotion, createOwnedBrandMotion,
   type BrandMotion, type MotionState,
 } from "./brand-motion";
+import { createVoice } from "./voice";
 
 /** How an approval was settled. `token` is present only when the resolver
  *  ALREADY minted one (companion approve) — the local click mints its own. */
@@ -270,6 +271,25 @@ const el = <K extends keyof HTMLElementTagNameMap>(
   if (text !== undefined) n.textContent = text;
   return n;
 };
+
+// Plan 5.9: dictation into the composer and read-aloud on answers, on the system's own speech services.
+const voice = createVoice();
+
+/** "Read aloud" for an answer card; null where the webview has no speech synthesis. */
+function speakButton(t: Translator, text: () => string): HTMLButtonElement | null {
+  if (!voice.canSpeak) return null;
+  const btn = el("button", "speak-btn", t("chat.speak"));
+  btn.type = "button";
+  btn.setAttribute("aria-pressed", "false");
+  const reset = () => { btn.setAttribute("aria-pressed", "false"); btn.textContent = t("chat.speak"); };
+  btn.addEventListener("click", () => {
+    if (btn.getAttribute("aria-pressed") === "true") { voice.stopSpeaking(); reset(); return; }
+    // One voice at a time: the other cards' buttons go back to "Read aloud".
+    for (const other of document.querySelectorAll<HTMLButtonElement>('.speak-btn[aria-pressed="true"]')) other.click();
+    if (voice.speak(text(), getLocale(), reset)) { btn.setAttribute("aria-pressed", "true"); btn.textContent = t("chat.speakStop"); }
+  });
+  return btn;
+}
 
 /** Keyboard containment and restoration for in-app dialogs. Native confirmation
  * remains the separate host authority; this only improves navigation. */
@@ -890,7 +910,29 @@ export function renderWorkspace(deps: UiDeps): void {
   cancelBtn.addEventListener("click", cancelCurrentCompare);
   const enterHint = el("span", "enter-hint mono", t("chat.enterHint"));
   const bottomRow = el("div", "composer-row");
-  bottomRow.append(ta, enterHint, cancelBtn, sendBtn);
+  // Dictation fills the composer (interim words included); sending stays the user's action.
+  const micBtn = voice.canDictate ? el("button", "set-btn mic-btn", t("chat.voiceStart")) : null;
+  if (micBtn) {
+    micBtn.type = "button";
+    micBtn.title = t("chat.voiceNote");
+    micBtn.setAttribute("aria-pressed", "false");
+    const idle = () => { micBtn.setAttribute("aria-pressed", "false"); micBtn.textContent = t("chat.voiceStart"); };
+    micBtn.addEventListener("click", () => {
+      if (voice.listening) { voice.stopDictation(); return; }
+      const started = voice.dictate(getLocale(), ta.value, {
+        onText: (text) => { if (!workspaceDisposed) { ta.value = text; ta.dispatchEvent(new Event("input")); } },
+        onEnd: (error) => {
+          if (workspaceDisposed) return;
+          idle();
+          if (!error || error.kind === "no-speech") return;
+          hint.textContent = error.kind === "denied" ? t("chat.voiceDenied") : t("chat.voiceFailed", { detail: error.detail });
+          hint.style.display = "block";
+        },
+      });
+      if (started) { micBtn.setAttribute("aria-pressed", "true"); micBtn.textContent = t("chat.voiceStop"); ta.focus(); }
+    });
+  }
+  bottomRow.append(ta, enterHint, ...(micBtn ? [micBtn] : []), cancelBtn, sendBtn);
 
   composer.append(storageNotice, hint, topRow, compareControls.element, bottomRow);
   chat.append(chatPresence, scroll, composer);
@@ -1688,6 +1730,8 @@ export function renderWorkspace(deps: UiDeps): void {
     card.append(el("div", "msg-label", t("chat.finalAnswer")));
     const body = document.createTextNode("");
     card.append(body);
+    const speak = speakButton(t, () => body.textContent ?? "");
+    if (speak) card.append(speak);
     let cardShown = false;
     const showCard = (full: string) => {
       if (!cardShown) { removeThinking(thinking); scroll.append(card); cardShown = true; }
@@ -2150,6 +2194,8 @@ function renderCompareAnswer(scroll: HTMLElement, v: CompareView, t: Translator)
   const finalCard = el("div", "msg-final");
   finalCard.append(el("div", "msg-label", t("chat.finalAnswer")));
   finalCard.append(document.createTextNode(v.finalAnswer || t("chat.empty")));
+  const speakFinal = v.finalAnswer ? speakButton(t, () => v.finalAnswer) : null;
+  if (speakFinal) finalCard.append(speakFinal);
   if (!v.synthesisParsed) finalCard.append(el("div", "composer-hint", t("chat.unparsed")));
   scroll.append(finalCard);
 
@@ -2171,6 +2217,8 @@ function renderPlainAnswer(scroll: HTMLElement, content: string, t: Translator):
   const card = el("div", "msg-final");
   card.append(el("div", "msg-label", t("chat.finalAnswer")));
   card.append(document.createTextNode(content || t("chat.empty")));
+  const speak = content ? speakButton(t, () => content) : null;
+  if (speak) card.append(speak);
   scroll.append(card);
 }
 
