@@ -14,8 +14,11 @@ export interface CompanyPanelHandle {
   unmount(): void;
 }
 
-export function mountCompanyPanel(container: HTMLElement, deps: { t: Translator; locale: string; transport: PanelTransport }): CompanyPanelHandle {
-  const store = createPanelStore(createPanelApi(deps.transport));
+export function mountCompanyPanel(
+  container: HTMLElement,
+  deps: { t: Translator; locale: string; transport: PanelTransport; openConversation?: (conversationId: string) => void },
+): CompanyPanelHandle {
+  const store = createPanelStore(createPanelApi(deps.transport), { openConversation: deps.openConversation });
   const root = createRoot(container);
   root.render(<CompanyPanel t={deps.t} locale={deps.locale} store={store} />);
   return {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildHireRequest, displayNote, flattenTree, keysAddCommand, parseUrls, toAgent, toCompanies, toHireResult, toPanel, toPanelEvent, TEMPLATE_IDS,
+  budgetLevel, buildHireRequest, displayNote, flattenTree, keysAddCommand, parseBudget, parseUrls, toAgent, toCompanies, toConversationRefs, toHireResult,
+  toPanel, toPanelEvent, toTask, toTasks, TEMPLATE_IDS,
 } from "../company-panel/map";
 import { parseInline, parseMarkdown } from "../company-panel/markdown";
 import { agent, RAW_PANEL } from "./company-panel-fixture";
@@ -9,11 +10,12 @@ import { agent, RAW_PANEL } from "./company-panel-fixture";
 describe("company panel mapping", () => {
   it("maps the panel snapshot and flattens the org tree pre-order", () => {
     const p = toPanel(RAW_PANEL)!;
-    expect(p.company).toEqual({ id: "co_1", name: "Acme", mission: "Ship" });
+    expect(p.company).toEqual({ id: "co_1", name: "Acme", mission: "Ship", monthlyBudgetUsd: null });
     expect(p.rows.map(r => [r.agent.id, r.depth])).toEqual([["ag_1", 0], ["ag_2", 1], ["ag_3", 1]]);
     expect(p.routines[0]).toMatchObject({ agentName: "Pazar Analisti", enabled: true, last: { outcome: "no-change", note: null } });
     expect(p.routines[1]).toMatchObject({ enabled: false, nextFireAt: null, last: null });
-    expect(p.month).toEqual({ inputTokens: 30, outputTokens: 15, usd: 0.03 });
+    expect(p.month).toEqual({ inputTokens: 30, outputTokens: 15, usd: 0.03, unpricedCalls: 0, budgetRatio: null });
+    expect(p.tasks).toEqual({ open: 0, running: 0, done: 0, failed: 0 });
     expect(p.agents[0].month).toEqual({ inputTokens: 10, outputTokens: 5, usd: 0.01, runs: 2 });
   });
 
@@ -104,5 +106,41 @@ describe("events and findings markdown", () => {
     ] });
     expect(blocks[4]).toEqual({ kind: "code", text: "raw <b>" });
     expect(parseInline("plain")).toEqual([{ kind: "text", text: "plain" }]);
+  });
+});
+
+describe("budgets and tasks", () => {
+  it("maps budgets, unpriced calls and task counts from the panel", () => {
+    const p = toPanel({
+      ...RAW_PANEL,
+      company: { ...RAW_PANEL.company, monthlyBudgetUsd: 50 },
+      agents: [agent({ budgetUsdMonthly: 10, budgetRatio: 0.85 })],
+      month: { ...RAW_PANEL.month, unpricedCalls: 3, budgetRatio: 0.0006 },
+      tasks: { open: 2, running: 1, done: 4, failed: 1, recent: [] },
+    })!;
+    expect(p.company.monthlyBudgetUsd).toBe(50);
+    expect(p.agents[0]).toMatchObject({ budgetUsdMonthly: 10, budgetRatio: 0.85 });
+    expect(p.month).toMatchObject({ unpricedCalls: 3, budgetRatio: 0.0006 });
+    expect(p.tasks).toEqual({ open: 2, running: 1, done: 4, failed: 1 });
+  });
+
+  it("reads tasks from store rows and summaries alike, never inventing a status", () => {
+    expect(toTask({ id: "tk_1", title: "Write", status: "DONE", assignee_agent_id: "ag_1", result: "Done.", conversation_id: "cv_1", updated_at: "2026-11-02T00:00:00Z" }))
+      .toMatchObject({ status: "DONE", assigneeAgentId: "ag_1", result: "Done.", conversationId: "cv_1", updatedAt: "2026-11-02T00:00:00Z" });
+    expect(toTask({ id: "tk_2", status: "WEIRD", assigneeAgentId: "ag_2" })).toMatchObject({ title: "tk_2", status: "UNKNOWN", assigneeAgentId: "ag_2", note: null });
+    expect(toTask({ title: "no id" })).toBeNull();
+    expect(toTasks({ tasks: [{ id: "a" }, null, { id: "" }] }).map(t => t.id)).toEqual(["a"]);
+    expect(toConversationRefs({ conversations: [{ id: "cv_1", title: "Hi", updatedAt: "x", messageCount: 4 }, {}] }))
+      .toEqual([{ id: "cv_1", title: "Hi", updatedAt: "x", messageCount: 4 }]);
+    expect(toPanelEvent("task.changed", { type: "task.changed", taskId: "tk_1", companyId: "co_1" })).toEqual({ kind: "task", taskId: "tk_1" });
+  });
+
+  it("parses budget fields and levels", () => {
+    expect(parseBudget("", 100)).toBeNull();
+    expect(parseBudget(" $25.50 ", 100)).toBe(25.5);
+    expect(parseBudget("25,5", 100)).toBe(25.5);
+    expect(parseBudget("0", 100)).toBe(0);
+    for (const bad of ["-1", "abc", "1.234", "101", "1e3"]) expect(parseBudget(bad, 100), bad).toBe("invalid");
+    expect([null, 0.2, 0.8, 1, 3].map(budgetLevel)).toEqual(["none", "ok", "warn", "over", "over"]);
   });
 });

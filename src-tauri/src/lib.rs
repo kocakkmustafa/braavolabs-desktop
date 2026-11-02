@@ -2301,6 +2301,49 @@ async fn browser_drive(
     }
 }
 
+/// The Braavo browser process (plan 5.1): one Chromium with its own profile.
+#[derive(Default)]
+pub struct BrowserLaunchState(Mutex<Option<std::process::Child>>);
+
+/// Start (or reuse) a Chromium-family browser with the app's own profile
+/// (`<app config>/browser-profile`: separate cookies, history and sign-ins from the
+/// user's everyday browser) and return its loopback page-target WebSocket URL for
+/// `browser_connect`. Not gated (it opens a blank page and drives nothing); audited.
+#[tauri::command]
+async fn browser_launch(
+    app: AppHandle,
+    gov: State<'_, Governance>,
+    launch: State<'_, BrowserLaunchState>,
+    ts: Option<u64>,
+) -> Result<String, String> {
+    let ts = ts.unwrap_or(0);
+    let profile = app.path().app_config_dir().map_err(|e| e.to_string())?.join("browser-profile");
+    std::fs::create_dir_all(&profile).map_err(|e| e.to_string())?;
+    let running = {
+        let mut guard = launch.0.lock().map_err(|_| "browser state poisoned".to_string())?;
+        let alive = guard.as_mut().map_or(false, |child| matches!(child.try_wait(), Ok(None)));
+        match alive {
+            true => true,
+            false => {
+                let _ = std::fs::remove_file(profile.join("DevToolsActivePort"));
+                let exe = browser::chromium_candidates().into_iter().find(|p| p.exists())
+                    .ok_or_else(|| "no Chrome, Chromium, Edge or Brave found; install one to use the Braavo browser".to_string())?;
+                let child = std::process::Command::new(exe).args(browser::launch_args(&profile))
+                    .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+                    .spawn().map_err(|e| format!("could not start the browser: {e}"))?;
+                *guard = Some(child);
+                false
+            }
+        }
+    };
+    let port = browser::wait_devtools_port(&profile, std::time::Duration::from_secs(15)).await?;
+    let ws = browser::discover_ws_endpoint(port).await?;
+    if let Ok(mut gate) = gov.0.lock() {
+        audit_append(&app, &mut gate, "browser.connect", "-", "success", if running { "braavo browser reused" } else { "braavo browser started (own profile)" }, ts);
+    }
+    Ok(ws)
+}
+
 /// Discover a page target's WebSocket debugger URL from a loopback DevTools HTTP
 /// endpoint. Read-only discovery (loopback only) — NOT gated, like `mcp_list_tools`.
 #[tauri::command]
@@ -2416,6 +2459,16 @@ async fn browser_dispatch(
     if kind == "browser.navigate" && !browser::is_safe_http_url(action.url.as_deref()) {
         audit_browser("denied", "non-http(s) navigation blocked");
         return Err("non-http(s) navigation blocked".into());
+    }
+    // Plan 5.1: the user's URL policy (~/.braavo/browser.json, shared with the daemon's
+    // agent browser) and the private-address block — also before the token is spent.
+    if kind == "browser.navigate" {
+        let text = app.path().home_dir().ok().and_then(|h| std::fs::read_to_string(h.join(".braavo").join("browser.json")).ok());
+        let policy = browser::parse_policy(text.as_deref());
+        if let Some(reason) = browser::policy_block_reason(action.url.as_deref().unwrap_or(""), &policy) {
+            audit_browser("denied", &reason);
+            return Err(reason);
+        }
     }
 
     // Take the connection OUT (marking in-flight) — a missing connection must NOT
@@ -3852,6 +3905,7 @@ pub fn run() {
         .manage(daemon::DaemonStreams::default()) // in-flight daemon chat turns (cancel on kill/exit)
         .manage(daemon::DaemonSubscriptions::default()) // company panel event streams (closed on exit)
         .manage(BrowserHostState::default()) // R6 Lane-C governed CDP browser connection
+        .manage(BrowserLaunchState::default()) // plan 5.1: the Braavo browser process (own profile)
         .invoke_handler(tauri::generate_handler![
             secure_store_get,
             secure_store_set,
@@ -3879,6 +3933,7 @@ pub fn run() {
             browser_connect,
             browser_disconnect,
             browser_dispatch,
+            browser_launch,
             git_changed_files,
             mcp_capabilities,
             mcp_list_servers,

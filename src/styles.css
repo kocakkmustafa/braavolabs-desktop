@@ -477,6 +477,24 @@ textarea {
   white-space: pre-wrap;
   user-select: text;
 }
+/* Plan 5.9: read aloud on answers, dictation in the composer. */
+.speak-btn {
+  display: block;
+  margin-top: 8px;
+  margin-inline-start: auto;
+  background: none;
+  border: 1px solid var(--steel-700);
+  border-radius: 999px;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 0.6875rem;
+  padding: 2px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.speak-btn:hover, .speak-btn[aria-pressed="true"] { color: var(--arc-blue-lit); border-color: var(--arc-blue); }
+.mic-btn { flex: none; }
+.mic-btn[aria-pressed="true"] { color: var(--molten); border-color: var(--molten); }
 .msg-label {
   font-size: 0.6875rem;
   text-transform: uppercase;
@@ -1713,6 +1731,31 @@ textarea {
 .cp-badge-running { color: var(--ember); border-color: var(--ember-dim); }
 .cp-badge-error { color: var(--molten); border-color: var(--molten); }
 .cp-badge-paused { color: var(--text-dim); border-style: dashed; }
+/* Budgets and tasks (plan 2.3/2.9). */
+.cp-budget { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 0.75rem; }
+.cp-meter { display: inline-block; width: 96px; height: 6px; border-radius: 999px; background: var(--steel-700); overflow: hidden; }
+.cp-meter > span { display: block; height: 100%; background: var(--text-muted); }
+.cp-meter-warn > span { background: var(--ember); }
+.cp-meter-over > span { background: var(--molten); }
+.cp-budget-input { max-width: 12rem; }
+.cp-link { background: none; border: 0; padding: 0; color: var(--ember); cursor: pointer; font: inherit; font-size: 0.75rem; text-align: start; }
+.cp-link:hover:not(:disabled) { text-decoration: underline; }
+.cp-link:disabled { color: var(--text-dim); cursor: default; }
+.cp-task .company-name { display: flex; align-items: center; gap: 6px; overflow-wrap: anywhere; }
+.cp-task-detail { margin-top: 6px; max-height: 16rem; overflow: auto; font-size: 0.75rem; border-inline-start: 2px solid var(--steel-700); padding-inline-start: 8px; }
+.cp-task-running { color: var(--ember); border-color: var(--ember-dim); }
+.cp-task-failed { color: var(--molten); border-color: var(--molten); }
+.cp-task-cancelled { color: var(--text-dim); border-style: dashed; }
+.cp-skills li { font-size: 0.75rem; padding: 2px 0; }
+.cp-skills .cp-check { display: flex; align-items: center; gap: 6px; cursor: pointer; overflow-wrap: anywhere; font-size: inherit; }
+.cp-skills .cp-check input { flex: none; margin: 0; }
+/* Plan 5.1: the Braavo browser pane. */
+.bp-root { margin-top: 18px; display: flex; flex-direction: column; gap: 8px; }
+.bp-url { flex: 1; min-width: 12rem; }
+.bp-result { border: 1px solid var(--steel-800); border-radius: var(--radius-sm); padding: 10px 12px; background: var(--obsidian-inset); }
+.bp-untrusted { display: inline-block; font-size: 0.65625rem; color: var(--ember); border: 1px solid var(--ember-dim); border-radius: 999px; padding: 1px 8px; margin-bottom: 6px; }
+.bp-text { max-height: 320px; overflow: auto; white-space: pre-wrap; font-size: 0.75rem; overflow-wrap: anywhere; margin: 6px 0 0; }
+.cp-new-task textarea { resize: vertical; width: 100%; }
 .cp-routine { align-items: flex-start; padding: 8px 0; }
 .cp-activity li { font-size: 0.75rem; padding: 4px 0; border-top: 1px solid var(--steel-800); overflow-wrap: anywhere; }
 .cp-findings {

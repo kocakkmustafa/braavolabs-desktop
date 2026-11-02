@@ -39,6 +39,10 @@ export interface AgentView {
   setupNeeded: boolean;
   reportsToAgentId: string | null;
   budgetUsdMonthly: number | null;
+  /** Share of the monthly budget used (1 = used up); null without a budget. */
+  budgetRatio: number | null;
+  /** SKILL.md skills the agent uses, in order (plan 5.3). */
+  skills: string[];
   month: MonthUsage;
 }
 
@@ -59,15 +63,46 @@ export interface RoutineView {
 
 export interface ActivityView { actor: string; verb: string; summary: string; at: string }
 
+export const TASK_STATUSES = ["OPEN", "RUNNING", "DONE", "FAILED", "CANCELLED"] as const;
+export type TaskStatus = (typeof TASK_STATUSES)[number] | "UNKNOWN";
+
+export interface TaskView {
+  id: string;
+  title: string;
+  body: string;
+  status: TaskStatus;
+  assigneeAgentId: string | null;
+  /** Why it waits or failed, as the daemon wrote it. */
+  note: string | null;
+  /** The answer of a finished task. */
+  result: string | null;
+  conversationId: string | null;
+  updatedAt: string | null;
+}
+
+export interface TaskCounts { open: number; running: number; done: number; failed: number }
+
+export interface SkillView { name: string; description: string; source: "user" | "project" }
+
+export function toSkills(raw: unknown): SkillView[] {
+  return list(obj(raw).skills).map(obj).filter(s => str(s.name)).map(s => ({
+    name: str(s.name), description: str(s.description), source: s.source === "project" ? "project" : "user",
+  }));
+}
+
+export interface ConversationRef { id: string; title: string; updatedAt: string | null; messageCount: number }
+
 export interface PanelView {
-  company: { id: string; name: string; mission: string | null };
+  company: { id: string; name: string; mission: string | null; monthlyBudgetUsd: number | null };
   agents: AgentView[];
   /** Org chart flattened pre-order (manager before reports) with depth. */
   rows: OrgRow[];
   routines: RoutineView[];
   /** Newest first, as the daemon sends it. */
   activity: ActivityView[];
-  month: { inputTokens: number; outputTokens: number; usd: number };
+  /** USD counts priced calls only; `unpricedCalls` are the rest (never guessed). */
+  month: { inputTokens: number; outputTokens: number; usd: number; unpricedCalls: number; budgetRatio: number | null };
+  tasks: TaskCounts;
 }
 
 export interface CompanyRef { id: string; name: string }
@@ -120,6 +155,8 @@ export function toAgent(raw: unknown): AgentView | null {
     setupNeeded,
     reportsToAgentId: strOrNull(a.reportsToAgentId),
     budgetUsdMonthly: numOrNull(a.budgetUsdMonthly),
+    budgetRatio: numOrNull(a.budgetRatio),
+    skills: list(a.skills).map(str).filter(Boolean),
     month: { inputTokens: num(m.inputTokens), outputTokens: num(m.outputTokens), usd: num(m.usd), runs: num(m.runs) },
   };
 }
@@ -172,14 +209,65 @@ export function toPanel(raw: unknown): PanelView | null {
   });
   const activity = list(p.activity).map(obj).map(a => ({ actor: str(a.actor), verb: str(a.verb), summary: str(a.summary), at: str(a.at) }));
   const m = obj(p.month);
+  const tk = obj(p.tasks);
   return {
-    company: { id: str(c.id), name: str(c.name) || str(c.id), mission: strOrNull(c.mission) },
+    company: { id: str(c.id), name: str(c.name) || str(c.id), mission: strOrNull(c.mission), monthlyBudgetUsd: numOrNull(c.monthlyBudgetUsd) },
     agents,
     rows: flattenTree(p.tree, agents),
     routines,
     activity,
-    month: { inputTokens: num(m.inputTokens), outputTokens: num(m.outputTokens), usd: num(m.usd) },
+    month: { inputTokens: num(m.inputTokens), outputTokens: num(m.outputTokens), usd: num(m.usd), unpricedCalls: num(m.unpricedCalls), budgetRatio: numOrNull(m.budgetRatio) },
+    tasks: { open: num(tk.open), running: num(tk.running), done: num(tk.done), failed: num(tk.failed) },
   };
+}
+
+// ── tasks, budgets, agent conversations ──────────────────────────────────────
+
+export function toTask(raw: unknown): TaskView | null {
+  const t = obj(raw);
+  const id = str(t.id);
+  if (!id) return null;
+  const status = (TASK_STATUSES as readonly string[]).includes(str(t.status)) ? (str(t.status) as TaskStatus) : "UNKNOWN";
+  return {
+    id,
+    title: str(t.title) || id,
+    body: str(t.body),
+    status,
+    // The list route sends store rows (snake_case); the panel summary sends camelCase.
+    assigneeAgentId: strOrNull(t.assigneeAgentId) ?? strOrNull(t.assignee_agent_id),
+    note: strOrNull(t.note),
+    result: strOrNull(t.result),
+    conversationId: strOrNull(t.conversationId) ?? strOrNull(t.conversation_id),
+    updatedAt: strOrNull(t.updatedAt) ?? strOrNull(t.updated_at),
+  };
+}
+
+export function toTasks(raw: unknown): TaskView[] {
+  return list(obj(raw).tasks).map(toTask).filter((t): t is TaskView => t !== null);
+}
+
+export function toConversationRefs(raw: unknown): ConversationRef[] {
+  return list(obj(raw).conversations).map(obj).filter(c => str(c.id)).map(c => ({
+    id: str(c.id), title: str(c.title), updatedAt: strOrNull(c.updatedAt), messageCount: num(c.messageCount),
+  }));
+}
+
+/**
+ * A budget field's text → USD, null (no budget) or "invalid". Empty clears the
+ * budget; the daemon caps agents at 100 000 and companies at 1 000 000.
+ */
+export function parseBudget(text: string, max: number): number | null | "invalid" {
+  const s = text.trim().replace(/^\$/, "").replace(",", ".");
+  if (!s) return null;
+  if (!/^\d+(\.\d{1,2})?$/.test(s)) return "invalid";
+  const v = Number(s);
+  return v <= max ? v : "invalid";
+}
+
+/** Budget meter level: ok below 80%, warn from 80%, over at 100% (the daemon pauses there). */
+export function budgetLevel(ratio: number | null): "none" | "ok" | "warn" | "over" {
+  if (ratio === null) return "none";
+  return ratio >= 1 ? "over" : ratio >= 0.8 ? "warn" : "ok";
 }
 
 // ── hire wizard ──────────────────────────────────────────────────────────────
@@ -282,6 +370,7 @@ export type PanelEvent =
   | { kind: "company"; companyId: string }
   | { kind: "agent"; agentId: string; status: AgentStatus }
   | { kind: "routine"; routineId: string; outcome: string }
+  | { kind: "task"; taskId: string }
   | { kind: "other" };
 
 export function toPanelEvent(event: string, data: unknown): PanelEvent {
@@ -290,5 +379,6 @@ export function toPanelEvent(event: string, data: unknown): PanelEvent {
   if (type === "company.changed" && str(d.companyId)) return { kind: "company", companyId: str(d.companyId) };
   if (type === "agent.status" && str(d.agentId)) return { kind: "agent", agentId: str(d.agentId), status: toStatus(d.status) };
   if (type === "routine.executed" && str(d.routineId)) return { kind: "routine", routineId: str(d.routineId), outcome: str(d.outcome) };
+  if (type === "task.changed" && str(d.taskId)) return { kind: "task", taskId: str(d.taskId) };
   return { kind: "other" };
 }

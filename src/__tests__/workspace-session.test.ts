@@ -88,7 +88,7 @@ function fixture(mode = "cascade") {
     document: { createTextNode: (text: string) => ({ textContent: text }) }, thinkingMotions: new Map(),
     el: element, scrollToEnd() {}, setChatMotion() {}, syncCrumb() {}, refreshSessionList() {}, trackMotion() {},
     createOwnedBrandMotion: () => null, answerMotion: () => "success", compareMotion, compareProgressMotion: () => "thinking",
-    renderErrorCard: (_scroll: unknown, message: string) => renderErrorCard(message), renderCascadeAnswer, renderCascadeInspector() {}, renderPlainAnswer, renderCompareAnswer, renderCompareInspector() {}, renderSourceInspector() {},
+    renderErrorCard: (_scroll: unknown, message: string) => renderErrorCard(message), renderCascadeAnswer, renderCascadeInspector() {}, renderPlainAnswer, renderCompareAnswer, renderCompareInspector() {}, renderSourceInspector() {}, speakButton: () => null,
     bumpActivity() {}, refreshSavings, removeThinking: (row: ReturnType<typeof element>) => row.remove(),
     toCascadeView, toCompareView, cascade, startCompare, pollCompare, cancelCompare,
     resolveOllamaHost: () => "http://localhost:11434", resolveOllamaModel, ollamaChat,
@@ -301,7 +301,7 @@ describe("current server Compare terminal outcomes in the actual workspace", () 
     function node(_tag: string, _class?: string, text = "") {
       return { text, children: [] as any[], style: {} as Record<string, string>, append(...children: any[]) { this.children.push(...children); } };
     }
-    const render = runInNewContext(compiledRenderer, { formatUsd, el: node, document: { createTextNode: (text: string) => node("text", undefined, text) } });
+    const render = runInNewContext(compiledRenderer, { formatUsd, speakButton: () => null, el: node, document: { createTextNode: (text: string) => node("text", undefined, text) } });
     const scroll = node("section");
     render(scroll, toCompareView({ status: "FAILED", findings: { multiModel: partial } }), (key: string) => key);
     const text = (n: ReturnType<typeof node>): string => [n.text, ...n.children.map(text)].join(" ");

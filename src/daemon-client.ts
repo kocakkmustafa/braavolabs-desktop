@@ -77,7 +77,7 @@ export interface DaemonStatus { running: boolean; version?: string; reason?: str
 /** What the Rust host exposes. Fakes implement the same shape in tests. */
 export interface DaemonTransport {
   status(): Promise<DaemonStatus>;
-  request(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<DaemonReply>;
+  request(method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<DaemonReply>;
   /** Streams one turn; resolves when the stream ends or with the error reply that replaced it. */
   stream(conversationId: string, content: string, onEvent: (event: StreamEvent) => void): Promise<DaemonReply>;
   /** Drop the connection for a turn (the daemon aborts on disconnect). */
@@ -86,7 +86,7 @@ export interface DaemonTransport {
 
 /** Contract error codes plus host-side transport failures. */
 export type DaemonErrorCode =
-  | "missing-key" | "model-required" | "provider" | "busy"
+  | "missing-key" | "model-required" | "provider" | "busy" | "budget"
   | "not-running" | "unauthorized" | "not-found" | "invalid" | "timeout" | "unknown";
 
 export class DaemonError extends Error {
@@ -96,7 +96,7 @@ export class DaemonError extends Error {
   }
 }
 
-const KNOWN_CODES = new Set<DaemonErrorCode>(["missing-key", "model-required", "provider", "busy"]);
+const KNOWN_CODES = new Set<DaemonErrorCode>(["missing-key", "model-required", "provider", "busy", "budget"]);
 
 export function errorFromReply(reply: DaemonReply): DaemonError {
   const body = (reply.body && typeof reply.body === "object" ? reply.body : {}) as { error?: unknown; code?: unknown };

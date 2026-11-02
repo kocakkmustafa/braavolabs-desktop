@@ -8,8 +8,8 @@ import { useStore } from "zustand";
 import type { Translator } from "../i18n";
 import { modelOptions, parseModelRef, providersNeedingModel } from "../daemon-client";
 import {
-  EFFORT_CHOICES, FINDINGS_ROLES, keysAddCommand, parseUrls, PULL_MODEL_COMMAND, SETUP_COMMAND, TEMPLATE_IDS, URL_KEYS, urlKeyTemplate,
-  type AgentView, type HireForm, type RoutineView,
+  budgetLevel, EFFORT_CHOICES, FINDINGS_ROLES, keysAddCommand, parseBudget, parseUrls, PULL_MODEL_COMMAND, SETUP_COMMAND, TEMPLATE_IDS, URL_KEYS, urlKeyTemplate,
+  type AgentView, type HireForm, type RoutineView, type TaskView,
 } from "./map";
 import { parseMarkdown, type Inline } from "./markdown";
 import type { PanelError, PanelState, PanelStore } from "./store";
@@ -27,7 +27,7 @@ function usePanel<T>(selector: (s: PanelState) => T): T {
   return useStore(useEnv().store, selector);
 }
 
-const ERROR_KEYS = new Set(["not-running", "timeout", "unauthorized", "not-found", "invalid", "busy", "missing-key", "model-required", "provider"]);
+const ERROR_KEYS = new Set(["not-running", "timeout", "unauthorized", "not-found", "invalid", "busy", "missing-key", "model-required", "provider", "budget"]);
 export function errorText(t: Translator, e: PanelError): string {
   const label = t(ERROR_KEYS.has(e.code) ? `panel.err.${e.code}` : "panel.err.unknown");
   return e.message && e.code !== "not-running" ? t("panel.errDetail", { label, detail: e.message.slice(0, 300) }) : label;
@@ -251,6 +251,53 @@ function OrgChart() {
   );
 }
 
+// ── budgets ──────────────────────────────────────────────────────────────────
+
+const AGENT_BUDGET_MAX = 100_000;
+const COMPANY_BUDGET_MAX = 1_000_000;
+
+/** "$3.20 of $25.00 this month (13%)" with a meter; the daemon warns at 80% and pauses at 100%. */
+function BudgetMeter({ spent, budget, ratio }: { spent: number; budget: number | null; ratio: number | null }) {
+  const { t, locale } = useEnv();
+  if (budget === null) return <span className="cp-sub">{t("panel.budgetNone")}</span>;
+  const level = budgetLevel(ratio);
+  const pct = Math.round(Math.min(ratio ?? 0, 9.99) * 100);
+  return (
+    <span className="cp-budget">
+      <span className="mono">{t("panel.budgetOf", { spent: formatUsd(locale, spent), budget: formatUsd(locale, budget), pct: formatInt(locale, pct) })}</span>
+      <span className={`cp-meter cp-meter-${level}`} role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.min(pct, 100)} aria-label={t("panel.budget")}>
+        <span style={{ width: `${Math.min(pct, 100)}%` }} />
+      </span>
+      {level === "warn" && <span className="cp-hint">{t("panel.budgetWarn")}</span>}
+      {level === "over" && <span className="cp-error">{t("panel.budgetOver")}</span>}
+    </span>
+  );
+}
+
+/** An amount field + Save; empty saves "no budget". */
+function BudgetEditor({ current, max, busy, onSave, label }: { current: number | null; max: number; busy: boolean; onSave: (usd: number | null) => void; label: string }) {
+  const { t } = useEnv();
+  const [text, setText] = useState(current === null ? "" : String(current));
+  const [invalid, setInvalid] = useState(false);
+  useEffect(() => { setText(current === null ? "" : String(current)); setInvalid(false); }, [current]);
+  const save = () => {
+    const v = parseBudget(text, max);
+    if (v === "invalid") { setInvalid(true); return; }
+    setInvalid(false);
+    if (v !== current) onSave(v);
+  };
+  return (
+    <div className="cp-field">
+      <div className="cp-inline">
+        <input className="company-input cp-input cp-budget-input" dir="ltr" inputMode="decimal" aria-label={label} placeholder={t("panel.budgetPlaceholder")}
+          value={text} disabled={busy} onChange={e => setText(e.target.value)} onKeyDown={e => { if (e.key === "Enter") save(); }} />
+        <button className="set-btn" disabled={busy} onClick={save}>{t("panel.budgetSave")}</button>
+      </div>
+      {invalid && <div className="cp-error" role="alert">{t("panel.budgetInvalid")}</div>}
+    </div>
+  );
+}
+
 const CUSTOM = "__custom__";
 
 function AgentCard({ agent }: { agent: AgentView }) {
@@ -302,6 +349,13 @@ function AgentCard({ agent }: { agent: AgentView }) {
       </div>
 
       <div className="cp-field">
+        <span className="rail-section-label">{t("panel.agentBudget")}</span>
+        <BudgetMeter spent={agent.month.usd} budget={agent.budgetUsdMonthly} ratio={agent.budgetRatio} />
+        <BudgetEditor current={agent.budgetUsdMonthly} max={AGENT_BUDGET_MAX} busy={busy} label={t("panel.agentBudget")}
+          onSave={usd => void store.getState().updateAgent(agent.id, { budgetUsdMonthly: usd })} />
+      </div>
+
+      <div className="cp-field">
         <span className="rail-section-label">{t("panel.changeModel")}</span>
         <div className="cp-inline">
           <select className="company-input cp-input" value={choice} disabled={busy} aria-label={t("panel.changeModel")} onChange={e => setChoice(e.target.value)}>
@@ -335,6 +389,189 @@ function AgentCard({ agent }: { agent: AgentView }) {
       {busy && <div className="cp-sub" role="status">{t("panel.saving")}</div>}
       {localError && <div className="cp-error" role="alert">{localError}</div>}
       <ErrorLine error={error} />
+
+      <AgentSkills agent={agent} busy={busy} />
+      <AgentChats agent={agent} />
+      <AgentTasks agent={agent} />
+    </section>
+  );
+}
+
+/** Plan 5.3: tick the SKILL.md skills this agent follows; order = the order they were ticked. */
+function AgentSkills({ agent, busy }: { agent: AgentView; busy: boolean }) {
+  const { t, store } = useEnv();
+  const skills = usePanel(s => s.skills);
+  const error = usePanel(s => s.skillsError);
+  const toggle = (name: string, on: boolean) => {
+    const next = on ? [...agent.skills.filter(s => s !== name), name] : agent.skills.filter(s => s !== name);
+    void store.getState().setAgentSkills(agent.id, next);
+  };
+  // A skill folder that was removed stays assigned until changed; show it so it can be unticked.
+  const missing = agent.skills.filter(n => skills && !skills.some(s => s.name === n));
+  return (
+    <div className="cp-field">
+      <span className="rail-section-label">{t("panel.skills")}</span>
+      {skills && !skills.length && !missing.length && <span className="cp-hint">{t("panel.noSkills")} <Cmd>~/.braavo/skills/&lt;name&gt;/SKILL.md</Cmd> · <Cmd>braavo skills</Cmd></span>}
+      {skills && (skills.length > 0 || missing.length > 0) && (
+        <ul className="cp-plain cp-skills">
+          {skills.map(s => (
+            <li key={s.name}>
+              <label className="cp-check" title={s.description}>
+                <input type="checkbox" checked={agent.skills.includes(s.name)} disabled={busy} onChange={e => toggle(s.name, e.target.checked)} />
+                <span className="mono">{s.name}</span>
+                <span className="cp-dim"> · {s.source === "project" ? t("panel.skillProject") : t("panel.skillUser")}{s.description ? ` · ${s.description}` : ""}</span>
+              </label>
+            </li>
+          ))}
+          {missing.map(n => (
+            <li key={n}>
+              <label className="cp-check">
+                <input type="checkbox" checked disabled={busy} onChange={() => toggle(n, false)} />
+                <span className="mono">{n}</span> <span className="cp-error">{t("panel.skillMissing")}</span>
+              </label>
+            </li>
+          ))}
+        </ul>
+      )}
+      <ErrorLine error={error} />
+    </div>
+  );
+}
+
+function AgentChats({ agent }: { agent: AgentView }) {
+  const { t, locale, store } = useEnv();
+  const chats = usePanel(s => s.agentChats);
+  const busy = usePanel(s => s.chatBusy);
+  const error = usePanel(s => s.chatError);
+  return (
+    <div className="cp-field">
+      <div className="cp-row-between">
+        <span className="rail-section-label">{t("panel.chats")}</span>
+        <button className="set-btn" disabled={busy || agent.setupNeeded} onClick={() => void store.getState().chatWithAgent(agent.id)}>{t("panel.newChat")}</button>
+      </div>
+      {chats.length ? (
+        <ul className="cp-plain">
+          {chats.slice(0, 5).map(c => (
+            <li key={c.id}>
+              <button className="cp-link" disabled={busy} onClick={() => void store.getState().chatWithAgent(agent.id, c.id)}>
+                {c.title || t("panel.untitledChat")}
+              </button>
+              <span className="mono cp-dim"> · {formatWhen(locale, c.updatedAt, "")} · {t("panel.messages", { count: formatInt(locale, c.messageCount) })}</span>
+            </li>
+          ))}
+        </ul>
+      ) : <div className="cp-sub">{t("panel.noChats")}</div>}
+      <ErrorLine error={error} />
+    </div>
+  );
+}
+
+function AgentTasks({ agent }: { agent: AgentView }) {
+  const { t } = useEnv();
+  const all = usePanel(s => s.tasks);
+  const tasks = useMemo(() => all.filter(task => task.assigneeAgentId === agent.id), [all, agent.id]);
+  return (
+    <div className="cp-field">
+      <span className="rail-section-label">{t("panel.agentTasks")}</span>
+      {tasks.length ? <ul className="cp-plain">{tasks.slice(0, 8).map(task => <TaskRow key={task.id} task={task} compact />)}</ul>
+        : <div className="cp-sub">{t("panel.noTasks")}</div>}
+    </div>
+  );
+}
+
+// ── tasks ────────────────────────────────────────────────────────────────────
+
+function TaskRow({ task, compact = false }: { task: TaskView; compact?: boolean }) {
+  const { t, locale, store } = useEnv();
+  const busy = usePanel(s => Boolean(s.taskBusy[task.id]));
+  const error = usePanel(s => s.taskError[task.id]);
+  const assignee = usePanel(s => s.panel?.agents.find(a => a.id === task.assigneeAgentId) ?? null);
+  const [open, setOpen] = useState(false);
+  const detail = task.result ?? task.body;
+  return (
+    <li className="company-row cp-task">
+      <div className="company-meta">
+        <div className="company-name">
+          <span className={`cp-badge cp-task-${task.status.toLowerCase()} mono`}>{t(`panel.taskStatus.${task.status}`)}</span> {task.title}
+        </div>
+        <div className="company-sub mono">
+          {!compact && <>{assignee?.name ?? t("panel.anyAgent")} · </>}
+          {formatWhen(locale, task.updatedAt, "")}
+          {task.note ? ` · ${task.note}` : ""}
+        </div>
+        {detail && (
+          <button className="cp-link" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? t("panel.taskHide") : t("panel.taskShow")}</button>
+        )}
+        {open && detail && <div className="cp-task-detail"><Markdown source={detail} /></div>}
+        <ErrorLine error={error} />
+      </div>
+      <div className="cp-inline">
+        {task.status === "OPEN" && (
+          <>
+            <button className="set-btn" disabled={busy || !task.assigneeAgentId} title={task.assigneeAgentId ? undefined : t("panel.taskNeedsAssignee")}
+              onClick={() => void store.getState().runTask(task.id)}>{busy ? t("panel.running") : t("panel.taskRun")}</button>
+            <button className="set-btn" disabled={busy} onClick={() => void store.getState().setTaskStatus(task.id, "CANCELLED")}>{t("panel.taskCancel")}</button>
+          </>
+        )}
+        {(task.status === "DONE" || task.status === "FAILED" || task.status === "CANCELLED") && (
+          <button className="set-btn" disabled={busy} onClick={() => void store.getState().setTaskStatus(task.id, "OPEN")}>{t("panel.taskReopen")}</button>
+        )}
+        {task.conversationId && task.assigneeAgentId && (
+          <button className="set-btn" onClick={() => void store.getState().chatWithAgent(task.assigneeAgentId!, task.conversationId!)}>{t("panel.taskOpenChat")}</button>
+        )}
+      </div>
+    </li>
+  );
+}
+
+function NewTaskForm() {
+  const { t, store } = useEnv();
+  const agents = usePanel(s => s.panel?.agents ?? NONE);
+  const busy = usePanel(s => s.createTaskBusy);
+  const error = usePanel(s => s.createTaskError);
+  const selected = usePanel(s => s.selectedAgentId);
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [assignee, setAssignee] = useState<string>("");
+  useEffect(() => { if (selected) setAssignee(selected); }, [selected]);
+  const add = async () => {
+    if (await store.getState().createTask({ title, body, assignee: assignee || null })) { setTitle(""); setBody(""); }
+  };
+  return (
+    <div className="cp-field cp-new-task">
+      <div className="cp-inline">
+        <input className="company-input cp-input" aria-label={t("panel.taskTitle")} placeholder={t("panel.taskTitle")} maxLength={300}
+          value={title} disabled={busy} onChange={e => setTitle(e.target.value)} />
+        <select className="company-input cp-input" aria-label={t("panel.assignee")} value={assignee} disabled={busy} onChange={e => setAssignee(e.target.value)}>
+          <option value="">{t("panel.anyAgent")}</option>
+          {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+        </select>
+        <button className="set-btn" disabled={busy || !title.trim()} onClick={() => void add()}>{t("panel.addTask")}</button>
+      </div>
+      <textarea className="company-input cp-input" rows={2} aria-label={t("panel.taskBody")} placeholder={t("panel.taskBody")} maxLength={20000}
+        value={body} disabled={busy} onChange={e => setBody(e.target.value)} />
+      <ErrorLine error={error} />
+    </div>
+  );
+}
+
+function Tasks() {
+  const { t, locale } = useEnv();
+  const tasks = usePanel(s => s.tasks);
+  const counts = usePanel(s => s.panel?.tasks ?? null);
+  const error = usePanel(s => s.tasksError);
+  return (
+    <section className="cp-section">
+      <div className="cp-row-between">
+        <div className="rail-section-label">{t("panel.tasks")}</div>
+        {counts && <span className="mono cp-dim">{t("panel.taskCounts", {
+          open: formatInt(locale, counts.open), running: formatInt(locale, counts.running), done: formatInt(locale, counts.done), failed: formatInt(locale, counts.failed),
+        })}</span>}
+      </div>
+      <NewTaskForm />
+      <ErrorLine error={error} />
+      {tasks.length ? <ul className="cp-plain">{tasks.slice(0, 30).map(task => <TaskRow key={task.id} task={task} />)}</ul>
+        : <div className="company-empty">{t("panel.noTasks")}</div>}
     </section>
   );
 }
@@ -462,6 +699,8 @@ function Header() {
   const companyId = usePanel(s => s.companyId);
   const live = usePanel(s => s.live);
   const wizardOpen = usePanel(s => s.wizardOpen);
+  const budgetBusy = usePanel(s => s.budgetBusy);
+  const budgetError = usePanel(s => s.budgetError);
   if (!panel) return null;
   return (
     <header className="cp-header">
@@ -487,6 +726,14 @@ function Header() {
           usd: formatUsd(locale, panel.month.usd),
         })}
       </div>
+      <div className="cp-field">
+        <span className="rail-section-label">{t("panel.budget")}</span>
+        <BudgetMeter spent={panel.month.usd} budget={panel.company.monthlyBudgetUsd} ratio={panel.month.budgetRatio} />
+        {panel.month.unpricedCalls > 0 && <span className="cp-hint">{t("panel.unpriced", { count: formatInt(locale, panel.month.unpricedCalls) })}</span>}
+        <BudgetEditor current={panel.company.monthlyBudgetUsd} max={COMPANY_BUDGET_MAX} busy={budgetBusy} label={t("panel.budget")}
+          onSave={usd => void store.getState().setCompanyBudget(usd)} />
+        <ErrorLine error={budgetError} />
+      </div>
     </header>
   );
 }
@@ -507,6 +754,7 @@ function Ready() {
         </section>
         {selected ? <AgentCard agent={selected} /> : <div className="cp-card cp-sub cp-placeholder">{t("panel.selectAgent")}</div>}
       </div>
+      <Tasks />
       <Routines />
       <FindingsView />
       <Activity />
