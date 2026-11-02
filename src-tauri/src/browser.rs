@@ -586,8 +586,18 @@ fn is_private_host(host: &str) -> bool {
             ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified() || ip.is_multicast() || (a == 100 && (64..=127).contains(&b))
         }
         Ok(std::net::IpAddr::V6(ip)) => {
-            let seg = ip.segments()[0];
-            ip.is_loopback() || ip.is_unspecified() || (seg & 0xfe00) == 0xfc00 || (seg & 0xffc0) == 0xfe80 || ip.to_ipv4_mapped().map_or(false, |v4| v4.is_loopback() || v4.is_private())
+            let s = ip.segments();
+            let v4_private = |v4: std::net::Ipv4Addr| {
+                let [a, b, ..] = v4.octets();
+                v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() || v4.is_multicast() || (a == 100 && (64..=127).contains(&b))
+            };
+            let embedded = |hi: u16, lo: u16| std::net::Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8);
+            ip.is_loopback() || ip.is_unspecified() || (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80 || (s[0] & 0xff00) == 0xff00
+                // IPv4 hidden in IPv6: mapped ::ffff:, compatible ::, NAT64 64:ff9b::/96, 6to4 2002::/16.
+                || ip.to_ipv4_mapped().map_or(false, v4_private)
+                || (s[..6].iter().all(|x| *x == 0) && v4_private(embedded(s[6], s[7])))
+                || (s[0] == 0x64 && s[1] == 0xff9b && s[2..6].iter().all(|x| *x == 0) && v4_private(embedded(s[6], s[7])))
+                || (s[0] == 0x2002 && v4_private(embedded(s[1], s[2])))
         }
         Err(_) => !h.contains('.'),
     }
@@ -674,10 +684,13 @@ mod tests {
     fn braavo_browser_policy_blocks_private_deny_and_off_allow_list() {
         let def = BrowserPolicy::default();
         assert_eq!(policy_block_reason("https://example.com/pricing", &def), None);
-        for url in ["http://localhost:3000", "http://127.0.0.1/", "http://169.254.169.254/latest", "http://10.0.0.1", "http://[::1]:8080/", "http://router.local", "http://intranet/"] {
+        for url in ["http://localhost:3000", "http://127.0.0.1/", "http://169.254.169.254/latest", "http://10.0.0.1", "http://[::1]:8080/", "http://router.local", "http://intranet/",
+            "http://[::ffff:7f00:1]/", "http://[::7f00:1]/", "http://[64:ff9b::a9fe:a9fe]/", "http://[2002:c0a8:101::1]/", "http://[ff02::1]/"] {
             assert!(policy_block_reason(url, &def).unwrap().contains("private"), "{url}");
         }
         assert!(policy_block_reason("https://user:pw@example.com", &def).unwrap().contains("credentials"));
+        assert_eq!(policy_block_reason("http://[2606:4700::1111]/", &def), None);
+        assert_eq!(policy_block_reason("http://[64:ff9b::808:808]/", &def), None);
         assert!(policy_block_reason("https://www.paypal.com/signin", &def).unwrap().contains("deny list (paypal.com)"));
         assert!(policy_block_reason("https://www.turkiye.gov.tr", &def).unwrap().contains("deny list"));
         let allow = parse_policy(Some(r#"{"allow":["Rival.example"],"deny":[]}"#));
