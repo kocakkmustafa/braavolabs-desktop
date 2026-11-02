@@ -118,4 +118,19 @@ describe("company panel screen (server-rendered smoke)", () => {
     expect(render("tr", { phase: "ready", companies: [], companyId: "co_1", panel, tasks })).toContain("Görev ekle");
     expect(errorText(makeT("en"), { code: "budget", message: "agent budget used" })).toContain("The monthly budget is used.");
   });
+
+  it("lets the selected agent tick skills and shows one whose folder is gone", () => {
+    const panel = toPanel({ ...RAW_PANEL, agents: [{ ...RAW_PANEL.agents[0], skills: ["launch-post", "removed-one"] }] })!;
+    const html = render("en", {
+      phase: "ready", companies: [{ id: "co_1", name: "Acme" }], companyId: "co_1", panel, selectedAgentId: "ag_1",
+      skills: [{ name: "launch-post", description: "Write launch posts", source: "user" }, { name: "code-review", description: "", source: "project" }],
+    });
+    expect(html).toContain("Skills");
+    expect(html).toMatch(/<input type="checkbox" checked=""[^>]*\/><span class="mono">launch-post<\/span>/);
+    expect(html).toMatch(/<input type="checkbox"(?![^>]*checked)[^>]*\/><span class="mono">code-review<\/span>/);
+    expect(html).toContain("removed-one");
+    expect(html).toContain("folder not found; untick to remove");
+    const empty = render("tr", { phase: "ready", companies: [], companyId: "co_1", panel: toPanel(RAW_PANEL)!, selectedAgentId: "ag_1", skills: [] });
+    expect(empty).toContain("Henüz skill yok.");
+  });
 });

@@ -12,8 +12,8 @@ import { createStore, type StoreApi } from "zustand/vanilla";
 import { DaemonError, type DaemonErrorCode, type DaemonModels, type StreamEvent } from "../daemon-client";
 import type { AgentPatch, EventSubscription, Findings, PanelApi } from "./api";
 import {
-  buildHireRequest, displayNote, FINDINGS_ROLES, toCompanies, toConversationRefs, toHireResult, toPanel, toPanelEvent, toTasks,
-  type CompanyRef, type ConversationRef, type HireForm, type HireResultView, type PanelView, type TaskView,
+  buildHireRequest, displayNote, FINDINGS_ROLES, toCompanies, toConversationRefs, toHireResult, toPanel, toPanelEvent, toSkills, toTasks,
+  type CompanyRef, type ConversationRef, type HireForm, type HireResultView, type PanelView, type SkillView, type TaskView,
 } from "./map";
 
 export interface PanelError { code: DaemonErrorCode; message: string }
@@ -55,6 +55,9 @@ export interface PanelData {
   agentChats: ConversationRef[];
   chatBusy: boolean;
   chatError: PanelError | null;
+  /** Installed SKILL.md skills (plan 5.3); null until loaded. */
+  skills: SkillView[] | null;
+  skillsError: PanelError | null;
   /** True while an event subscription is open. */
   live: boolean;
 }
@@ -75,6 +78,8 @@ export interface PanelActions {
   runRoutine(id: string): Promise<void>;
   setFindingsRole(role: string): Promise<void>;
   loadModels(): Promise<void>;
+  loadSkills(): Promise<void>;
+  setAgentSkills(agentId: string, skills: string[]): Promise<boolean>;
   setCompanyBudget(usd: number | null): Promise<boolean>;
   createTask(task: NewTask): Promise<boolean>;
   runTask(id: string): Promise<void>;
@@ -115,7 +120,7 @@ const initial = (): PanelData => ({
   createBusy: false, createError: null, hireBusy: false, hireError: null, hireResult: null, wizardOpen: false,
   findingsRole: FINDINGS_ROLES[0], findings: null, findingsError: null,
   tasks: [], tasksError: null, taskBusy: {}, taskError: {}, createTaskBusy: false, createTaskError: null,
-  budgetBusy: false, budgetError: null, agentChats: [], chatBusy: false, chatError: null, live: false,
+  budgetBusy: false, budgetError: null, agentChats: [], chatBusy: false, chatError: null, skills: null, skillsError: null, live: false,
 });
 
 const without = <T>(map: Record<string, T>, key: string): Record<string, T> => {
@@ -232,6 +237,8 @@ export function createPanelStore(api: PanelApi, options: PanelStoreOptions = {})
         void get().refresh();
         // Keys and local models change outside the app (`braavo keys add`, a pull): re-read on entry.
         void get().loadModels();
+        // Skills are folders on disk the user edits outside the app: re-read on entry too.
+        void get().loadSkills();
       },
 
       stop() {
@@ -415,6 +422,24 @@ export function createPanelStore(api: PanelApi, options: PanelStoreOptions = {})
           return true;
         } catch (error) {
           set({ chatBusy: false, chatError: toPanelError(error) });
+          return false;
+        }
+      },
+
+      async loadSkills() {
+        try { set({ skills: toSkills(await api.skills()), skillsError: null }); }
+        catch (error) { set({ skillsError: toPanelError(error) }); }
+      },
+
+      async setAgentSkills(agentId, skills) {
+        set(s => ({ agentBusy: { ...s.agentBusy, [agentId]: true }, agentError: without(s.agentError, agentId) }));
+        try {
+          await api.setAgentSkills(agentId, skills);
+          set(s => ({ agentBusy: without(s.agentBusy, agentId) }));
+          await get().refresh();
+          return true;
+        } catch (error) {
+          set(s => ({ agentBusy: without(s.agentBusy, agentId), agentError: { ...s.agentError, [agentId]: toPanelError(error) } }));
           return false;
         }
       },

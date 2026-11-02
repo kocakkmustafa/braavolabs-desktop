@@ -1746,6 +1746,9 @@ textarea {
 .cp-task-running { color: var(--ember); border-color: var(--ember-dim); }
 .cp-task-failed { color: var(--molten); border-color: var(--molten); }
 .cp-task-cancelled { color: var(--text-dim); border-style: dashed; }
+.cp-skills li { font-size: 0.75rem; padding: 2px 0; }
+.cp-check { display: flex; align-items: baseline; gap: 6px; cursor: pointer; overflow-wrap: anywhere; }
+.cp-check input { flex: none; }
 .cp-new-task textarea { resize: vertical; width: 100%; }
 .cp-routine { align-items: flex-start; padding: 8px 0; }
 .cp-activity li { font-size: 0.75rem; padding: 4px 0; border-top: 1px solid var(--steel-800); overflow-wrap: anywhere; }

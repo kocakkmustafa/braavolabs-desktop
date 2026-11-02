@@ -350,3 +350,19 @@ describe("tasks, budgets and agent chats", () => {
     store.getState().stop();
   });
 });
+
+describe("skills (plan 5.3)", () => {
+  it("loads installed skills on start and sets an agent's skills", async () => {
+    const fake = fakeTransport({
+      ...baseRoutes(),
+      "GET /v1/skills": ok({ skills: [{ name: "launch-post", description: "Posts", source: "user", dir: "/x" }, { name: "Bad" }, {}] }),
+      "PUT /v1/agents/ag_1/skills": ok({ skills: ["launch-post"] }),
+    });
+    const store = createPanelStore(createPanelApi(fake.transport));
+    store.getState().start();
+    await vi.waitFor(() => expect(store.getState().skills).toEqual([{ name: "launch-post", description: "Posts", source: "user" }, { name: "Bad", description: "", source: "user" }]));
+    expect(await store.getState().setAgentSkills("ag_1", ["launch-post"])).toBe(true);
+    expect(fake.calls.find(c => c.method === "PUT")).toMatchObject({ path: "/v1/agents/ag_1/skills", body: { skills: ["launch-post"] } });
+    store.getState().stop();
+  });
+});

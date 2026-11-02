@@ -161,6 +161,9 @@ pub fn validate_route(method: &str, path_and_query: &str) -> Result<(), String> 
         ("POST", ["v1", "companies", id, "tasks"]) => valid_id(id) && query.is_none(),
         ("GET" | "PATCH", ["v1", "tasks", id]) => valid_id(id) && query.is_none(),
         ("POST", ["v1", "tasks", id, "run"]) => valid_id(id) && query.is_none(),
+        // Skills (plan 5.3): list them and set an agent's.
+        ("GET", ["v1", "skills"]) => query.is_none(),
+        ("GET" | "PUT", ["v1", "agents", id, "skills"]) => valid_id(id) && query.is_none(),
         _ => false,
     };
     if ok {
@@ -933,6 +936,9 @@ mod tests {
             ("PATCH", "/v1/tasks/tk_1"),
             ("POST", "/v1/tasks/tk_1/run"),
             ("GET", "/v1/conversations?agentId=ag_1&limit=20"),
+            ("GET", "/v1/skills"),
+            ("GET", "/v1/agents/ag_1/skills"),
+            ("PUT", "/v1/agents/ag_1/skills"),
         ] {
             assert!(validate_route(m, p).is_ok(), "{m} {p}");
         }
@@ -955,6 +961,9 @@ mod tests {
             ("DELETE", "/v1/tasks/tk_1"),
             ("POST", "/v1/tasks/tk_1"),
             ("GET", "/v1/tasks/tk_1/run"),
+            ("PUT", "/v1/skills"),
+            ("DELETE", "/v1/agents/ag_1/skills"),
+            ("GET", "/v1/skills?dir=/etc"),
             ("GET", "/v1/companies/co_1/panel?x=1"),
             ("GET", "/v1/companies/../panel"),
             ("GET", "/v1/companies/co_1/panel/"),

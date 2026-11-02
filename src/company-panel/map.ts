@@ -41,6 +41,8 @@ export interface AgentView {
   budgetUsdMonthly: number | null;
   /** Share of the monthly budget used (1 = used up); null without a budget. */
   budgetRatio: number | null;
+  /** SKILL.md skills the agent uses, in order (plan 5.3). */
+  skills: string[];
   month: MonthUsage;
 }
 
@@ -79,6 +81,14 @@ export interface TaskView {
 }
 
 export interface TaskCounts { open: number; running: number; done: number; failed: number }
+
+export interface SkillView { name: string; description: string; source: "user" | "project" }
+
+export function toSkills(raw: unknown): SkillView[] {
+  return list(obj(raw).skills).map(obj).filter(s => str(s.name)).map(s => ({
+    name: str(s.name), description: str(s.description), source: s.source === "project" ? "project" : "user",
+  }));
+}
 
 export interface ConversationRef { id: string; title: string; updatedAt: string | null; messageCount: number }
 
@@ -146,6 +156,7 @@ export function toAgent(raw: unknown): AgentView | null {
     reportsToAgentId: strOrNull(a.reportsToAgentId),
     budgetUsdMonthly: numOrNull(a.budgetUsdMonthly),
     budgetRatio: numOrNull(a.budgetRatio),
+    skills: list(a.skills).map(str).filter(Boolean),
     month: { inputTokens: num(m.inputTokens), outputTokens: num(m.outputTokens), usd: num(m.usd), runs: num(m.runs) },
   };
 }

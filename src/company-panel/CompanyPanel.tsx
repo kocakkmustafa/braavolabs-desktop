@@ -390,9 +390,51 @@ function AgentCard({ agent }: { agent: AgentView }) {
       {localError && <div className="cp-error" role="alert">{localError}</div>}
       <ErrorLine error={error} />
 
+      <AgentSkills agent={agent} busy={busy} />
       <AgentChats agent={agent} />
       <AgentTasks agent={agent} />
     </section>
+  );
+}
+
+/** Plan 5.3: tick the SKILL.md skills this agent follows; order = the order they were ticked. */
+function AgentSkills({ agent, busy }: { agent: AgentView; busy: boolean }) {
+  const { t, store } = useEnv();
+  const skills = usePanel(s => s.skills);
+  const error = usePanel(s => s.skillsError);
+  const toggle = (name: string, on: boolean) => {
+    const next = on ? [...agent.skills.filter(s => s !== name), name] : agent.skills.filter(s => s !== name);
+    void store.getState().setAgentSkills(agent.id, next);
+  };
+  // A skill folder that was removed stays assigned until changed; show it so it can be unticked.
+  const missing = agent.skills.filter(n => skills && !skills.some(s => s.name === n));
+  return (
+    <div className="cp-field">
+      <span className="rail-section-label">{t("panel.skills")}</span>
+      {skills && !skills.length && !missing.length && <span className="cp-hint">{t("panel.noSkills")} <Cmd>~/.braavo/skills/&lt;name&gt;/SKILL.md</Cmd> · <Cmd>braavo skills</Cmd></span>}
+      {skills && (skills.length > 0 || missing.length > 0) && (
+        <ul className="cp-plain cp-skills">
+          {skills.map(s => (
+            <li key={s.name}>
+              <label className="cp-check" title={s.description}>
+                <input type="checkbox" checked={agent.skills.includes(s.name)} disabled={busy} onChange={e => toggle(s.name, e.target.checked)} />
+                <span className="mono">{s.name}</span>
+                <span className="cp-dim"> · {s.source === "project" ? t("panel.skillProject") : t("panel.skillUser")}{s.description ? ` · ${s.description}` : ""}</span>
+              </label>
+            </li>
+          ))}
+          {missing.map(n => (
+            <li key={n}>
+              <label className="cp-check">
+                <input type="checkbox" checked disabled={busy} onChange={() => toggle(n, false)} />
+                <span className="mono">{n}</span> <span className="cp-error">{t("panel.skillMissing")}</span>
+              </label>
+            </li>
+          ))}
+        </ul>
+      )}
+      <ErrorLine error={error} />
+    </div>
   );
 }
 

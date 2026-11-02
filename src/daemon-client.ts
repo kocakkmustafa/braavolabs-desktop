@@ -77,7 +77,7 @@ export interface DaemonStatus { running: boolean; version?: string; reason?: str
 /** What the Rust host exposes. Fakes implement the same shape in tests. */
 export interface DaemonTransport {
   status(): Promise<DaemonStatus>;
-  request(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<DaemonReply>;
+  request(method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<DaemonReply>;
   /** Streams one turn; resolves when the stream ends or with the error reply that replaced it. */
   stream(conversationId: string, content: string, onEvent: (event: StreamEvent) => void): Promise<DaemonReply>;
   /** Drop the connection for a turn (the daemon aborts on disconnect). */

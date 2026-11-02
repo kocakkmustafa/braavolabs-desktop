@@ -33,7 +33,7 @@ export interface AgentPatch {
 }
 
 export function createPanelApi(transport: PanelTransport) {
-  const call = async <T>(method: "GET" | "POST" | "PATCH", path: string, body?: unknown): Promise<T> => {
+  const call = async <T>(method: "GET" | "POST" | "PUT" | "PATCH", path: string, body?: unknown): Promise<T> => {
     let reply: DaemonReply;
     try { reply = await transport.request(method, path, body); }
     catch (error) { throw errorFromHost(error); }
@@ -55,6 +55,8 @@ export function createPanelApi(transport: PanelTransport) {
     runTask: (taskId: string) => call<unknown>("POST", `/v1/tasks/${id(taskId)}/run`),
     agentConversations: (agentId: string) => call<unknown>("GET", `/v1/conversations?${new URLSearchParams({ agentId, limit: "20" })}`),
     createAgentConversation: (agentId: string) => call<unknown>("POST", "/v1/conversations", { agentId }),
+    skills: () => call<unknown>("GET", "/v1/skills"),
+    setAgentSkills: (agentId: string, skills: string[]) => call<unknown>("PUT", `/v1/agents/${id(agentId)}/skills`, { skills }),
     models: () => call<DaemonModels>("GET", "/v1/models"),
     async findings(companyId: string, role: string): Promise<Findings> {
       try { return await transport.findings(companyId, role); }
