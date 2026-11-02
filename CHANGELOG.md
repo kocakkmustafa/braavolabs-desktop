@@ -11,6 +11,21 @@ append-only audit ledger. PR numbers refer to `kocakkmustafa/braavolabs-desktop`
 
 ## [Unreleased]
 
+### Added
+- **Computer control (macOS, plan 5.8).** Off until you start a session (at most
+  15 minutes and 50 actions; Stop ends it). The agent reads the screen and uses
+  the mouse and keyboard only in apps you check under "Allowed apps"
+  (`~/.braavo/computer.json`). Reading the screen asks once per session; every
+  click, keystroke, key combination and scroll asks each time, with the app, the
+  point and the text in the native dialog, and the token is bound to them. Never
+  controllable: system settings, password and key stores, terminals and script
+  runners, finance and identity apps, login and authentication prompts, web
+  browsers (web pages go through the Braavo browser) and Braavolabs itself.
+  Launcher and log-out key combinations are never sent. Right before each action
+  the host brings the approved app forward and cancels when it is not frontmost;
+  typing into a password field is refused. A setup screen explains Screen
+  Recording and Accessibility and opens the right System Settings pane.
+
 - **Distribution groundwork** (branch `feat/desktop-distribution`): the repo can
   now actually produce shippable native bundles. Previously `tauri:dev` was a
   human-gate `echo`, there was no `@tauri-apps/cli`, no build script, and the

@@ -73,6 +73,10 @@ mod browser;
 // allow-listed commands; the bearer token is read per call and never leaves Rust.
 mod daemon;
 
+// Plan 5.8: governed computer control (screen + mouse + keyboard in allowed apps, macOS).
+// Policy, session limits and the CGEvent/screencapture host; the commands are below.
+mod computer;
+
 /// Token bundle mirrored to the CLI's config field names ({token, refreshToken})
 /// so the two clients share one mental model. Serialized as camelCase so the
 /// JS store (store.ts) reads `token` / `refreshToken` directly.
@@ -707,6 +711,8 @@ fn classify(kind: &str, argv: &[String], path: Option<&str>) -> (&'static str, &
             | "browser.read"
             | "browser.interact"
             | "browser.eval"
+            | "computer.read"
+            | "computer.interact"
     );
     if known {
         ("require-approval", "side-effecting action")
@@ -1015,6 +1021,11 @@ struct ActionDetail {
     selector: Option<String>,
     value: Option<String>,
     interact_kind: Option<String>,
+    /// computer.*: the target app's bundle id and the screen point. Bound into the token
+    /// (an approval for one point/app can't be spent on another) and shown in the dialog.
+    app: Option<String>,
+    x: Option<i64>,
+    y: Option<i64>,
 }
 
 impl ActionDetail {
@@ -1027,7 +1038,7 @@ impl ActionDetail {
     /// struct, so adding the fields keeps host mint/consume in step.
     fn binding(&self, kind: &str) -> String {
         format!(
-            "{kind}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            "{kind}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
             self.argv,
             self.cwd,
             self.path,
@@ -1040,7 +1051,10 @@ impl ActionDetail {
             self.js,
             self.selector,
             self.value,
-            self.interact_kind
+            self.interact_kind,
+            self.app,
+            self.x,
+            self.y
         )
     }
     fn summary_or(&self, kind: &str) -> String {
@@ -1098,6 +1112,27 @@ impl ActionDetail {
                 line.push_str(&format!(" = {}", sanitize_field(v)));
             }
             lines.push(line);
+        }
+        // computer.* — which app, where, and what will be typed or pressed: the human
+        // approves the exact event, not "computer.interact".
+        if kind == "computer.read" || kind == "computer.interact" {
+            if let Some(app) = &self.app {
+                lines.push(format!("App: {}", sanitize_field(app)));
+            }
+            if kind == "computer.read" {
+                lines.push("Read the screen for this session".into());
+            }
+            let k = self.interact_kind.as_deref().unwrap_or("");
+            if let (Some(x), Some(y)) = (self.x, self.y) {
+                lines.push(format!("{}: {x}, {y}", if k == "scroll" { "Scroll at" } else { "Point" }));
+            }
+            match (k, &self.value) {
+                ("type", Some(v)) => lines.push(format!("Type: {}", sanitize_field(v))),
+                ("key", Some(v)) => lines.push(format!("Keys: {}", sanitize_field(v))),
+                ("scroll", Some(v)) => lines.push(format!("Scroll by: {}", sanitize_field(v))),
+                ("", _) => {}
+                (k, _) => lines.push(format!("Do: {}", sanitize_field(k))),
+            }
         }
         if let Some(server) = &self.server {
             lines.push(format!("Server: {}", sanitize_field(server)));
@@ -1317,6 +1352,13 @@ fn request_action(app: AppHandle, window: tauri::WebviewWindow, gov: State<'_, G
     // every other kind uses argv/path directly.
     let (decision, reason) = if kind == "pty.spawn" {
         classify(&kind, detail.args.as_deref().unwrap_or(&[]), detail.cwd.as_deref())
+    } else if kind == "computer.read" || kind == "computer.interact" {
+        // Blocked apps (system, security, terminals, finance/identity, browsers, this app)
+        // and launcher keys are denied here, before anything is surfaced for approval.
+        match computer::deny_reason(detail.app.as_deref(), detail.interact_kind.as_deref(), detail.value.as_deref()) {
+            Some(reason) => ("deny", reason),
+            None => classify(&kind, &[], None),
+        }
     } else if kind == "browser.navigate" {
         // browser.navigate's hard-deny is on the URL; classify reads it via `path`
         // (same convention as pty passing its cwd as path). The token is still
@@ -3068,6 +3110,24 @@ mod mcp_tests {
     }
 
     #[test]
+    fn computer_tokens_bind_app_point_and_text_and_the_dialog_shows_them() {
+        let click = ActionDetail { app: Some("com.apple.Notes".into()), interact_kind: Some("click".into()), x: Some(10), y: Some(20), ..Default::default() };
+        let moved = ActionDetail { x: Some(11), ..click.clone() };
+        let other_app = ActionDetail { app: Some("com.apple.TextEdit".into()), ..click.clone() };
+        assert_ne!(click.binding("computer.interact"), moved.binding("computer.interact"));
+        assert_ne!(click.binding("computer.interact"), other_app.binding("computer.interact"));
+        let text = click.enforced_dialog_text("computer.interact");
+        assert!(text.contains("App: com.apple.Notes") && text.contains("Point: 10, 20") && text.contains("Do: click"), "{text}");
+        let typing = ActionDetail { app: Some("com.apple.Notes".into()), interact_kind: Some("type".into()), value: Some("hello\nworld".into()), ..Default::default() };
+        assert!(typing.enforced_dialog_text("computer.interact").contains("Type: hello world"));
+        let read = ActionDetail { app: Some("com.apple.Notes".into()), selector: Some("cs_1".into()), ..Default::default() };
+        assert!(read.enforced_dialog_text("computer.read").contains("Read the screen for this session"));
+        // A blocked app or launcher key never reaches the dialog.
+        assert!(computer::deny_reason(Some("com.apple.Terminal"), Some("type"), Some("ls")).is_some());
+        assert!(computer::deny_reason(Some("com.apple.Notes"), Some("key"), Some("cmd+space")).is_some());
+    }
+
+    #[test]
     fn mcp_tool_token_binding_differs_by_tool_and_server() {
         let a = ActionDetail { tool: Some("read".into()), server: Some("fs".into()), ..Default::default() };
         let b = ActionDetail { tool: Some("write".into()), server: Some("fs".into()), ..Default::default() };
@@ -3896,6 +3956,320 @@ mod governance_tests {
     }
 }
 
+// ── Plan 5.8: computer control ─────────────────────────────────────────────
+//
+// The session lives here (one at a time), started and stopped by the user. Every dispatch
+// re-checks, in this order and before the token is spent: session, never-controllable apps
+// and keys, the user's allow list, the macOS permission it needs. Then the token (a
+// screenshot after the session's first uses the read grant), then the target app is
+// brought forward and must be frontmost, then the event. Typing into a password field is
+// refused. Everything lands in the audit ledger; typed text never does (length only).
+
+#[derive(Default)]
+struct ComputerState(Mutex<Option<computer::Session>>);
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ComputerApp {
+    bundle_id: String,
+    name: String,
+    blocked: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ComputerStatus {
+    supported: bool,
+    accessibility: bool,
+    screen_recording: bool,
+    apps: Vec<ComputerApp>,
+    allow_apps: Vec<String>,
+    session: Option<computer::SessionView>,
+}
+
+fn computer_policy_path(app: &AppHandle) -> Option<PathBuf> {
+    app.path().home_dir().ok().map(|h| h.join(".braavo").join("computer.json"))
+}
+
+fn computer_allow(app: &AppHandle) -> Vec<String> {
+    computer::parse_allow(computer_policy_path(app).and_then(|p| fs::read_to_string(p).ok()).as_deref())
+}
+
+/// Permissions, running apps (with why some can never be controlled), the allow list and the session.
+#[tauri::command]
+fn computer_status(app: AppHandle, state: State<'_, ComputerState>) -> ComputerStatus {
+    let session = state.0.lock().ok().and_then(|s| s.as_ref().map(|x| x.view()));
+    let allow_apps = computer_allow(&app);
+    #[cfg(target_os = "macos")]
+    {
+        let apps = computer::host::running_apps()
+            .into_iter()
+            .map(|(bundle_id, name)| {
+                let blocked = computer::blocked_reason(Some(&bundle_id), Some(&name)).map(String::from);
+                ComputerApp { bundle_id, name, blocked }
+            })
+            .collect();
+        ComputerStatus { supported: true, accessibility: computer::host::accessibility_granted(), screen_recording: computer::host::screen_granted(), apps, allow_apps, session }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        ComputerStatus { supported: false, accessibility: false, screen_recording: false, apps: vec![], allow_apps, session }
+    }
+}
+
+/// Ask macOS to list Braavolabs under Accessibility or Screen Recording (its own prompt).
+#[tauri::command]
+fn computer_request_access(kind: String) -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(if kind == "screen" { computer::host::request_screen() } else { computer::host::request_accessibility() })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = kind;
+        Err("computer control is available on macOS for now".into())
+    }
+}
+
+#[tauri::command]
+fn computer_open_settings(pane: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        computer::host::open_settings(&pane)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pane;
+        Err("computer control is available on macOS for now".into())
+    }
+}
+
+/// Replace the allow list. Never-controllable apps and malformed ids are dropped.
+#[tauri::command]
+fn computer_set_allow(app: AppHandle, apps: Vec<String>) -> Result<Vec<String>, String> {
+    let clean: Vec<String> = apps
+        .into_iter()
+        .map(|a| a.trim().to_string())
+        .filter(|a| computer::is_bundle_id(a) && computer::blocked_reason(Some(a), None).is_none())
+        .take(100)
+        .collect();
+    let path = computer_policy_path(&app).ok_or("no home folder")?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let mut existing: serde_json::Value = fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| serde_json::json!({}));
+    if !existing.is_object() {
+        existing = serde_json::json!({});
+    }
+    existing["allowApps"] = serde_json::json!(clean);
+    write_owner_only(&path, &serde_json::to_string_pretty(&existing).map_err(|e| e.to_string())?)?;
+    Ok(clean)
+}
+
+fn write_owner_only(path: &Path, text: &str) -> Result<(), String> {
+    let mut f = fs::File::create(path).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    f.write_all(text.as_bytes()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn computer_session_start(app: AppHandle, gov: State<'_, Governance>, state: State<'_, ComputerState>, ts: Option<u64>) -> Result<computer::SessionView, String> {
+    let mut cur = state.0.lock().map_err(|_| "computer state poisoned")?;
+    if let Some(s) = cur.as_ref() {
+        if s.exhausted().is_none() {
+            return Err("a computer-control session is already running".into());
+        }
+    }
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let session = computer::Session::new(format!("cs_{nanos:x}"));
+    let view = session.view();
+    *cur = Some(session);
+    if let Ok(mut gate) = gov.0.lock() {
+        audit_append(&app, &mut gate, "computer.session", "-", "started", &view.id, ts.unwrap_or(0));
+    }
+    Ok(view)
+}
+
+#[tauri::command]
+fn computer_session_stop(app: AppHandle, gov: State<'_, Governance>, state: State<'_, ComputerState>, ts: Option<u64>) -> Result<(), String> {
+    let ended = state.0.lock().map_err(|_| "computer state poisoned")?.take();
+    if let (Some(s), Ok(mut gate)) = (ended, gov.0.lock()) {
+        audit_append(&app, &mut gate, "computer.session", "-", "stopped", &format!("{} after {} actions", s.id, s.actions), ts.unwrap_or(0));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ComputerInput {
+    op: String,
+    app: String,
+    session_id: String,
+    x: Option<i64>,
+    y: Option<i64>,
+    value: Option<String>,
+}
+
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ComputerOut {
+    ok: bool,
+    png: Option<String>,
+    width: Option<u32>,
+    height: Option<u32>,
+    points_width: Option<f64>,
+    points_height: Option<f64>,
+}
+
+#[tauri::command]
+async fn computer_dispatch(
+    app: AppHandle,
+    gov: State<'_, Governance>,
+    state: State<'_, ComputerState>,
+    token: Option<String>,
+    input: ComputerInput,
+    ts: Option<u64>,
+) -> Result<ComputerOut, String> {
+    let ts = ts.unwrap_or(0);
+    let op = input.op.as_str();
+    let kind = match op {
+        "screenshot" => "computer.read",
+        "click" | "double_click" | "right_click" | "type" | "key" | "scroll" => "computer.interact",
+        _ => return Err(format!("unknown computer op: {op}")),
+    };
+    let summary = match op {
+        "type" => format!("type {} chars in {}", input.value.as_deref().map(|v| v.chars().count()).unwrap_or(0), input.app),
+        _ => format!("{op} in {}", input.app),
+    };
+    let audit = |outcome: &str, note: &str| {
+        if let Ok(mut gate) = gov.0.lock() {
+            audit_append(&app, &mut gate, kind, "-", outcome, &format!("{summary}{}{note}", if note.is_empty() { "" } else { " · " }), ts);
+        }
+    };
+    if !cfg!(target_os = "macos") {
+        return Err("computer control is available on macOS for now".into());
+    }
+
+    // 1. Session.
+    let read_granted = {
+        let mut cur = state.0.lock().map_err(|_| "computer state poisoned")?;
+        let s = match cur.as_ref() {
+            Some(s) if s.id == input.session_id => s,
+            _ => return Err("no computer-control session; start one first".into()),
+        };
+        if let Some(reason) = s.exhausted() {
+            *cur = None;
+            audit("denied", reason);
+            return Err(reason.into());
+        }
+        s.read_granted
+    };
+    // 2. Policy, before the token is spent.
+    let interact_kind = if kind == "computer.interact" { Some(op) } else { None };
+    if let Some(reason) = computer::deny_reason(Some(&input.app), interact_kind, input.value.as_deref()) {
+        audit("denied", reason);
+        return Err(reason.into());
+    }
+    if !computer_allow(&app).iter().any(|a| a == &input.app) {
+        audit("denied", "not in the allowed apps");
+        return Err(format!("{} is not in the allowed apps (Computer control → Allowed apps)", input.app));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if kind == "computer.read" && !computer::host::screen_granted() {
+            return Err("Screen Recording is not allowed for Braavolabs yet (System Settings → Privacy & Security)".into());
+        }
+        if kind == "computer.interact" && !computer::host::accessibility_granted() {
+            return Err("Accessibility is not allowed for Braavolabs yet (System Settings → Privacy & Security)".into());
+        }
+    }
+    // 3. Token, bound exactly as computerActionToGate minted it.
+    if !(kind == "computer.read" && read_granted && token.is_none()) {
+        let detail = if kind == "computer.read" {
+            ActionDetail { app: Some(input.app.clone()), selector: Some(input.session_id.clone()), ..Default::default() }
+        } else {
+            ActionDetail { app: Some(input.app.clone()), interact_kind: Some(op.to_string()), x: input.x, y: input.y, value: input.value.clone(), ..Default::default() }
+        };
+        let consumed = {
+            let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+            try_consume_token(&mut gate, token.as_deref().unwrap_or(""), kind, &detail.binding(kind))
+        };
+        if !consumed {
+            audit("replay-rejected", "");
+            return Err("approval token missing, used or for another action".into());
+        }
+    }
+    // 4. Act, off the main thread: bring the app forward, re-check, then the event.
+    #[cfg(target_os = "macos")]
+    {
+        let target = input.app.clone();
+        let (op_owned, x, y, value) = (op.to_string(), input.x, input.y, input.value.clone());
+        let result = tauri::async_runtime::spawn_blocking(move || -> Result<ComputerOut, String> {
+            use computer::host;
+            if !host::bring_forward(&target) {
+                return Err(format!("{target} did not come to the front; the action was cancelled"));
+            }
+            let point = || -> Result<(f64, f64), String> { Ok((x.ok_or("x is required")? as f64, y.ok_or("y is required")? as f64)) };
+            match op_owned.as_str() {
+                "screenshot" => {
+                    let png = host::screenshot()?;
+                    let (w, h) = computer::png_size(&png).ok_or("screenshot is not a PNG")?;
+                    let (pw, ph) = host::display_points();
+                    Ok(ComputerOut { ok: true, png: Some(pty::base64_encode(&png)), width: Some(w), height: Some(h), points_width: Some(pw), points_height: Some(ph) })
+                }
+                "click" | "double_click" | "right_click" => {
+                    let (px, py) = point()?;
+                    host::click(px, py, &op_owned)?;
+                    Ok(ComputerOut { ok: true, ..Default::default() })
+                }
+                "type" => {
+                    if host::focused_is_secure() {
+                        return Err("typing into a password field is refused".into());
+                    }
+                    host::type_text(value.as_deref().unwrap_or(""))?;
+                    Ok(ComputerOut { ok: true, ..Default::default() })
+                }
+                "key" => {
+                    let (flags, code) = computer::parse_combo(value.as_deref().unwrap_or("")).ok_or("unknown key combination")?;
+                    host::key(flags, code)?;
+                    Ok(ComputerOut { ok: true, ..Default::default() })
+                }
+                _ => {
+                    let (px, py) = point()?;
+                    let (dx, dy) = value
+                        .as_deref()
+                        .and_then(|v| v.split_once(','))
+                        .and_then(|(a, b)| Some((a.trim().parse::<i32>().ok()?, b.trim().parse::<i32>().ok()?)))
+                        .ok_or("scroll needs dx,dy")?;
+                    host::scroll(px, py, dx.clamp(-5000, 5000), dy.clamp(-5000, 5000))?;
+                    Ok(ComputerOut { ok: true, ..Default::default() })
+                }
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        if let Ok(mut cur) = state.0.lock() {
+            if let Some(s) = cur.as_mut().filter(|s| s.id == input.session_id) {
+                s.actions += 1;
+                if kind == "computer.read" && result.is_ok() {
+                    s.read_granted = true;
+                }
+            }
+        }
+        match &result {
+            Ok(_) => audit("success", ""),
+            Err(e) => audit("error", e),
+        }
+        return result;
+    }
+    #[allow(unreachable_code)]
+    Err("computer control is available on macOS for now".into())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -3906,6 +4280,7 @@ pub fn run() {
         .manage(daemon::DaemonSubscriptions::default()) // company panel event streams (closed on exit)
         .manage(BrowserHostState::default()) // R6 Lane-C governed CDP browser connection
         .manage(BrowserLaunchState::default()) // plan 5.1: the Braavo browser process (own profile)
+        .manage(ComputerState::default()) // plan 5.8: the computer-control session
         .invoke_handler(tauri::generate_handler![
             secure_store_get,
             secure_store_set,
@@ -3934,6 +4309,13 @@ pub fn run() {
             browser_disconnect,
             browser_dispatch,
             browser_launch,
+            computer_status,
+            computer_request_access,
+            computer_open_settings,
+            computer_set_allow,
+            computer_session_start,
+            computer_session_stop,
+            computer_dispatch,
             git_changed_files,
             mcp_capabilities,
             mcp_list_servers,
