@@ -251,6 +251,8 @@ export interface UiDeps {
   gov: Governance;
   /** MCP bridge — register servers, list tools, and (gated) call a tool. */
   mcp: McpBridge;
+  /** The built-in API address; the sign-in "Advanced" fold opens when another one is in use. */
+  defaultApiUrl?: string;
   /** Persist secrets after login/refresh/logout. */
   persist: (c: Config) => Promise<void> | void;
   onSignedOut: () => void;
@@ -379,6 +381,15 @@ export function renderLogin(deps: UiDeps): void {
     return f;
   };
 
+  // The API address is for self-hosting; most people never change it, so it folds
+  // under "Advanced" and opens on its own only when a non-default address is in use.
+  const advancedApiField = () => {
+    const details = el("details", "login-advanced") as HTMLDetailsElement;
+    details.open = deps.defaultApiUrl !== undefined && cfg.apiUrl !== deps.defaultApiUrl;
+    details.append(el("summary", undefined, t("login.advanced")), field("login.apiUrl", apiInput));
+    return details;
+  };
+
   const btn = el("button", "login-btn", t("login.submit"));
   btn.type = "submit";
 
@@ -444,7 +455,7 @@ export function renderLogin(deps: UiDeps): void {
     errBox,
     field("login.email", emailInput),
     field("login.password", pwInput),
-    field("login.apiUrl", apiInput),
+    advancedApiField(),
     btn,
   );
   wrap.append(card);

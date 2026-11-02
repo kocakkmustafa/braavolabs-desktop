@@ -83,6 +83,7 @@
   "login.email": "ईमेल",
   "login.password": "पासवर्ड",
   "login.apiUrl": "API URL",
+  "login.advanced": "उन्नत",
   "login.submit": "साइन इन करें",
   "login.signingIn": "साइन इन हो रहा है…",
   "login.requiredEmail": "अपना ईमेल पता दर्ज करें।",

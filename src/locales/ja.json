@@ -83,6 +83,7 @@
   "login.email": "メールアドレス",
   "login.password": "パスワード",
   "login.apiUrl": "API URL",
+  "login.advanced": "詳細設定",
   "login.submit": "ログイン",
   "login.signingIn": "ログイン中…",
   "login.requiredEmail": "メールアドレスを入力してください。",

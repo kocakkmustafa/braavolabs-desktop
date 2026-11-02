@@ -6,7 +6,7 @@
 import "./styles.css";
 import { resolveTheme } from "./theme";
 import { type Config, DEFAULT_API, setPersist } from "./config";
-import { resolveStore, loadApiUrl, hydrateConfig, createConfigPersister } from "./store";
+import { resolveStore, loadApiUrl, hydrateConfig, createConfigPersister, isReleaseBuild } from "./store";
 import { resolveKeyVault } from "./keyvault";
 import { resolveSpawnProbe } from "./spawn";
 import { resolveGovernance } from "./governance";
@@ -22,7 +22,7 @@ async function boot(): Promise<void> {
   if (!root) return;
 
   const store = resolveStore();
-  const cfg: Config = { apiUrl: loadApiUrl(DEFAULT_API) };
+  const cfg: Config = { apiUrl: loadApiUrl(DEFAULT_API, { production: isReleaseBuild() }) };
   await hydrateConfig(cfg, store);
 
   // Route the client's post-refresh save through the secure store (never disk
@@ -42,6 +42,7 @@ async function boot(): Promise<void> {
     spawn: resolveSpawnProbe(),
     gov,
     mcp: resolveMcpBridge(gov),
+    defaultApiUrl: DEFAULT_API,
     persist,
     onSignOutError: (message) => {
       const warning = document.createElement("p");
