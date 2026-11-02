@@ -43,6 +43,10 @@ export interface AgentView {
   budgetRatio: number | null;
   /** SKILL.md skills the agent uses, in order (plan 5.3). */
   skills: string[];
+  /** "native" (a model through the daemon) or a CLI employee engine (plan 3.1). */
+  engine: string;
+  workdir: string | null;
+  approvalPolicy: "ask" | "edits" | "readonly";
   month: MonthUsage;
 }
 
@@ -81,6 +85,50 @@ export interface TaskView {
 }
 
 export interface TaskCounts { open: number; running: number; done: number; failed: number }
+
+// ── CLI employees (plan 3.1) ─────────────────────────────────────────────────
+
+export const WORKER_ENGINES = ["claude-code", "codex", "gemini"] as const;
+export const APPROVAL_POLICIES = ["ask", "edits", "readonly"] as const;
+
+export interface ApprovalView { id: string; agentId: string | null; taskId: string | null; title: string; tool: string; paths: string[]; createdAt: string | null }
+
+export function toApprovals(raw: unknown): ApprovalView[] {
+  return list(obj(raw).approvals).map(obj).filter(a => str(a.id) && (a.status === undefined || a.status === "pending")).map(a => ({
+    id: str(a.id), agentId: strOrNull(a.agent_id), taskId: strOrNull(a.task_id), title: str(a.title) || str(a.tool),
+    tool: str(a.tool) || "other", paths: list(a.paths).map(str).filter(Boolean), createdAt: strOrNull(a.created_at),
+  }));
+}
+
+export type TaskEventView =
+  | { seq: number; kind: "tool_call"; tool: string; title: string; paths: string[] }
+  | { seq: number; kind: "tool_update"; status: string; text: string | null }
+  | { seq: number; kind: "diff"; path: string; added: number; removed: number; isNew: boolean; newText: string }
+  | { seq: number; kind: "permission"; tool: string; title: string; decision: "allow" | "reject"; by: string }
+  | { seq: number; kind: "plan"; entries: Array<{ content: string; done: boolean }> }
+  | { seq: number; kind: "message"; text: string };
+
+/** Daemon task events → display rows; unknown kinds are dropped, never guessed. */
+export function toTaskEvents(raw: unknown): TaskEventView[] {
+  const out: TaskEventView[] = [];
+  for (const e of list(obj(raw).events).map(obj)) {
+    const seq = num(e.seq); const d = obj(e.data);
+    switch (str(e.kind)) {
+      case "tool_call": out.push({ seq, kind: "tool_call", tool: str(d.tool) || "other", title: str(d.title), paths: list(d.paths).map(str).filter(Boolean) }); break;
+      case "tool_update": out.push({ seq, kind: "tool_update", status: str(d.status), text: strOrNull(d.text) }); break;
+      case "diff": {
+        const oldLines = typeof d.oldText === "string" ? d.oldText.split("\n").length : 0;
+        const newLines = str(d.newText).split("\n").length;
+        out.push({ seq, kind: "diff", path: str(d.path), added: newLines, removed: oldLines, isNew: d.oldText === null || d.oldText === undefined, newText: str(d.newText) });
+        break;
+      }
+      case "permission": out.push({ seq, kind: "permission", tool: str(d.tool), title: str(d.title), decision: d.decision === "allow" ? "allow" : "reject", by: str(d.by) }); break;
+      case "plan": out.push({ seq, kind: "plan", entries: list(d.entries).map(obj).map(x => ({ content: str(x.content), done: x.status === "completed" })) }); break;
+      case "message": out.push({ seq, kind: "message", text: str(d.text) }); break;
+    }
+  }
+  return out;
+}
 
 export interface SkillView { name: string; description: string; source: "user" | "project" }
 
@@ -157,6 +205,9 @@ export function toAgent(raw: unknown): AgentView | null {
     budgetUsdMonthly: numOrNull(a.budgetUsdMonthly),
     budgetRatio: numOrNull(a.budgetRatio),
     skills: list(a.skills).map(str).filter(Boolean),
+    engine: str(a.engine) || "native",
+    workdir: strOrNull(a.workdir),
+    approvalPolicy: a.approvalPolicy === "edits" || a.approvalPolicy === "readonly" ? a.approvalPolicy : "ask",
     month: { inputTokens: num(m.inputTokens), outputTokens: num(m.outputTokens), usd: num(m.usd), runs: num(m.runs) },
   };
 }
@@ -371,6 +422,7 @@ export type PanelEvent =
   | { kind: "agent"; agentId: string; status: AgentStatus }
   | { kind: "routine"; routineId: string; outcome: string }
   | { kind: "task"; taskId: string }
+  | { kind: "approval"; approvalId: string }
   | { kind: "other" };
 
 export function toPanelEvent(event: string, data: unknown): PanelEvent {
@@ -379,6 +431,7 @@ export function toPanelEvent(event: string, data: unknown): PanelEvent {
   if (type === "company.changed" && str(d.companyId)) return { kind: "company", companyId: str(d.companyId) };
   if (type === "agent.status" && str(d.agentId)) return { kind: "agent", agentId: str(d.agentId), status: toStatus(d.status) };
   if (type === "routine.executed" && str(d.routineId)) return { kind: "routine", routineId: str(d.routineId), outcome: str(d.outcome) };
-  if (type === "task.changed" && str(d.taskId)) return { kind: "task", taskId: str(d.taskId) };
+  if ((type === "task.changed" || type === "task.event") && str(d.taskId)) return { kind: "task", taskId: str(d.taskId) };
+  if ((type === "approval.requested" || type === "approval.decided") && str(d.approvalId)) return { kind: "approval", approvalId: str(d.approvalId) };
   return { kind: "other" };
 }

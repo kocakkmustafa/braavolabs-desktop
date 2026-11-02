@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   budgetLevel, buildHireRequest, displayNote, flattenTree, keysAddCommand, parseBudget, parseUrls, toAgent, toCompanies, toConversationRefs, toHireResult,
-  toPanel, toPanelEvent, toTask, toTasks, TEMPLATE_IDS,
+  toPanel, toPanelEvent, toTask, toTasks, TEMPLATE_IDS, toApprovals, toTaskEvents,
 } from "../company-panel/map";
 import { parseInline, parseMarkdown } from "../company-panel/markdown";
 import { agent, RAW_PANEL } from "./company-panel-fixture";
@@ -142,5 +142,33 @@ describe("budgets and tasks", () => {
     expect(parseBudget("0", 100)).toBe(0);
     for (const bad of ["-1", "abc", "1.234", "101", "1e3"]) expect(parseBudget(bad, 100), bad).toBe("invalid");
     expect([null, 0.2, 0.8, 1, 3].map(budgetLevel)).toEqual(["none", "ok", "warn", "over", "over"]);
+  });
+});
+
+describe("CLI employees (plan 3.1)", () => {
+  it("maps worker fields, pending approvals and task events without inventing values", () => {
+    expect(toAgent(agent({ engine: "gemini", workdir: "/w", approvalPolicy: "edits" }))).toMatchObject({ engine: "gemini", workdir: "/w", approvalPolicy: "edits" });
+    expect(toAgent(agent())).toMatchObject({ engine: "native", workdir: null, approvalPolicy: "ask" });
+    expect(toAgent(agent({ approvalPolicy: "yolo" }))!.approvalPolicy).toBe("ask");
+    expect(toApprovals({ approvals: [
+      { id: "ap_1", agent_id: "ag_1", task_id: "tk_1", title: "npm test", tool: "execute", paths: [], status: "pending", created_at: "2026-11-02T00:00:00Z" },
+      { id: "ap_2", title: "x", tool: "edit", status: "allowed" }, {},
+    ] })).toEqual([{ id: "ap_1", agentId: "ag_1", taskId: "tk_1", title: "npm test", tool: "execute", paths: [], createdAt: "2026-11-02T00:00:00Z" }]);
+    expect(toTaskEvents({ events: [
+      { seq: 1, kind: "plan", data: { entries: [{ content: "Read", status: "completed" }, { content: "Edit", status: "pending" }] } },
+      { seq: 2, kind: "tool_call", data: { tool: "read", title: "Read a.md", paths: ["a.md"] } },
+      { seq: 3, kind: "diff", data: { path: "a.md", oldText: "a\nb", newText: "a\nb\nc" } },
+      { seq: 4, kind: "diff", data: { path: "new.md", oldText: null, newText: "x" } },
+      { seq: 5, kind: "permission", data: { tool: "execute", title: "rm", decision: "reject", by: "user" } },
+      { seq: 6, kind: "mystery", data: {} },
+    ] })).toEqual([
+      { seq: 1, kind: "plan", entries: [{ content: "Read", done: true }, { content: "Edit", done: false }] },
+      { seq: 2, kind: "tool_call", tool: "read", title: "Read a.md", paths: ["a.md"] },
+      { seq: 3, kind: "diff", path: "a.md", added: 3, removed: 2, isNew: false, newText: "a\nb\nc" },
+      { seq: 4, kind: "diff", path: "new.md", added: 1, removed: 0, isNew: true, newText: "x" },
+      { seq: 5, kind: "permission", tool: "execute", title: "rm", decision: "reject", by: "user" },
+    ]);
+    expect(toPanelEvent("approval.requested", { type: "approval.requested", approvalId: "ap_1" })).toEqual({ kind: "approval", approvalId: "ap_1" });
+    expect(toPanelEvent("task.event", { type: "task.event", taskId: "tk_1", kind: "diff" })).toEqual({ kind: "task", taskId: "tk_1" });
   });
 });
