@@ -1755,6 +1755,16 @@ textarea {
 .bp-result { border: 1px solid var(--steel-800); border-radius: var(--radius-sm); padding: 10px 12px; background: var(--obsidian-inset); }
 .bp-untrusted { display: inline-block; font-size: 0.65625rem; color: var(--ember); border: 1px solid var(--ember-dim); border-radius: 999px; padding: 1px 8px; margin-bottom: 6px; }
 .bp-text { max-height: 320px; overflow: auto; white-space: pre-wrap; font-size: 0.75rem; overflow-wrap: anywhere; margin: 6px 0 0; }
+/* Plan 5.8: computer control */
+.cc-perms { display: grid; gap: 8px; margin: 8px 0; }
+.cc-perm { border: 1px solid var(--line, rgba(127,127,127,.25)); border-radius: 8px; padding: 8px 10px; }
+.cc-ok { font-size: 0.6875rem; color: var(--text-dim, inherit); }
+.cc-missing { font-size: 0.6875rem; color: var(--ember); }
+.cc-apps { display: grid; gap: 4px; margin: 8px 0; max-height: 220px; overflow: auto; }
+.cc-app { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; font-size: 0.75rem; }
+.cc-app input:disabled + span { opacity: .5; }
+.cc-banner { border: 1px solid var(--ember-dim); color: var(--ember); border-radius: 8px; padding: 6px 10px; font-size: 0.75rem; margin-bottom: 6px; }
+.cc-shot { max-width: 100%; margin-top: 8px; border-radius: 6px; border: 1px solid var(--line, rgba(127,127,127,.25)); }
 /* Plan 3.1: CLI employees' events and approvals. */
 .cp-events { margin-top: 6px; border-inline-start: 2px solid var(--steel-700); padding-inline-start: 8px; }
 .cp-ev { font-size: 0.75rem; padding: 2px 0; overflow-wrap: anywhere; display: flex; flex-wrap: wrap; gap: 4px; align-items: baseline; }

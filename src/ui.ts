@@ -133,6 +133,7 @@ import {
 } from "./brand-motion";
 import { createVoice } from "./voice";
 import { createBrowserPane } from "./browser-pane";
+import { createComputerPane } from "./computer-pane";
 
 /** How an approval was settled. `token` is present only when the resolver
  *  ALREADY minted one (companion approve) — the local click mints its own. */
@@ -728,6 +729,10 @@ export function renderWorkspace(deps: UiDeps): void {
       addToMessage: (text) => { applySurface("chat"); ta.value = ta.value ? `${ta.value}\n\n${text}` : text; ta.dispatchEvent(new Event("input")); ta.focus(); },
     });
     companyPane.append(browserPane.element);
+    // Plan 5.8: computer control — off until the user starts a session; each action approved.
+    const computerPane = createComputerPane({ t, invoke: tauriInvoke, gate: (kind, detail) => gateForToken(deps, kind, detail) });
+    companyPane.append(computerPane.element);
+    void computerPane.refresh();
   }
   let companyPanel: CompanyPanelHandle | null = null;
   let companyPanelLoading = false;

@@ -30,6 +30,7 @@
  */
 
 import { isSpawnVendor } from "./spawn";
+import { BLOCKED_KEYS, blockedReason, normalizeKeys } from "./computer";
 
 type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 
@@ -85,6 +86,11 @@ export const ACTION_KINDS = [
   // NOT a general shell launcher — arbitrary argv stays on command.run's choke
   // point); unknown vendors and non-absolute/traversal cwds are hard-denied.
   "pty.spawn",
+  // Plan 5.8: computer control (screen + mouse + keyboard) in apps the user allowed.
+  // read = a screenshot (one approval per session); interact = click / type / key /
+  // scroll (one approval each). Blocked apps and launcher keys are hard-denied.
+  "computer.read",
+  "computer.interact",
 ] as const;
 export type ActionKind = (typeof ACTION_KINDS)[number];
 
@@ -148,6 +154,11 @@ export interface ActionDetail {
   selector?: string;
   value?: string;
   interactKind?: string;
+  /** computer.*: the target app's bundle id and the screen point (in points). Bound into
+   * the token and re-checked against the frontmost app right before the host acts. */
+  app?: string;
+  x?: number;
+  y?: number;
 }
 
 /** True when a path tries to escape its base via a `..` segment (defense-in-depth). */
@@ -291,6 +302,15 @@ export function classifyAction(
     }
     if (hasDangerousPtyFlag(detail.args)) {
       return { decision: "deny", reason: "dangerous PTY flag blocked (permission-skip / config-inject)" };
+    }
+  }
+  // Computer control: never in blocked apps (system, security, terminals, finance and
+  // identity, browsers, Braavolabs itself) and never a launcher / log-out key combination.
+  if (kind === "computer.read" || kind === "computer.interact") {
+    const blocked = blockedReason(detail.app ? { bundleId: detail.app } : undefined);
+    if (blocked) return { decision: "deny", reason: blocked };
+    if (detail.interactKind === "key" && BLOCKED_KEYS.includes(normalizeKeys(detail.value ?? ""))) {
+      return { decision: "deny", reason: "launcher or log-out key combination blocked" };
     }
   }
   // 2. Explicit auto-allow (read-only / local-keyless only).
@@ -453,6 +473,11 @@ function bindingKey(kind: string, detail: ActionDetail): string {
     d.selector ?? null,
     d.value ?? null,
     d.interactKind ?? null,
+    // computer.*: bind the app and the point, so an approval to click (10,20) in Notes
+    // cannot be spent on another point or app. Rust ActionDetail::binding mirrors this.
+    d.app ?? null,
+    d.x ?? null,
+    d.y ?? null,
   ]);
 }
 
