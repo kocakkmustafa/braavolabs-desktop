@@ -366,3 +366,34 @@ describe("skills (plan 5.3)", () => {
     store.getState().stop();
   });
 });
+
+describe("CLI employees (plan 3.1)", () => {
+  it("loads pending approvals, decides one, hires a worker and loads a task's events", async () => {
+    const fake = fakeTransport({
+      ...baseRoutes(),
+      "GET /v1/companies/co_1/approvals?status=pending": ok({ approvals: [{ id: "ap_1", agent_id: "ag_1", title: "npm test", tool: "execute", paths: [], status: "pending" }] }),
+      "POST /v1/approvals/ap_1": ok({ approval: { status: "allowed" } }),
+      "POST /v1/companies/co_1/workers": ok({ agent: { id: "ag_9" } }, 201),
+      "GET /v1/tasks/tk_1/events": ok({ events: [{ seq: 1, kind: "tool_call", data: { tool: "read", title: "Read", paths: [] } }] }),
+    });
+    const store = createPanelStore(createPanelApi(fake.transport));
+    store.getState().start();
+    await vi.waitFor(() => expect(store.getState().approvals.map(a => a.id)).toEqual(["ap_1"]));
+    await store.getState().decideApproval("ap_1", "allow");
+    expect(fake.calls.find(c => c.method === "POST" && c.path === "/v1/approvals/ap_1")?.body).toEqual({ decision: "allow" });
+    expect(await store.getState().hireWorker({ engine: "gemini", workdir: "/w", approvalPolicy: "edits" })).toBe(true);
+    expect(fake.calls.find(c => c.path === "/v1/companies/co_1/workers")?.body).toEqual({ engine: "gemini", workdir: "/w", approvalPolicy: "edits" });
+    await store.getState().loadTaskEvents("tk_1");
+    expect(store.getState().taskEvents.tk_1).toEqual([{ seq: 1, kind: "tool_call", tool: "read", title: "Read", paths: [] }]);
+    store.getState().stop();
+  });
+
+  it("shows no queue and no error on a daemon without approval routes", async () => {
+    const fake = fakeTransport(baseRoutes());
+    const store = createPanelStore(createPanelApi(fake.transport));
+    store.getState().start();
+    await vi.waitFor(() => expect(store.getState().phase).toBe("ready"));
+    expect(store.getState()).toMatchObject({ approvals: [], approvalError: null });
+    store.getState().stop();
+  });
+});

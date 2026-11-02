@@ -133,4 +133,19 @@ describe("company panel screen (server-rendered smoke)", () => {
     const empty = render("tr", { phase: "ready", companies: [], companyId: "co_1", panel: toPanel(RAW_PANEL)!, selectedAgentId: "ag_1", skills: [] });
     expect(empty).toContain("Henüz skill yok.");
   });
+
+  it("renders a CLI employee's card and the approval queue", () => {
+    const panel = toPanel({ ...RAW_PANEL, agents: [{ ...RAW_PANEL.agents[0], id: "ag_w", name: "Gemini CLI", engine: "gemini", workdir: "/Users/me/app", approvalPolicy: "edits", provider: "ACP", model: "gemini" }] })!;
+    const html = render("en", {
+      phase: "ready", companies: [{ id: "co_1", name: "Acme" }], companyId: "co_1", panel, selectedAgentId: "ag_w",
+      approvals: [{ id: "ap_1", agentId: "ag_w", taskId: null, title: "npm test", tool: "execute", paths: [], createdAt: null }],
+    });
+    expect(html).toContain("CLI employee");
+    expect(html).toContain("/Users/me/app");
+    expect(html).toContain("Allow edits in the folder; ask for commands");
+    expect(html).not.toContain("Change model");
+    expect(html).toContain("Waiting for your approval");
+    expect(html).toContain("npm test");
+    expect(html).toContain("Hire a CLI employee");
+  });
 });

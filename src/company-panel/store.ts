@@ -12,8 +12,8 @@ import { createStore, type StoreApi } from "zustand/vanilla";
 import { DaemonError, type DaemonErrorCode, type DaemonModels, type StreamEvent } from "../daemon-client";
 import type { AgentPatch, EventSubscription, Findings, PanelApi } from "./api";
 import {
-  buildHireRequest, displayNote, FINDINGS_ROLES, toCompanies, toConversationRefs, toHireResult, toPanel, toPanelEvent, toSkills, toTasks,
-  type CompanyRef, type ConversationRef, type HireForm, type HireResultView, type PanelView, type SkillView, type TaskView,
+  buildHireRequest, displayNote, FINDINGS_ROLES, toCompanies, toConversationRefs, toHireResult, toPanel, toPanelEvent, toSkills, toTasks, toApprovals, toTaskEvents,
+  type ApprovalView, type TaskEventView, type CompanyRef, type ConversationRef, type HireForm, type HireResultView, type PanelView, type SkillView, type TaskView,
 } from "./map";
 
 export interface PanelError { code: DaemonErrorCode; message: string }
@@ -58,6 +58,14 @@ export interface PanelData {
   /** Installed SKILL.md skills (plan 5.3); null until loaded. */
   skills: SkillView[] | null;
   skillsError: PanelError | null;
+  /** CLI employees' pending approvals (plan 3.1). */
+  approvals: ApprovalView[];
+  approvalBusy: Record<string, boolean>;
+  approvalError: PanelError | null;
+  /** Events of tasks the user opened, by task id. */
+  taskEvents: Record<string, TaskEventView[]>;
+  workerBusy: boolean;
+  workerError: PanelError | null;
   /** True while an event subscription is open. */
   live: boolean;
 }
@@ -79,6 +87,9 @@ export interface PanelActions {
   setFindingsRole(role: string): Promise<void>;
   loadModels(): Promise<void>;
   loadSkills(): Promise<void>;
+  decideApproval(id: string, decision: "allow" | "reject"): Promise<void>;
+  loadTaskEvents(taskId: string): Promise<void>;
+  hireWorker(input: { engine: string; workdir: string; name?: string; approvalPolicy: string }): Promise<boolean>;
   setAgentSkills(agentId: string, skills: string[]): Promise<boolean>;
   setCompanyBudget(usd: number | null): Promise<boolean>;
   createTask(task: NewTask): Promise<boolean>;
@@ -120,7 +131,8 @@ const initial = (): PanelData => ({
   createBusy: false, createError: null, hireBusy: false, hireError: null, hireResult: null, wizardOpen: false,
   findingsRole: FINDINGS_ROLES[0], findings: null, findingsError: null,
   tasks: [], tasksError: null, taskBusy: {}, taskError: {}, createTaskBusy: false, createTaskError: null,
-  budgetBusy: false, budgetError: null, agentChats: [], chatBusy: false, chatError: null, skills: null, skillsError: null, live: false,
+  budgetBusy: false, budgetError: null, agentChats: [], chatBusy: false, chatError: null, skills: null, skillsError: null,
+  approvals: [], approvalBusy: {}, approvalError: null, taskEvents: {}, workerBusy: false, workerError: null, live: false,
 });
 
 const without = <T>(map: Record<string, T>, key: string): Record<string, T> => {
@@ -212,6 +224,16 @@ export function createPanelStore(api: PanelApi, options: PanelStoreOptions = {})
       }
     };
 
+    const loadApprovals = async (companyId: string, seq: number) => {
+      try {
+        const approvals = toApprovals(await api.approvals(companyId));
+        if (seq === loadSeq) set({ approvals, approvalError: null });
+      } catch (error) {
+        // An older daemon has no approval routes: no queue to show.
+        if (seq === loadSeq) set({ approvals: [], approvalError: toPanelError(error).code === "not-found" ? null : toPanelError(error) });
+      }
+    };
+
     let chatsSeq = 0;
     const loadAgentChats = async (agentId: string | null) => {
       const seq = ++chatsSeq;
@@ -272,7 +294,9 @@ export function createPanelStore(api: PanelApi, options: PanelStoreOptions = {})
             // A company with nobody hired yet opens on the wizard.
             wizardOpen: get().wizardOpen || panel.agents.length === 0,
           });
-          await Promise.all([loadFindings(companyId, panel, seq), loadTasks(companyId, seq), loadAgentChats(get().selectedAgentId)]);
+          await Promise.all([loadFindings(companyId, panel, seq), loadTasks(companyId, seq), loadAgentChats(get().selectedAgentId), loadApprovals(companyId, seq)]);
+          // Keep the opened tasks' event lists current (a CLI employee may still be working).
+          await Promise.all(Object.keys(get().taskEvents).map(taskId => get().loadTaskEvents(taskId)));
         } catch (error) {
           if (seq !== loadSeq) return;
           const e = toPanelError(error);
@@ -422,6 +446,36 @@ export function createPanelStore(api: PanelApi, options: PanelStoreOptions = {})
           return true;
         } catch (error) {
           set({ chatBusy: false, chatError: toPanelError(error) });
+          return false;
+        }
+      },
+
+      async decideApproval(id, decision) {
+        set(s => ({ approvalBusy: { ...s.approvalBusy, [id]: true }, approvalError: null }));
+        try { await api.decideApproval(id, decision); }
+        catch (error) { set({ approvalError: toPanelError(error) }); }
+        set(s => ({ approvalBusy: without(s.approvalBusy, id) }));
+        await get().refresh();
+      },
+
+      async loadTaskEvents(taskId) {
+        try {
+          const events = toTaskEvents(await api.taskEvents(taskId));
+          set(s => ({ taskEvents: { ...s.taskEvents, [taskId]: events } }));
+        } catch { set(s => ({ taskEvents: { ...s.taskEvents, [taskId]: [] } })); }
+      },
+
+      async hireWorker(input) {
+        const companyId = get().companyId;
+        if (!companyId) return false;
+        set({ workerBusy: true, workerError: null });
+        try {
+          await api.hireWorker(companyId, input);
+          set({ workerBusy: false });
+          await get().refresh();
+          return true;
+        } catch (error) {
+          set({ workerBusy: false, workerError: toPanelError(error) });
           return false;
         }
       },

@@ -1755,6 +1755,13 @@ textarea {
 .bp-result { border: 1px solid var(--steel-800); border-radius: var(--radius-sm); padding: 10px 12px; background: var(--obsidian-inset); }
 .bp-untrusted { display: inline-block; font-size: 0.65625rem; color: var(--ember); border: 1px solid var(--ember-dim); border-radius: 999px; padding: 1px 8px; margin-bottom: 6px; }
 .bp-text { max-height: 320px; overflow: auto; white-space: pre-wrap; font-size: 0.75rem; overflow-wrap: anywhere; margin: 6px 0 0; }
+/* Plan 3.1: CLI employees' events and approvals. */
+.cp-events { margin-top: 6px; border-inline-start: 2px solid var(--steel-700); padding-inline-start: 8px; }
+.cp-ev { font-size: 0.75rem; padding: 2px 0; overflow-wrap: anywhere; display: flex; flex-wrap: wrap; gap: 4px; align-items: baseline; }
+.cp-ev-k { display: inline-block; width: 1em; flex: none; color: var(--text-dim); }
+.cp-diff { max-height: 220px; overflow: auto; width: 100%; margin: 4px 0 0; }
+.cp-approvals { border: 1px solid var(--ember-dim); border-radius: var(--radius-sm); padding: 10px 12px; }
+.cp-path { overflow-wrap: anywhere; text-align: end; }
 .cp-new-task textarea { resize: vertical; width: 100%; }
 .cp-routine { align-items: flex-start; padding: 8px 0; }
 .cp-activity li { font-size: 0.75rem; padding: 4px 0; border-top: 1px solid var(--steel-800); overflow-wrap: anywhere; }

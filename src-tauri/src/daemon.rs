@@ -164,6 +164,11 @@ pub fn validate_route(method: &str, path_and_query: &str) -> Result<(), String> 
         // Skills (plan 5.3): list them and set an agent's.
         ("GET", ["v1", "skills"]) => query.is_none(),
         ("GET" | "PUT", ["v1", "agents", id, "skills"]) => valid_id(id) && query.is_none(),
+        // CLI employees (plan 3.1): hire, approvals, task events.
+        ("POST", ["v1", "companies", id, "workers"]) => valid_id(id) && query.is_none(),
+        ("GET", ["v1", "companies", id, "approvals"]) => valid_id(id) && query_ok(&["status"]),
+        ("POST", ["v1", "approvals", id]) => valid_id(id) && query.is_none(),
+        ("GET", ["v1", "tasks", id, "events"]) => valid_id(id) && query_ok(&["after"]),
         _ => false,
     };
     if ok {
@@ -939,6 +944,10 @@ mod tests {
             ("GET", "/v1/skills"),
             ("GET", "/v1/agents/ag_1/skills"),
             ("PUT", "/v1/agents/ag_1/skills"),
+            ("POST", "/v1/companies/co_1/workers"),
+            ("GET", "/v1/companies/co_1/approvals?status=pending"),
+            ("POST", "/v1/approvals/ap_1"),
+            ("GET", "/v1/tasks/tk_1/events?after=3"),
         ] {
             assert!(validate_route(m, p).is_ok(), "{m} {p}");
         }
@@ -964,6 +973,9 @@ mod tests {
             ("PUT", "/v1/skills"),
             ("DELETE", "/v1/agents/ag_1/skills"),
             ("GET", "/v1/skills?dir=/etc"),
+            ("GET", "/v1/approvals/ap_1"),
+            ("DELETE", "/v1/approvals/ap_1"),
+            ("GET", "/v1/tasks/tk_1/events?x=1"),
             ("GET", "/v1/companies/co_1/panel?x=1"),
             ("GET", "/v1/companies/../panel"),
             ("GET", "/v1/companies/co_1/panel/"),

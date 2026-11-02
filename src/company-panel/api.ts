@@ -25,6 +25,7 @@ export interface PanelTransport {
 }
 
 export interface AgentPatch {
+  approvalPolicy?: "ask" | "edits" | "readonly";
   provider?: string;
   model?: string;
   effort?: string | null;
@@ -56,6 +57,10 @@ export function createPanelApi(transport: PanelTransport) {
     agentConversations: (agentId: string) => call<unknown>("GET", `/v1/conversations?${new URLSearchParams({ agentId, limit: "20" })}`),
     createAgentConversation: (agentId: string) => call<unknown>("POST", "/v1/conversations", { agentId }),
     skills: () => call<unknown>("GET", "/v1/skills"),
+    hireWorker: (companyId: string, input: { engine: string; workdir: string; name?: string; approvalPolicy: string }) => call<unknown>("POST", `/v1/companies/${id(companyId)}/workers`, input),
+    approvals: (companyId: string) => call<unknown>("GET", `/v1/companies/${id(companyId)}/approvals?status=pending`),
+    decideApproval: (approvalId: string, decision: "allow" | "reject") => call<unknown>("POST", `/v1/approvals/${id(approvalId)}`, { decision }),
+    taskEvents: (taskId: string) => call<unknown>("GET", `/v1/tasks/${id(taskId)}/events`),
     setAgentSkills: (agentId: string, skills: string[]) => call<unknown>("PUT", `/v1/agents/${id(agentId)}/skills`, { skills }),
     models: () => call<DaemonModels>("GET", "/v1/models"),
     async findings(companyId: string, role: string): Promise<Findings> {

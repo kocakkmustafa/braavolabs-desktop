@@ -9,7 +9,8 @@ import type { Translator } from "../i18n";
 import { modelOptions, parseModelRef, providersNeedingModel } from "../daemon-client";
 import {
   budgetLevel, EFFORT_CHOICES, FINDINGS_ROLES, keysAddCommand, parseBudget, parseUrls, PULL_MODEL_COMMAND, SETUP_COMMAND, TEMPLATE_IDS, URL_KEYS, urlKeyTemplate,
-  type AgentView, type HireForm, type RoutineView, type TaskView,
+  APPROVAL_POLICIES, WORKER_ENGINES,
+  type AgentView, type HireForm, type RoutineView, type TaskEventView, type TaskView,
 } from "./map";
 import { parseMarkdown, type Inline } from "./markdown";
 import type { PanelError, PanelState, PanelStore } from "./store";
@@ -332,7 +333,20 @@ function AgentCard({ agent }: { agent: AgentView }) {
         <StatusBadge agent={agent} />
       </div>
 
-      {agent.setupNeeded ? (
+      {agent.engine !== "native" ? (
+        <div className="cp-field">
+          <div className="cp-kv"><span>{t("panel.workerLabel")}</span><span className="mono">{agent.engine}</span></div>
+          <div className="cp-kv"><span>{t("panel.workerFolder")}</span><span className="mono cp-path">{agent.workdir ?? "—"}</span></div>
+          <span className="cp-hint">{t("panel.workerNoModel")}</span>
+          <label className="cp-field">
+            <span className="rail-section-label">{t("panel.workerPolicy")}</span>
+            <select className="company-input cp-input" value={agent.approvalPolicy} disabled={busy}
+              onChange={e => void store.getState().updateAgent(agent.id, { approvalPolicy: e.target.value as AgentView["approvalPolicy"] })}>
+              {APPROVAL_POLICIES.map(p => <option key={p} value={p}>{t(`panel.policy.${p}`)}</option>)}
+            </select>
+          </label>
+        </div>
+      ) : agent.setupNeeded ? (
         <div className="cp-block cp-setup">
           <strong>{t("panel.setupNeeded")}</strong>
           <SetupHint provider={null} />
@@ -355,7 +369,7 @@ function AgentCard({ agent }: { agent: AgentView }) {
           onSave={usd => void store.getState().updateAgent(agent.id, { budgetUsdMonthly: usd })} />
       </div>
 
-      <div className="cp-field">
+      {agent.engine === "native" && <div className="cp-field">
         <span className="rail-section-label">{t("panel.changeModel")}</span>
         <div className="cp-inline">
           <select className="company-input cp-input" value={choice} disabled={busy} aria-label={t("panel.changeModel")} onChange={e => setChoice(e.target.value)}>
@@ -371,16 +385,16 @@ function AgentCard({ agent }: { agent: AgentView }) {
         {needModel.length > 0 && <span className="cp-hint">{t("panel.providersNeedModel", { providers: needModel.join(", ") })}</span>}
         {!options.length && models && <SetupHint provider={null} />}
         <ErrorLine error={modelsError} />
-      </div>
+      </div>}
 
       <div className="cp-inline">
-        <label className="cp-field">
+        {agent.engine === "native" && <label className="cp-field">
           <span className="rail-section-label">{t("panel.effort")}</span>
           <select className="company-input cp-input" value={agent.effort ?? ""} disabled={busy}
             onChange={e => void store.getState().updateAgent(agent.id, { effort: e.target.value || null })}>
             {efforts.map(e => <option key={e ?? "default"} value={e ?? ""}>{e ? t(`panel.effort.${e}`) : t("panel.effortDefault")}</option>)}
           </select>
-        </label>
+        </label>}
         <button className="set-btn" disabled={busy || agent.status === "running"}
           onClick={() => void store.getState().updateAgent(agent.id, { status: agent.status === "paused" ? "idle" : "paused" })}>
           {agent.status === "paused" ? t("panel.resume") : t("panel.pause")}
@@ -391,7 +405,7 @@ function AgentCard({ agent }: { agent: AgentView }) {
       <ErrorLine error={error} />
 
       <AgentSkills agent={agent} busy={busy} />
-      <AgentChats agent={agent} />
+      {agent.engine === "native" && <AgentChats agent={agent} />}
       <AgentTasks agent={agent} />
     </section>
   );
@@ -488,6 +502,9 @@ function TaskRow({ task, compact = false }: { task: TaskView; compact?: boolean 
   const assignee = usePanel(s => s.panel?.agents.find(a => a.id === task.assigneeAgentId) ?? null);
   const [open, setOpen] = useState(false);
   const detail = task.result ?? task.body;
+  const isWorker = assignee !== null && assignee.engine !== "native";
+  const events = usePanel(s => s.taskEvents[task.id]);
+  const toggle = () => { if (!open && isWorker) void store.getState().loadTaskEvents(task.id); setOpen(!open); };
   return (
     <li className="company-row cp-task">
       <div className="company-meta">
@@ -499,9 +516,10 @@ function TaskRow({ task, compact = false }: { task: TaskView; compact?: boolean 
           {formatWhen(locale, task.updatedAt, "")}
           {task.note ? ` · ${task.note}` : ""}
         </div>
-        {detail && (
-          <button className="cp-link" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? t("panel.taskHide") : t("panel.taskShow")}</button>
+        {(detail || isWorker) && (
+          <button className="cp-link" aria-expanded={open} onClick={toggle}>{open ? t("panel.taskHide") : t("panel.taskShow")}</button>
         )}
+        {open && isWorker && events && events.length > 0 && <TaskEvents events={events} />}
         {open && detail && <div className="cp-task-detail"><Markdown source={detail} /></div>}
         <ErrorLine error={error} />
       </div>
@@ -521,6 +539,106 @@ function TaskRow({ task, compact = false }: { task: TaskView; compact?: boolean 
         )}
       </div>
     </li>
+  );
+}
+
+/** Plan 3.1: what a CLI employee did — plan, tool calls, diffs, approvals — in order. */
+function TaskEvents({ events }: { events: TaskEventView[] }) {
+  const { t } = useEnv();
+  const [diff, setDiff] = useState<number | null>(null);
+  return (
+    <div className="cp-events">
+      <div className="rail-section-label">{t("panel.eventsTitle")}</div>
+      <ul className="cp-plain">
+        {events.map(e => {
+          switch (e.kind) {
+            case "plan": return <li key={e.seq} className="cp-ev"><span className="cp-ev-k">≡</span>{e.entries.map((x, i) => <span key={i} className={x.done ? "cp-dim" : ""}>{x.done ? "✓ " : "· "}{x.content}{i < e.entries.length - 1 ? "  " : ""}</span>)}</li>;
+            case "tool_call": return <li key={e.seq} className="cp-ev"><span className="cp-ev-k">▸</span><span className="mono">{e.tool}</span> · {e.title}{e.paths.length ? <span className="mono cp-dim"> · {e.paths.join(", ")}</span> : null}</li>;
+            case "tool_update": return e.status === "completed" || e.status === "failed"
+              ? <li key={e.seq} className={`cp-ev ${e.status === "failed" ? "cp-error" : "cp-dim"}`}><span className="cp-ev-k" />{e.status}{e.text ? ` · ${e.text.split("\n")[0].slice(0, 160)}` : ""}</li> : null;
+            case "diff": return (
+              <li key={e.seq} className="cp-ev">
+                <span className="cp-ev-k">±</span>
+                <button className="cp-link mono" aria-expanded={diff === e.seq} onClick={() => setDiff(diff === e.seq ? null : e.seq)}>{e.path}</button>
+                <span className="mono cp-dim"> · {e.isNew ? t("panel.eventsNewFile") : t("panel.eventsLines", { added: String(e.added), removed: String(e.removed) })}</span>
+                {diff === e.seq && <pre className="cp-md-pre mono cp-diff">{e.newText}</pre>}
+              </li>
+            );
+            case "permission": return <li key={e.seq} className={`cp-ev ${e.decision === "allow" ? "" : "cp-error"}`}><span className="cp-ev-k">{e.decision === "allow" ? "✓" : "✗"}</span><span className="mono">{e.tool}</span> · {e.title} <span className="cp-dim">({t(`panel.eventsBy.${e.by === "user" || e.by === "timeout" ? e.by : "policy"}`)})</span></li>;
+            case "message": return null;
+          }
+        })}
+      </ul>
+    </div>
+  );
+}
+
+/** Plan 3.1: permissions CLI employees are waiting for. */
+function Approvals() {
+  const { t, locale, store } = useEnv();
+  const approvals = usePanel(s => s.approvals);
+  const busy = usePanel(s => s.approvalBusy);
+  const error = usePanel(s => s.approvalError);
+  const agents = usePanel(s => s.panel?.agents ?? NONE);
+  if (!approvals.length && !error) return null;
+  return (
+    <section className="cp-section cp-approvals" aria-live="polite">
+      <div className="rail-section-label">{t("panel.approvalsTitle")}</div>
+      <ErrorLine error={error} />
+      <ul className="cp-plain">
+        {approvals.map(a => (
+          <li key={a.id} className="company-row">
+            <div className="company-meta">
+              <div className="company-name"><span className="cp-badge mono">{a.tool}</span> {a.title}</div>
+              <div className="company-sub mono">
+                {agents.find(x => x.id === a.agentId)?.name ?? "—"}{a.paths.length ? ` · ${a.paths.join(", ")}` : ""} · {formatWhen(locale, a.createdAt, "")}
+              </div>
+            </div>
+            <div className="cp-inline">
+              <button className="set-btn" disabled={busy[a.id]} onClick={() => void store.getState().decideApproval(a.id, "allow")}>{t("panel.approvalsAllow")}</button>
+              <button className="set-btn" disabled={busy[a.id]} onClick={() => void store.getState().decideApproval(a.id, "reject")}>{t("panel.approvalsReject")}</button>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/** Plan 3.1: hire the user's own Claude Code, Codex or Gemini CLI. */
+function HireWorker() {
+  const { t, store } = useEnv();
+  const busy = usePanel(s => s.workerBusy);
+  const error = usePanel(s => s.workerError);
+  const [open, setOpen] = useState(false);
+  const [engine, setEngine] = useState<string>(WORKER_ENGINES[0]);
+  const [workdir, setWorkdir] = useState("");
+  const [name, setName] = useState("");
+  const [policy, setPolicy] = useState<string>("ask");
+  if (!open) return <button className="cp-link" onClick={() => setOpen(true)}>{t("panel.workerHire")}</button>;
+  const hire = async () => {
+    if (await store.getState().hireWorker({ engine, workdir: workdir.trim(), approvalPolicy: policy, ...(name.trim() ? { name: name.trim() } : {}) })) { setOpen(false); setWorkdir(""); setName(""); }
+  };
+  return (
+    <div className="cp-card cp-field">
+      <div className="rail-section-label">{t("panel.workerHire")}</div>
+      <div className="cp-inline">
+        <select className="company-input cp-input" aria-label={t("panel.workerLabel")} value={engine} disabled={busy} onChange={e => setEngine(e.target.value)}>
+          {WORKER_ENGINES.map(x => <option key={x} value={x}>{x}</option>)}
+        </select>
+        <input className="company-input cp-input" dir="ltr" aria-label={t("panel.workerFolder")} placeholder={t("panel.workerFolder")} value={workdir} disabled={busy} onChange={e => setWorkdir(e.target.value)} />
+        <input className="company-input cp-input" aria-label={t("panel.workerName")} placeholder={t("panel.workerName")} value={name} disabled={busy} onChange={e => setName(e.target.value)} />
+        <select className="company-input cp-input" aria-label={t("panel.workerPolicy")} value={policy} disabled={busy} onChange={e => setPolicy(e.target.value)}>
+          {APPROVAL_POLICIES.map(p => <option key={p} value={p}>{t(`panel.policy.${p}`)}</option>)}
+        </select>
+      </div>
+      <span className="cp-hint">{t("panel.workerFolderHint")}</span>
+      <div className="cp-inline">
+        <button className="set-btn" disabled={busy || !workdir.trim()} onClick={() => void hire()}>{t("panel.workerHireButton")}</button>
+        <button className="set-btn" disabled={busy} onClick={() => setOpen(false)}>{t("panel.cancel")}</button>
+      </div>
+      <ErrorLine error={error} />
+    </div>
   );
 }
 
@@ -754,7 +872,9 @@ function Ready() {
         </section>
         {selected ? <AgentCard agent={selected} /> : <div className="cp-card cp-sub cp-placeholder">{t("panel.selectAgent")}</div>}
       </div>
+      <Approvals />
       <Tasks />
+      <HireWorker />
       <Routines />
       <FindingsView />
       <Activity />
