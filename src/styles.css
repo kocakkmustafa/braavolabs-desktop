@@ -1747,8 +1747,8 @@ textarea {
 .cp-task-failed { color: var(--molten); border-color: var(--molten); }
 .cp-task-cancelled { color: var(--text-dim); border-style: dashed; }
 .cp-skills li { font-size: 0.75rem; padding: 2px 0; }
-.cp-check { display: flex; align-items: baseline; gap: 6px; cursor: pointer; overflow-wrap: anywhere; }
-.cp-check input { flex: none; }
+.cp-skills .cp-check { display: flex; align-items: center; gap: 6px; cursor: pointer; overflow-wrap: anywhere; font-size: inherit; }
+.cp-skills .cp-check input { flex: none; margin: 0; }
 /* Plan 5.1: the Braavo browser pane. */
 .bp-root { margin-top: 18px; display: flex; flex-direction: column; gap: 8px; }
 .bp-url { flex: 1; min-width: 12rem; }

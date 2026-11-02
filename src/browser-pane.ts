@@ -12,6 +12,7 @@ import type { Translator } from "./i18n";
 export type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 
 export const PAGE_TEXT_MAX = 20_000;
+const BLOCKS = "p,div,li,dt,dd,tr,h1,h2,h3,h4,h5,h6,section,article,header,footer,nav,main,aside,blockquote,pre,table,ul,ol,figcaption";
 
 /** Visible text of a page's HTML: no scripts, styles, templates or hidden elements (a common injection carrier). */
 export function pageText(html: string, parse: (html: string) => Document = h => new DOMParser().parseFromString(h, "text/html")): { title: string; text: string } {
@@ -21,7 +22,10 @@ export function pageText(html: string, parse: (html: string) => Document = h => 
     if (/display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0/i.test(n.getAttribute("style") ?? "")) n.remove();
   });
   const title = parse(html).title.replace(/\s+/g, " ").trim().slice(0, 200);
-  const text = (doc.body?.innerText ?? doc.body?.textContent ?? "")
+  // A parsed document is never laid out, so innerText has no line breaks: mark block ends by hand.
+  doc.querySelectorAll("br").forEach(n => n.replaceWith(doc.createTextNode("\n")));
+  doc.querySelectorAll(BLOCKS).forEach(n => n.append(doc.createTextNode("\n")));
+  const text = (doc.body?.textContent ?? "")
     .replace(/[​-‏‪-‮⁠-⁤﻿]/g, "")
     .split("\n").map(l => l.replace(/\s+/g, " ").trim()).filter(Boolean).join("\n");
   return { title, text };
