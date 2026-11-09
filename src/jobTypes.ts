@@ -1,7 +1,7 @@
 /**
  * Platform job contract mirror (BRA-P0-04g).
  * Source of truth: ventures/braavolabs/platform/packages/core/src/types/job.ts
- * Platform commit: 4eac364e6d35457b8e5a262cec590843cc90cf1d
+ * Platform commit: 34d05676b3014380c99dae249f0b8ffc867bdcbe (last commit touching job.ts)
  * Keep byte-for-byte semantically identical; update both together.
  */
 
@@ -53,6 +53,24 @@ export interface JobReceipt {
   contentHash: string;
   /** ISO 8601 */
   createdAt: string;
+}
+
+/** Row of GET /runs `runs[]` (narrow select + computed bucket). */
+export interface JobRunRow {
+  id: string;
+  pipelineId: string;
+  status: string;
+  state: JobState | null;
+  resultStatus: ResultStatus | null;
+  trigger?: string | null;
+  costUsd?: number | string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  heartbeatAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  pipeline?: { id: string; name: string; company?: { id: string; name: string } | null } | null;
+  bucket: InboxBucket | null;
 }
 
 export const INBOX_BUCKETS = ["working", "needs_approval", "done", "stuck"] as const;

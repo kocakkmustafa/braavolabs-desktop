@@ -21,7 +21,7 @@ import { withinRequestBudget } from "./request-budget";
  *   GET  /memory?companyId=…  → company-scoped memory rows (right-inspector panel)
  */
 import { type Config, saveConfig } from "./config";
-import type { InboxBucket, JobReceipt } from "./jobTypes";
+import type { InboxBucket, JobReceipt, JobRunRow } from "./jobTypes";
 import { parseCompareSelectionOptions, type CompareSelectionOptions, type ModelSelection } from "./compare-selection";
 
 export class ApiError extends Error {
@@ -280,19 +280,26 @@ export async function apiFetchWithHeaders(
 // ── Jobs inbox contract (BRA-P0-04g; platform ADR-0003) ─────────────────────
 type JobsOpts = { fetchImpl?: FetchLike; save?: (c: Config) => void | Promise<void>; signal?: AbortSignal };
 
-/** GET /runs?bucket=&cursor=&limit= — body is the row array; next page cursor is the X-Next-Cursor header. */
+/**
+ * GET /runs?bucket=&cursor=&limit= — platform returns `{ runs, nextCursor }` (no X-Next-Cursor header).
+ * A bare array + X-Next-Cursor header is accepted only for backward compatibility.
+ */
 export async function listRuns(
   cfg: Config,
   q: { bucket?: InboxBucket; cursor?: string; limit?: number } = {},
   o: JobsOpts = {},
-): Promise<{ items: any[]; nextCursor: string | null }> {
+): Promise<{ items: JobRunRow[]; nextCursor: string | null }> {
   const qs = new URLSearchParams();
   if (q.bucket) qs.set("bucket", q.bucket);
   if (q.cursor) qs.set("cursor", q.cursor);
   if (q.limit !== undefined) qs.set("limit", String(q.limit));
   const query = qs.toString();
   const { body, headers } = await apiFetchWithHeaders(`/runs${query ? `?${query}` : ""}`, { cfg, ...o });
-  return { items: Array.isArray(body) ? body : [], nextCursor: headers.get("X-Next-Cursor") };
+  if (Array.isArray(body)) return { items: body, nextCursor: headers.get("X-Next-Cursor") };
+  return {
+    items: Array.isArray(body?.runs) ? body.runs : [],
+    nextCursor: typeof body?.nextCursor === "string" ? body.nextCursor : headers.get("X-Next-Cursor"),
+  };
 }
 
 /**
@@ -320,7 +327,13 @@ export async function listApprovals(
 
 /** GET /runs/:id/receipt — 404 (run or receipt missing) throws ApiError. */
 export async function getRunReceipt(cfg: Config, runId: string, o: JobsOpts = {}): Promise<JobReceipt> {
-  return apiFetch(`/runs/${encodeURIComponent(runId)}/receipt`, { cfg, ...o });
+  const r = await apiFetch(`/runs/${encodeURIComponent(runId)}/receipt`, { cfg, ...o });
+  const str = (v: unknown) => typeof v === "string";
+  if (!r || typeof r !== "object" || !str(r.id) || !str(r.runId) || !str(r.outcome) || !str(r.contentHash) ||
+      !str(r.createdAt) || !Array.isArray(r.evidence) || !Array.isArray(r.approvalIds)) {
+    throw new ApiError(502, "Invalid receipt response");
+  }
+  return r as JobReceipt;
 }
 
 // ── typed command wrappers ──────────────────────────────────────────────────
