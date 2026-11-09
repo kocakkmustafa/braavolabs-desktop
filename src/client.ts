@@ -21,6 +21,7 @@ import { withinRequestBudget } from "./request-budget";
  *   GET  /memory?companyId=…  → company-scoped memory rows (right-inspector panel)
  */
 import { type Config, saveConfig } from "./config";
+import type { InboxBucket, JobReceipt } from "./jobTypes";
 import { parseCompareSelectionOptions, type CompareSelectionOptions, type ModelSelection } from "./compare-selection";
 
 export class ApiError extends Error {
@@ -76,6 +77,8 @@ export interface RequestOpts {
   save?: (c: Config) => void | Promise<void>;
   /** Injectable for tests; defaults to global fetch. */
   fetchImpl?: FetchLike;
+  /** Receives the FINAL response headers (after any refresh replay) of a successful request. */
+  onHeaders?: (headers: any) => void;
 }
 
 export interface RawResult {
@@ -255,10 +258,69 @@ export async function apiFetch(path: string, opts: RequestOpts): Promise<any> {
     throw new ApiError(res.status, b.error ?? b.message ?? res.statusText);
   }
   if (opts.stream) return res;
+  opts.onHeaders?.(res.headers);
   if (res.status === 204) return null;
   const body = await res.json();
   assertSession(cfg, owner);
   return body;
+}
+
+/** Like `apiFetch` but also returns the response headers (same errors: non-2xx throws ApiError). */
+export async function apiFetchWithHeaders(
+  path: string,
+  opts: Omit<RequestOpts, "onHeaders" | "raw" | "stream">,
+): Promise<{ body: any; headers: { get(name: string): string | null } }> {
+  let seen: any;
+  const body = await apiFetch(path, { ...opts, onHeaders: h => { seen = h; } });
+  const get = (name: string): string | null =>
+    typeof seen?.get === "function" ? (seen.get(name) ?? null) : null;
+  return { body, headers: { get } };
+}
+
+// ── Jobs inbox contract (BRA-P0-04g; platform ADR-0003) ─────────────────────
+type JobsOpts = { fetchImpl?: FetchLike; save?: (c: Config) => void | Promise<void>; signal?: AbortSignal };
+
+/** GET /runs?bucket=&cursor=&limit= — body is the row array; next page cursor is the X-Next-Cursor header. */
+export async function listRuns(
+  cfg: Config,
+  q: { bucket?: InboxBucket; cursor?: string; limit?: number } = {},
+  o: JobsOpts = {},
+): Promise<{ items: any[]; nextCursor: string | null }> {
+  const qs = new URLSearchParams();
+  if (q.bucket) qs.set("bucket", q.bucket);
+  if (q.cursor) qs.set("cursor", q.cursor);
+  if (q.limit !== undefined) qs.set("limit", String(q.limit));
+  const query = qs.toString();
+  const { body, headers } = await apiFetchWithHeaders(`/runs${query ? `?${query}` : ""}`, { cfg, ...o });
+  return { items: Array.isArray(body) ? body : [], nextCursor: headers.get("X-Next-Cursor") };
+}
+
+/**
+ * GET /approvals?groupBy=run&cursor= — with groupBy=run the platform returns
+ * `{ groups, nextCursor }` in the body; flat lists return an array + X-Next-Cursor.
+ */
+export async function listApprovals(
+  cfg: Config,
+  q: { groupBy?: "run"; cursor?: string; limit?: number } = {},
+  o: JobsOpts = {},
+): Promise<{ groups: any[]; items: any[]; nextCursor: string | null }> {
+  const qs = new URLSearchParams();
+  if (q.groupBy) qs.set("groupBy", q.groupBy);
+  if (q.cursor) qs.set("cursor", q.cursor);
+  if (q.limit !== undefined) qs.set("limit", String(q.limit));
+  const query = qs.toString();
+  const { body, headers } = await apiFetchWithHeaders(`/approvals${query ? `?${query}` : ""}`, { cfg, ...o });
+  if (Array.isArray(body)) return { groups: [], items: body, nextCursor: headers.get("X-Next-Cursor") };
+  return {
+    groups: Array.isArray(body?.groups) ? body.groups : [],
+    items: [],
+    nextCursor: typeof body?.nextCursor === "string" ? body.nextCursor : headers.get("X-Next-Cursor"),
+  };
+}
+
+/** GET /runs/:id/receipt — 404 (run or receipt missing) throws ApiError. */
+export async function getRunReceipt(cfg: Config, runId: string, o: JobsOpts = {}): Promise<JobReceipt> {
+  return apiFetch(`/runs/${encodeURIComponent(runId)}/receipt`, { cfg, ...o });
 }
 
 // ── typed command wrappers ──────────────────────────────────────────────────
