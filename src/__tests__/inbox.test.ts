@@ -67,6 +67,36 @@ describe("decider", () => {
       expect(posts).toHaveLength(0);
     }
   });
+  it("status/expiry re-check: expired, non-PENDING, missing status all refuse with gone; no POST", async () => {
+    const now = () => Date.parse("2026-11-14T12:00:00Z");
+    const cases: any[] = [
+      { ...A, expiresAt: "2026-11-14T11:59:59Z" },
+      { ...A, expiresAt: "garbage" },
+      { ...A, status: "APPROVED" },
+      { ...A, status: "REJECTED" },
+      { ...A, status: "EXPIRED" },
+    ];
+    const noStatus: any = { ...A }; delete noStatus.status;
+    for (const cur of cases) {
+      const { fetchImpl, posts } = platform([cur]);
+      const d = createDecider({ cfg: cfg(), fetchImpl, isOnline: () => true, now });
+      expect(await d.decide(A, "APPROVED")).toEqual({ ok: false, reason: "gone" });
+      expect(posts).toHaveLength(0);
+    }
+    const { fetchImpl, posts } = platform([noStatus]);
+    const d = createDecider({ cfg: cfg(), fetchImpl, isOnline: () => true, now });
+    expect(await d.decide(noStatus, "APPROVED")).toEqual({ ok: false, reason: "gone" });
+    expect(posts).toHaveLength(0);
+    const ok = platform([{ ...A, expiresAt: "2026-11-15T00:00:00Z" }]);
+    const d2 = createDecider({ cfg: cfg(), fetchImpl: ok.fetchImpl, isOnline: () => true, now });
+    expect(await d2.decide({ ...A, expiresAt: "2026-11-15T00:00:00Z" }, "APPROVED")).toEqual({ ok: true, decision: "APPROVED" });
+  });
+  it("reject is not blocked by an expired/decided record", async () => {
+    const { fetchImpl, posts } = platform([{ ...A, status: "APPROVED" }]);
+    const d = createDecider({ cfg: cfg(), fetchImpl, isOnline: () => true });
+    expect(await d.decide(A, "REJECTED")).toEqual({ ok: true, decision: "REJECTED" });
+    expect(posts).toHaveLength(1);
+  });
   it("reject is always allowed without re-read", async () => {
     const { fetchImpl, posts } = platform([]);
     const d = createDecider({ cfg: cfg(), fetchImpl, isOnline: () => true });

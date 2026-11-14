@@ -77,6 +77,7 @@ export function approvalFingerprint(a: PlatformApproval): string {
     id: a.id,
     runId: a.runId,
     type: a.type ?? null,
+    status: a.status ?? null,
     description: a.description ?? null,
     amountUsd: a.amountUsd === undefined || a.amountUsd === null ? null : Number(a.amountUsd),
     toolName: a.metadata?.toolName ?? null,
@@ -99,6 +100,16 @@ export interface DecideDeps {
   fetchImpl?: FetchLike;
   save?: (c: Config) => void | Promise<void>;
   maxPages?: number;
+  /** Injectable clock (ms) for the expiry check. */
+  now?: () => number;
+}
+
+/** Fail-closed: status must be exactly PENDING; expiresAt, if present, must parse and be in the future. */
+function isOpenNow(a: PlatformApproval, nowMs: number): boolean {
+  if (a.status !== "PENDING") return false;
+  if (a.expiresAt === undefined || a.expiresAt === null) return true;
+  const exp = Date.parse(a.expiresAt);
+  return Number.isFinite(exp) && exp > nowMs;
 }
 
 const defaultOnline = (): boolean => {
@@ -133,7 +144,7 @@ export function createDecider(d: DecideDeps) {
     try {
       if (decision === "APPROVED") {
         const now = await fetchPending(seen.id, d);
-        if (!now) return { ok: false, reason: "gone" };
+        if (!now || !isOpenNow(now, d.now?.() ?? Date.now())) return { ok: false, reason: "gone" };
         if (approvalFingerprint(now) !== approvalFingerprint(seen)) return { ok: false, reason: "changed" };
       }
       await decideApproval(
