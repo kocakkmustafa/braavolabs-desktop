@@ -102,6 +102,15 @@ export interface DecideDeps {
   maxPages?: number;
   /** Injectable clock (ms) for the expiry check. */
   now?: () => number;
+  /** Per-decision deadline (default 15 s). On expiry nothing is approved and the id is released. */
+  timeoutMs?: number;
+}
+
+const DEFAULT_TIMEOUT_MS = 15_000;
+
+function isNetworkFailure(e: unknown): boolean {
+  const name = (e as { name?: string } | null)?.name;
+  return e instanceof TypeError || name === "AbortError" || name === "TimeoutError";
 }
 
 /** Fail-closed: status must be exactly PENDING; expiresAt, if present, must parse and be in the future. */
@@ -118,10 +127,10 @@ const defaultOnline = (): boolean => {
 };
 
 /** Re-read the pending approval by id (paged). null = not pending any more. */
-async function fetchPending(id: string, d: DecideDeps): Promise<PlatformApproval | null> {
+async function fetchPending(id: string, d: DecideDeps, signal?: AbortSignal): Promise<PlatformApproval | null> {
   let cursor: string | undefined;
   for (let page = 0; page < (d.maxPages ?? 5); page++) {
-    const r = await listApprovals(d.cfg, { limit: 100, cursor }, { fetchImpl: d.fetchImpl, save: d.save });
+    const r = await listApprovals(d.cfg, { limit: 100, cursor }, { fetchImpl: d.fetchImpl, save: d.save, signal });
     const hit = r.items.find((a: PlatformApproval) => a.id === id);
     if (hit) return hit;
     if (!r.nextCursor) return null;
@@ -141,9 +150,10 @@ export function createDecider(d: DecideDeps) {
   async function run(seen: PlatformApproval, decision: "APPROVED" | "REJECTED", note?: string): Promise<DecideOutcome> {
     const online = d.isOnline ?? defaultOnline;
     if (!online()) return { ok: false, reason: "offline" }; // (c) fail-closed, no request
+    const signal = AbortSignal.timeout(d.timeoutMs ?? DEFAULT_TIMEOUT_MS);
     try {
       if (decision === "APPROVED") {
-        const now = await fetchPending(seen.id, d);
+        const now = await fetchPending(seen.id, d, signal);
         if (!now || !isOpenNow(now, d.now?.() ?? Date.now())) return { ok: false, reason: "gone" };
         if (approvalFingerprint(now) !== approvalFingerprint(seen)) return { ok: false, reason: "changed" };
       }
@@ -151,7 +161,7 @@ export function createDecider(d: DecideDeps) {
         d.cfg,
         seen.id,
         { decision, ...(note ? { note } : {}) },
-        { fetchImpl: d.fetchImpl, save: d.save },
+        { fetchImpl: d.fetchImpl, save: d.save, signal },
       );
       settled.add(seen.id);
       return { ok: true, decision };
@@ -161,7 +171,8 @@ export function createDecider(d: DecideDeps) {
         if (e.status === 404) return { ok: false, reason: "gone", message: e.message };
         return { ok: false, reason: "error", message: e.message };
       }
-      return { ok: false, reason: "offline" }; // network failure: never approve locally
+      // Network failure / timeout: never approve locally. Anything else (e.g. unparseable 2xx): unknown outcome.
+      return isNetworkFailure(e) ? { ok: false, reason: "offline" } : { ok: false, reason: "error" };
     }
   }
 
@@ -171,7 +182,10 @@ export function createDecider(d: DecideDeps) {
       if (settled.has(seen.id)) return Promise.resolve({ ok: false, reason: "already" });
       const cur = inflight.get(seen.id);
       if (cur) return cur;
-      const p = run(seen, decision, note).finally(() => inflight.delete(seen.id));
+      const ms = d.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<DecideOutcome>(r => { timer = setTimeout(() => r({ ok: false, reason: "offline" }), ms + 250); });
+      const p = Promise.race([run(seen, decision, note), deadline]).finally(() => clearTimeout(timer)).finally(() => inflight.delete(seen.id));
       inflight.set(seen.id, p);
       return p;
     },
@@ -183,11 +197,11 @@ export type BucketMap = Record<InboxBucket, JobRunRow[]>;
 
 export async function loadBuckets(
   cfg: Config,
-  o: { fetchImpl?: FetchLike; save?: (c: Config) => void | Promise<void>; limit?: number } = {},
+  o: { fetchImpl?: FetchLike; save?: (c: Config) => void | Promise<void>; limit?: number; signal?: AbortSignal } = {},
 ): Promise<BucketMap> {
   const out = {} as BucketMap;
   await Promise.all(INBOX_BUCKETS.map(async b => {
-    out[b] = (await listRuns(cfg, { bucket: b, limit: o.limit ?? 25 }, { fetchImpl: o.fetchImpl, save: o.save })).items;
+    out[b] = (await listRuns(cfg, { bucket: b, limit: o.limit ?? 25 }, { fetchImpl: o.fetchImpl, save: o.save, signal: o.signal })).items;
   }));
   return out;
 }

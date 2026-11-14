@@ -29,7 +29,7 @@ import {
 } from "./client";
 import { performSignOut } from "./session";
 import { isInboxEnabled } from "./inbox";
-import { mountInbox } from "./inbox-ui";
+import { disposeActiveInbox, mountInbox } from "./inbox-ui";
 import { resolvePanelTransport } from "./company-panel/api";
 import type { CompanyPanelHandle } from "./company-panel/mount";
 import {
@@ -181,6 +181,7 @@ function runWorkspaceTeardown(): void {
   dispose?.();
   disposeMotionPreference?.();
   disposeMotionPreference = null;
+  disposeActiveInbox();
   settleAllApprovals({ approved: false });
 }
 
@@ -1224,8 +1225,8 @@ export function renderWorkspace(deps: UiDeps): void {
   settingsBtn.addEventListener("click", () => setSettings(true));
   // BRA-P0-04i: jobs inbox, behind a default-OFF flag (bv.flags.jobsInbox = "1").
   if (isInboxEnabled()) {
-    const inbox = mountInbox(root, cfg, deps.persist);
-    const inboxBtn = el("button", "tb-settings", "Gelen kutusu");
+    const inbox = mountInbox(root, cfg, t, deps.persist);
+    const inboxBtn = el("button", "tb-settings", t("inbox.title"));
     inboxBtn.addEventListener("click", () => inbox.open());
     titlebar.insertBefore(inboxBtn, settingsBtn);
   }

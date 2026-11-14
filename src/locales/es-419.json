@@ -468,5 +468,20 @@
   "computer.working": "Esperando aprobación…",
   "computer.failed": "Falló el control del equipo.",
   "computer.shotAlt": "Captura de la app permitida",
-  "computer.shotDone": "Captura tomada ({width}×{height})."
+  "computer.shotDone": "Captura tomada ({width}×{height}).",
+  "inbox.title": "Bandeja de entrada",
+  "inbox.close": "Cerrar",
+  "inbox.approve": "Aprobar",
+  "inbox.reject": "Rechazar",
+  "inbox.offline": "Sin conexión: decide cuando vuelvas a estar en línea.",
+  "inbox.changed": "El contenido cambió; no se aprobó. Actualiza y revisa de nuevo.",
+  "inbox.gone": "Esta aprobación ya no está pendiente.",
+  "inbox.already": "Esta aprobación ya fue decidida.",
+  "inbox.error": "No se pudo enviar la decisión.",
+  "inbox.empty": "Vacío",
+  "inbox.pending": "Aprobación pendiente",
+  "inbox.bucket.working": "En curso",
+  "inbox.bucket.needs_approval": "Requiere aprobación",
+  "inbox.bucket.done": "Listo",
+  "inbox.bucket.stuck": "Atascado"
 }

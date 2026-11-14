@@ -491,5 +491,20 @@
   "computer.working": "Oczekiwanie na zgodę…",
   "computer.failed": "Sterowanie komputerem nie powiodło się.",
   "computer.shotAlt": "Zrzut ekranu dozwolonej aplikacji",
-  "computer.shotDone": "Zrobiono zrzut ekranu ({width}×{height})."
+  "computer.shotDone": "Zrobiono zrzut ekranu ({width}×{height}).",
+  "inbox.title": "Skrzynka odbiorcza",
+  "inbox.close": "Zamknij",
+  "inbox.approve": "Zatwierdź",
+  "inbox.reject": "Odrzuć",
+  "inbox.offline": "Jesteś offline: zdecyduj po powrocie online.",
+  "inbox.changed": "Treść się zmieniła; nie zatwierdzono. Odśwież i sprawdź ponownie.",
+  "inbox.gone": "To zatwierdzenie nie oczekuje już na decyzję.",
+  "inbox.already": "Decyzja w tej sprawie już zapadła.",
+  "inbox.error": "Nie udało się wysłać decyzji.",
+  "inbox.empty": "Pusto",
+  "inbox.pending": "Oczekujące zatwierdzenie",
+  "inbox.bucket.working": "W toku",
+  "inbox.bucket.needs_approval": "Wymaga zatwierdzenia",
+  "inbox.bucket.done": "Gotowe",
+  "inbox.bucket.stuck": "Utknęło"
 }

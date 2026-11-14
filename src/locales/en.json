@@ -468,5 +468,20 @@
   "computer.working": "Waiting for approval…",
   "computer.failed": "Computer control failed.",
   "computer.shotAlt": "Screenshot of the allowed app",
-  "computer.shotDone": "Screenshot taken ({width}×{height})."
+  "computer.shotDone": "Screenshot taken ({width}×{height}).",
+  "inbox.title": "Inbox",
+  "inbox.close": "Close",
+  "inbox.approve": "Approve",
+  "inbox.reject": "Reject",
+  "inbox.offline": "You are offline: decide once you are back online.",
+  "inbox.changed": "Content changed; not approved. Refresh and look again.",
+  "inbox.gone": "This approval is no longer pending.",
+  "inbox.already": "This approval was already decided.",
+  "inbox.error": "The decision could not be sent.",
+  "inbox.empty": "Empty",
+  "inbox.pending": "Pending approval",
+  "inbox.bucket.working": "Working",
+  "inbox.bucket.needs_approval": "Needs approval",
+  "inbox.bucket.done": "Done",
+  "inbox.bucket.stuck": "Stuck"
 }

@@ -491,5 +491,20 @@
   "computer.working": "Menunggu persetujuan…",
   "computer.failed": "Kontrol komputer gagal.",
   "computer.shotAlt": "Tangkapan layar aplikasi yang diizinkan",
-  "computer.shotDone": "Tangkapan layar diambil ({width}×{height})."
+  "computer.shotDone": "Tangkapan layar diambil ({width}×{height}).",
+  "inbox.title": "Kotak masuk",
+  "inbox.close": "Tutup",
+  "inbox.approve": "Setujui",
+  "inbox.reject": "Tolak",
+  "inbox.offline": "Anda offline: putuskan setelah kembali online.",
+  "inbox.changed": "Konten berubah; tidak disetujui. Muat ulang dan periksa lagi.",
+  "inbox.gone": "Persetujuan ini tidak lagi menunggu.",
+  "inbox.already": "Persetujuan ini sudah diputuskan.",
+  "inbox.error": "Keputusan tidak dapat dikirim.",
+  "inbox.empty": "Kosong",
+  "inbox.pending": "Persetujuan tertunda",
+  "inbox.bucket.working": "Berjalan",
+  "inbox.bucket.needs_approval": "Perlu persetujuan",
+  "inbox.bucket.done": "Selesai",
+  "inbox.bucket.stuck": "Tersendat"
 }

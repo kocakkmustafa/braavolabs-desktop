@@ -468,5 +468,20 @@
   "computer.working": "En attente d’accord…",
   "computer.failed": "Le contrôle de l’ordinateur a échoué.",
   "computer.shotAlt": "Capture de l’app autorisée",
-  "computer.shotDone": "Capture prise ({width}×{height})."
+  "computer.shotDone": "Capture prise ({width}×{height}).",
+  "inbox.title": "Boîte de réception",
+  "inbox.close": "Fermer",
+  "inbox.approve": "Approuver",
+  "inbox.reject": "Refuser",
+  "inbox.offline": "Hors ligne : décidez une fois reconnecté.",
+  "inbox.changed": "Contenu modifié ; non approuvé. Actualisez et revérifiez.",
+  "inbox.gone": "Cette approbation n’est plus en attente.",
+  "inbox.already": "Cette approbation a déjà été décidée.",
+  "inbox.error": "La décision n’a pas pu être envoyée.",
+  "inbox.empty": "Vide",
+  "inbox.pending": "Approbation en attente",
+  "inbox.bucket.working": "En cours",
+  "inbox.bucket.needs_approval": "Approbation requise",
+  "inbox.bucket.done": "Terminé",
+  "inbox.bucket.stuck": "Bloqué"
 }

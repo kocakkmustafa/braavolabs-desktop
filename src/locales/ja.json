@@ -468,5 +468,20 @@
   "computer.working": "承認待ち…",
   "computer.failed": "コンピューター操作に失敗しました。",
   "computer.shotAlt": "許可したアプリのスクリーンショット",
-  "computer.shotDone": "スクリーンショットを撮りました ({width}×{height})。"
+  "computer.shotDone": "スクリーンショットを撮りました ({width}×{height})。",
+  "inbox.title": "受信トレイ",
+  "inbox.close": "閉じる",
+  "inbox.approve": "承認",
+  "inbox.reject": "却下",
+  "inbox.offline": "オフラインです。オンラインに戻ってから判断してください。",
+  "inbox.changed": "内容が変更されたため承認していません。更新して再確認してください。",
+  "inbox.gone": "この承認はすでに保留ではありません。",
+  "inbox.already": "この承認はすでに判断済みです。",
+  "inbox.error": "判断を送信できませんでした。",
+  "inbox.empty": "なし",
+  "inbox.pending": "承認待ち",
+  "inbox.bucket.working": "実行中",
+  "inbox.bucket.needs_approval": "承認が必要",
+  "inbox.bucket.done": "完了",
+  "inbox.bucket.stuck": "停止中"
 }
