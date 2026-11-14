@@ -491,5 +491,20 @@
   "computer.working": "等待批准…",
   "computer.failed": "电脑控制失败。",
   "computer.shotAlt": "允许的应用的截图",
-  "computer.shotDone": "已截图（{width}×{height}）。"
+  "computer.shotDone": "已截图（{width}×{height}）。",
+  "inbox.title": "收件箱",
+  "inbox.close": "关闭",
+  "inbox.approve": "批准",
+  "inbox.reject": "拒绝",
+  "inbox.offline": "你处于离线状态：恢复在线后再决定。",
+  "inbox.changed": "内容已变更，未批准。请刷新后重新查看。",
+  "inbox.gone": "此审批已不再待处理。",
+  "inbox.already": "此审批已有决定。",
+  "inbox.error": "无法发送决定。",
+  "inbox.empty": "空",
+  "inbox.pending": "待处理审批",
+  "inbox.bucket.working": "进行中",
+  "inbox.bucket.needs_approval": "需要审批",
+  "inbox.bucket.done": "已完成",
+  "inbox.bucket.stuck": "卡住"
 }

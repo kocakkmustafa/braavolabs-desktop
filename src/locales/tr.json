@@ -468,5 +468,20 @@
   "computer.working": "Onay bekleniyor…",
   "computer.failed": "Bilgisayar kontrolü başarısız oldu.",
   "computer.shotAlt": "İzin verilen uygulamanın ekran görüntüsü",
-  "computer.shotDone": "Ekran görüntüsü alındı ({width}×{height})."
+  "computer.shotDone": "Ekran görüntüsü alındı ({width}×{height}).",
+  "inbox.title": "Gelen kutusu",
+  "inbox.close": "Kapat",
+  "inbox.approve": "Onayla",
+  "inbox.reject": "Reddet",
+  "inbox.offline": "Çevrimdışısın: çevrimiçi olunca karar ver.",
+  "inbox.changed": "İçerik değişti; onaylanmadı. Yenile ve tekrar bak.",
+  "inbox.gone": "Bu onay artık bekleyen değil.",
+  "inbox.already": "Bu onaya zaten karar verilmiş.",
+  "inbox.error": "Karar gönderilemedi.",
+  "inbox.empty": "Boş",
+  "inbox.pending": "Bekleyen onay",
+  "inbox.bucket.working": "Çalışıyor",
+  "inbox.bucket.needs_approval": "Onay bekliyor",
+  "inbox.bucket.done": "Bitti",
+  "inbox.bucket.stuck": "Takıldı"
 }

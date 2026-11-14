@@ -491,5 +491,20 @@
   "computer.working": "मंज़ूरी का इंतज़ार…",
   "computer.failed": "कंप्यूटर नियंत्रण विफल रहा।",
   "computer.shotAlt": "अनुमत ऐप का स्क्रीनशॉट",
-  "computer.shotDone": "स्क्रीनशॉट लिया गया ({width}×{height})।"
+  "computer.shotDone": "स्क्रीनशॉट लिया गया ({width}×{height})।",
+  "inbox.title": "इनबॉक्स",
+  "inbox.close": "बंद करें",
+  "inbox.approve": "स्वीकृत करें",
+  "inbox.reject": "अस्वीकार करें",
+  "inbox.offline": "आप ऑफ़लाइन हैं: ऑनलाइन होने पर निर्णय लें।",
+  "inbox.changed": "सामग्री बदल गई; स्वीकृत नहीं हुआ। रीफ़्रेश करके फिर देखें।",
+  "inbox.gone": "यह स्वीकृति अब लंबित नहीं है।",
+  "inbox.already": "इस स्वीकृति पर पहले ही निर्णय हो चुका है।",
+  "inbox.error": "निर्णय भेजा नहीं जा सका।",
+  "inbox.empty": "खाली",
+  "inbox.pending": "लंबित स्वीकृति",
+  "inbox.bucket.working": "चल रहा है",
+  "inbox.bucket.needs_approval": "स्वीकृति चाहिए",
+  "inbox.bucket.done": "पूर्ण",
+  "inbox.bucket.stuck": "अटका"
 }

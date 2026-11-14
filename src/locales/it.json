@@ -491,5 +491,20 @@
   "computer.working": "In attesa di approvazione…",
   "computer.failed": "Controllo del computer non riuscito.",
   "computer.shotAlt": "Screenshot dell'app consentita",
-  "computer.shotDone": "Screenshot acquisito ({width}×{height})."
+  "computer.shotDone": "Screenshot acquisito ({width}×{height}).",
+  "inbox.title": "Posta in arrivo",
+  "inbox.close": "Chiudi",
+  "inbox.approve": "Approva",
+  "inbox.reject": "Rifiuta",
+  "inbox.offline": "Sei offline: decidi quando torni online.",
+  "inbox.changed": "Contenuto cambiato; non approvato. Aggiorna e ricontrolla.",
+  "inbox.gone": "Questa approvazione non è più in attesa.",
+  "inbox.already": "Su questa approvazione è già stata presa una decisione.",
+  "inbox.error": "Impossibile inviare la decisione.",
+  "inbox.empty": "Vuoto",
+  "inbox.pending": "Approvazione in attesa",
+  "inbox.bucket.working": "In corso",
+  "inbox.bucket.needs_approval": "Richiede approvazione",
+  "inbox.bucket.done": "Completato",
+  "inbox.bucket.stuck": "Bloccato"
 }

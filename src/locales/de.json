@@ -468,5 +468,20 @@
   "computer.working": "Warte auf Zustimmung…",
   "computer.failed": "Computersteuerung fehlgeschlagen.",
   "computer.shotAlt": "Bildschirmfoto der erlaubten App",
-  "computer.shotDone": "Bildschirmfoto aufgenommen ({width}×{height})."
+  "computer.shotDone": "Bildschirmfoto aufgenommen ({width}×{height}).",
+  "inbox.title": "Posteingang",
+  "inbox.close": "Schließen",
+  "inbox.approve": "Genehmigen",
+  "inbox.reject": "Ablehnen",
+  "inbox.offline": "Du bist offline: Entscheide, sobald du wieder online bist.",
+  "inbox.changed": "Inhalt geändert; nicht genehmigt. Aktualisieren und erneut prüfen.",
+  "inbox.gone": "Diese Genehmigung ist nicht mehr offen.",
+  "inbox.already": "Über diese Genehmigung wurde bereits entschieden.",
+  "inbox.error": "Die Entscheidung konnte nicht gesendet werden.",
+  "inbox.empty": "Leer",
+  "inbox.pending": "Offene Genehmigung",
+  "inbox.bucket.working": "In Arbeit",
+  "inbox.bucket.needs_approval": "Genehmigung nötig",
+  "inbox.bucket.done": "Erledigt",
+  "inbox.bucket.stuck": "Hängt"
 }

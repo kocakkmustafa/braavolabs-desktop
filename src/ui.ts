@@ -28,6 +28,8 @@ import {
   resumeCompany,
 } from "./client";
 import { performSignOut } from "./session";
+import { isInboxEnabled } from "./inbox";
+import { disposeActiveInbox, mountInbox } from "./inbox-ui";
 import { resolvePanelTransport } from "./company-panel/api";
 import type { CompanyPanelHandle } from "./company-panel/mount";
 import {
@@ -179,6 +181,7 @@ function runWorkspaceTeardown(): void {
   dispose?.();
   disposeMotionPreference?.();
   disposeMotionPreference = null;
+  disposeActiveInbox();
   settleAllApprovals({ approved: false });
 }
 
@@ -1220,6 +1223,13 @@ export function renderWorkspace(deps: UiDeps): void {
     if (open) { releaseSettingsFocus = containDialog(sheet, () => setSettings(false)); sheetClose.focus(); }
   };
   settingsBtn.addEventListener("click", () => setSettings(true));
+  // BRA-P0-04i: jobs inbox, behind a default-OFF flag (bv.flags.jobsInbox = "1").
+  if (isInboxEnabled()) {
+    const inbox = mountInbox(root, cfg, t, deps.persist);
+    const inboxBtn = el("button", "tb-settings", t("inbox.title"));
+    inboxBtn.addEventListener("click", () => inbox.open());
+    titlebar.insertBefore(inboxBtn, settingsBtn);
+  }
   sheetClose.addEventListener("click", () => setSettings(false));
   backdrop.addEventListener("click", (e) => {
     if (e.target === backdrop) setSettings(false);

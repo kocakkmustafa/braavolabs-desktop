@@ -325,6 +325,20 @@ export async function listApprovals(
   };
 }
 
+/**
+ * POST /approvals/:id/decide — body `{ decision, reason?, note? }` (platform decideSchema, BRA-P0-04i).
+ * The SEC-BRA-01 exact-action hash/nonce live server-side and are never sent by clients;
+ * the platform verifies them when the grant is consumed. 409 = already decided / expired.
+ */
+export async function decideApproval(
+  cfg: Config,
+  id: string,
+  body: { decision: "APPROVED" | "REJECTED"; reason?: string; note?: string },
+  o: JobsOpts = {},
+): Promise<any> {
+  return apiFetch(`/approvals/${encodeURIComponent(id)}/decide`, { cfg, method: "POST", body, ...o });
+}
+
 /** GET /runs/:id/receipt — 404 (run or receipt missing) throws ApiError. */
 export async function getRunReceipt(cfg: Config, runId: string, o: JobsOpts = {}): Promise<JobReceipt> {
   const r = await apiFetch(`/runs/${encodeURIComponent(runId)}/receipt`, { cfg, ...o });

@@ -468,5 +468,20 @@
   "computer.working": "بانتظار الموافقة…",
   "computer.failed": "فشل التحكم في الحاسوب.",
   "computer.shotAlt": "لقطة شاشة للتطبيق المسموح به",
-  "computer.shotDone": "تم التقاط الشاشة ({width}×{height})."
+  "computer.shotDone": "تم التقاط الشاشة ({width}×{height}).",
+  "inbox.title": "صندوق الوارد",
+  "inbox.close": "إغلاق",
+  "inbox.approve": "موافقة",
+  "inbox.reject": "رفض",
+  "inbox.offline": "أنت غير متصل: قرّر عند عودة الاتصال.",
+  "inbox.changed": "تغيّر المحتوى؛ لم تتم الموافقة. حدّث وراجع مرة أخرى.",
+  "inbox.gone": "لم تعد هذه الموافقة معلّقة.",
+  "inbox.already": "تم اتخاذ قرار بشأن هذه الموافقة بالفعل.",
+  "inbox.error": "تعذّر إرسال القرار.",
+  "inbox.empty": "فارغ",
+  "inbox.pending": "موافقة معلّقة",
+  "inbox.bucket.working": "قيد التنفيذ",
+  "inbox.bucket.needs_approval": "تحتاج إلى موافقة",
+  "inbox.bucket.done": "مكتمل",
+  "inbox.bucket.stuck": "متعثر"
 }
