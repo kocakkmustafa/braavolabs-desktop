@@ -561,18 +561,82 @@ pub fn wrap_command(argv: &[String], policy: &SandboxPolicy) -> Result<Vec<Strin
 
 /// Unsupported platform (Windows: AppContainer / Job Object wrapping is a
 /// documented follow-up) — FAIL CLOSED so the host refuses to spawn unsandboxed.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(any(not(any(target_os = "macos", target_os = "linux")), test))]
 pub const SANDBOX_UNSUPPORTED: &str =
     "OS sandbox not implemented on this platform — host must fail-closed (refuse to spawn unsandboxed)";
 
+/// Platform decision as a pure function of the OS name (`std::env::consts::OS`
+/// values) so the fail-closed table is testable on any CI runner.
+/// Only macOS (Seatbelt) and Linux (bubblewrap) have a sandbox; EVERYTHING else
+/// (windows, unknown) is `Unsupported` → shell/exec is refused.
+#[cfg(any(not(any(target_os = "macos", target_os = "linux")), test))]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum SandboxSupport {
+    Seatbelt,
+    Bubblewrap,
+    Unsupported,
+}
+
+#[cfg(any(not(any(target_os = "macos", target_os = "linux")), test))]
+pub fn sandbox_support(os: &str) -> SandboxSupport {
+    match os {
+        "macos" => SandboxSupport::Seatbelt,
+        "linux" => SandboxSupport::Bubblewrap,
+        _ => SandboxSupport::Unsupported,
+    }
+}
+
+/// Fail-closed gate for an OS name: Err(SANDBOX_UNSUPPORTED) when no sandbox.
+#[cfg(any(not(any(target_os = "macos", target_os = "linux")), test))]
+pub fn require_sandbox_for(os: &str) -> Result<SandboxSupport, String> {
+    match sandbox_support(os) {
+        SandboxSupport::Unsupported => Err(SANDBOX_UNSUPPORTED.to_string()),
+        s => Ok(s),
+    }
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn wrap_command(_argv: &[String], _policy: &SandboxPolicy) -> Result<Vec<String>, String> {
-    Err(SANDBOX_UNSUPPORTED.to_string())
+    match require_sandbox_for(std::env::consts::OS) {
+        Err(e) => Err(e),
+        Ok(_) => Err(SANDBOX_UNSUPPORTED.to_string()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sandbox_support_table_windows_and_unknown_are_unsupported() {
+        assert_eq!(sandbox_support("macos"), SandboxSupport::Seatbelt);
+        assert_eq!(sandbox_support("linux"), SandboxSupport::Bubblewrap);
+        assert_eq!(sandbox_support("windows"), SandboxSupport::Unsupported);
+        assert_eq!(sandbox_support("freebsd"), SandboxSupport::Unsupported);
+        assert_eq!(sandbox_support("Windows"), SandboxSupport::Unsupported);
+        assert_eq!(sandbox_support("WINDOWS"), SandboxSupport::Unsupported);
+        assert_eq!(sandbox_support(""), SandboxSupport::Unsupported);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_wrap_command_fails_closed() {
+        let argv = vec!["cmd".to_string(), "/c".to_string(), "echo".to_string()];
+        assert_eq!(
+            wrap_command(&argv, &policy()),
+            Err(SANDBOX_UNSUPPORTED.to_string())
+        );
+    }
+
+    #[test]
+    fn windows_shell_fails_closed_with_fixed_message() {
+        for os in ["windows", "freebsd", "unknown"] {
+            assert_eq!(require_sandbox_for(os), Err(SANDBOX_UNSUPPORTED.to_string()), "{os}");
+        }
+        assert!(SANDBOX_UNSUPPORTED.contains("fail-closed"));
+        assert_eq!(require_sandbox_for("macos"), Ok(SandboxSupport::Seatbelt));
+        assert_eq!(require_sandbox_for("linux"), Ok(SandboxSupport::Bubblewrap));
+    }
 
     const CWD: &str = "/Users/me/project";
 
