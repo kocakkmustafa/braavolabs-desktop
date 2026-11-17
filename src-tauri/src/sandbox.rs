@@ -597,7 +597,10 @@ pub fn require_sandbox_for(os: &str) -> Result<SandboxSupport, String> {
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn wrap_command(_argv: &[String], _policy: &SandboxPolicy) -> Result<Vec<String>, String> {
-    require_sandbox_for(std::env::consts::OS).map(|_| unreachable!("unsupported OS never yields a sandbox"))
+    match require_sandbox_for(std::env::consts::OS) {
+        Err(e) => Err(e),
+        Ok(_) => Err(SANDBOX_UNSUPPORTED.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -610,7 +613,19 @@ mod tests {
         assert_eq!(sandbox_support("linux"), SandboxSupport::Bubblewrap);
         assert_eq!(sandbox_support("windows"), SandboxSupport::Unsupported);
         assert_eq!(sandbox_support("freebsd"), SandboxSupport::Unsupported);
+        assert_eq!(sandbox_support("Windows"), SandboxSupport::Unsupported);
+        assert_eq!(sandbox_support("WINDOWS"), SandboxSupport::Unsupported);
         assert_eq!(sandbox_support(""), SandboxSupport::Unsupported);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_wrap_command_fails_closed() {
+        let argv = vec!["cmd".to_string(), "/c".to_string(), "echo".to_string()];
+        assert_eq!(
+            wrap_command(&argv, &policy()),
+            Err(SANDBOX_UNSUPPORTED.to_string())
+        );
     }
 
     #[test]
