@@ -2545,3 +2545,46 @@ pre, code, .changes-path, .mcp-args, .key-input { direction: ltr; unicode-bidi: 
 .reduce-motion .vc-bars i, .reduce-motion .vc-prog i, .reduce-motion .vc-badge.vc-pulse::after { animation: none !important; }
 .reduce-motion .vc-prog i { left: 35%; }
 @media (max-width: 640px) { .vc-line { flex-wrap: wrap; } .vc-bars { order: 3; flex-basis: 100%; } }
+
+/* ── BRA-UI-09: "+" ekleme menüsü ve metin dosyası ekleri (bayrak kapalıyken hiçbiri oluşturulmaz) ─────────── */
+/* Durum rengi yalnız simgede; sözcükler metin renginde (>= 4.5:1). Çerçevesiz. */
+.att-anchor { position: relative; flex: none; align-self: flex-end; }
+.att-plus {
+  display: flex; align-items: center; justify-content: center;
+  width: 2rem; height: 2rem; min-width: 2rem; min-height: 2rem; padding: 0;
+  border: 0; border-radius: 50%; background: var(--surface-2); color: var(--text-1);
+}
+.att-plus:hover, .att-plus[aria-expanded="true"] { background: var(--surface-sel); }
+.att-plus:focus-visible, .att-item:focus-visible, .att-btn:focus-visible, .att-rm:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.att-menu {
+  position: absolute; inset-inline-start: 0; bottom: calc(100% + 8px); z-index: 5; width: 300px; padding: 6px;
+  border-radius: var(--r-card); background: var(--surface-card); box-shadow: var(--shadow-pop);
+  backdrop-filter: blur(28px) saturate(1.15);
+}
+.att-menu[hidden], .att-chips[hidden], .att-note-host[hidden] { display: none; }
+.att-item { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 6px 10px; border: 0; border-radius: var(--r-ctl); background: transparent; color: var(--text-1); font-size: var(--fs-chat); text-align: start; }
+.att-item:hover, .att-item:focus-visible { background: var(--surface-sel); }
+.att-item-t { display: flex; flex-direction: column; }
+.att-item-sub { margin-top: 1px; font-size: var(--fs-caption); color: var(--text-sub); }
+.att-menu-note { padding: 6px 10px 4px; font-size: var(--fs-caption); color: var(--text-sub); }
+.att-chips { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.att-chip, .att-sent .att-chip { display: inline-flex; align-items: center; gap: 8px; min-height: 2rem; padding: 0 0 0 10px; border-radius: 6px; background: var(--surface-2); color: var(--text-1); font-size: var(--fs-small); max-width: 100%; }
+.att-sent .att-chip { padding-inline-end: 10px; }
+.att-nm { font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.att-sz { font-size: var(--fs-caption); color: var(--text-sub); flex: none; }
+.att-rm { display: inline-flex; align-items: center; justify-content: center; width: 2rem; height: 2rem; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--text-2); }
+.att-rm:hover { background: var(--surface-sel); color: var(--text-1); }
+.att-sent { display: flex; flex-wrap: wrap; gap: var(--space-2); align-self: flex-end; justify-content: flex-end; max-width: 76%; }
+.att-note { display: flex; align-items: center; gap: var(--space-3); padding: 8px 8px 8px 12px; border-radius: var(--r-card); background: var(--surface-card); color: var(--text-2); font-size: var(--fs-small); }
+.att-info { background: var(--surface-2); }
+.att-badge { display: flex; align-items: center; justify-content: center; flex: none; color: var(--text-2); }
+.att-err .att-badge { color: var(--error); }
+.att-txt { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.att-word { display: flex; align-items: center; gap: var(--space-2); font-size: var(--fs-chat); font-weight: 600; color: var(--text-1); }
+.att-st { display: inline-flex; align-items: center; height: 20px; padding: 0 7px; border-radius: 6px; background: var(--surface-1); color: var(--text-2); font-size: var(--fs-caption); font-weight: 500; }
+.att-cap { color: var(--text-2); overflow-wrap: anywhere; }
+.att-acts { display: flex; align-items: center; gap: var(--space-2); flex: none; }
+.att-btn { display: inline-flex; align-items: center; justify-content: center; height: 2rem; padding: 0 var(--space-3); border: 0; border-radius: var(--r-ctl); background: var(--surface-2); color: var(--text-1); font-size: var(--fs-small); font-weight: 500; white-space: nowrap; }
+.att-btn.att-primary { background: var(--primary); color: var(--primary-ink); }
+.att-btn.att-ghost { background: transparent; color: var(--text-2); }
+.att-btn.att-ghost:hover { background: var(--surface-2); }
