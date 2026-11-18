@@ -2506,13 +2506,13 @@ pre, code, .changes-path, .mcp-args, .key-input { direction: ltr; unicode-bidi: 
 .vc-host[hidden], .vc-strip[hidden] { display: none; }
 .vc-strip { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4); border: 0; border-radius: var(--r-card); background: var(--surface-card); }
 .vc-line { display: flex; align-items: center; gap: var(--space-3); min-height: 40px; }
-.vc-badge { position: relative; z-index: 0; flex: none; display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: 50%; background: var(--surface-2); color: var(--run); }
+.vc-badge { position: relative; z-index: 0; flex: none; display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: 50%; background: var(--surface-1); color: var(--run); }
 .vc-err .vc-badge { color: var(--error); }
 .vc-done .vc-badge { color: var(--done); }
 .vc-badge.vc-pulse::after { content: ""; position: absolute; inset: -6px; z-index: -1; border-radius: 50%; background: var(--run); opacity: 0.16; animation: vc-ring 2.4s ease-out infinite; }
 .vc-txt { display: flex; flex-direction: column; min-width: 0; }
 .vc-word { display: flex; align-items: center; gap: var(--space-2); font-size: var(--fs-chat); font-weight: 600; color: var(--text-1); }
-.vc-st { display: inline-flex; align-items: center; gap: 5px; height: 20px; padding: 0 7px; border-radius: 6px; background: var(--surface-2); color: var(--text-2); font-size: var(--fs-caption); font-weight: 500; }
+.vc-st { display: inline-flex; align-items: center; gap: 5px; height: 20px; padding: 0 7px; border-radius: 6px; background: var(--surface-1); color: var(--text-2); font-size: var(--fs-caption); font-weight: 500; }
 .vc-glyph { font-size: 0.6875rem; line-height: 1; color: var(--run); }
 .vc-err .vc-glyph { color: var(--error); }
 .vc-done .vc-glyph { color: var(--done); }
