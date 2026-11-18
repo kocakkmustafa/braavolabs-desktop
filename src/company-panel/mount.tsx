@@ -13,6 +13,8 @@ export interface CompanyPanelHandle {
   setActive(active: boolean): void;
   /** Read-only snapshot for the title-bar "Now" panel. */
   state(): PanelData;
+  /** Store changes (for the open "Now" panel); returns an unsubscribe. */
+  subscribe(listener: () => void): () => void;
   unmount(): void;
 }
 
@@ -25,6 +27,7 @@ export function mountCompanyPanel(
   root.render(<CompanyPanel t={deps.t} locale={deps.locale} store={store} />);
   return {
     state: () => store.getState(),
+    subscribe: (listener) => store.subscribe(() => listener()),
     setActive(active) { if (active) store.getState().start(); else store.getState().stop(); },
     unmount() { store.getState().stop(); root.unmount(); },
   };

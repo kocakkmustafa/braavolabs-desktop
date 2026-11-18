@@ -501,5 +501,7 @@
   "now.done": "done",
   "now.queued": "queued",
   "now.chatTurn": "Reply in progress",
-  "now.localApproval": "An approval window is waiting for your decision"
+  "now.localApproval": "An approval window is waiting for your decision",
+  "now.companyHint": "Open the Company tab to see company jobs",
+  "now.more": "+{n} more"
 }

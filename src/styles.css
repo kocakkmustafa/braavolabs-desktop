@@ -2030,9 +2030,10 @@ textarea {
 .rail-btn:hover { background: var(--surface-sel); border: 0; color: var(--text-1); }
 .rail-btn.primary { background: var(--surface-card); }
 .rail-btn:disabled { cursor: not-allowed; opacity: 0.55; }
-.rail-section-label { font-size: var(--fs-caption); letter-spacing: 0.04em; text-transform: none; color: var(--text-4); margin: var(--space-3) var(--space-2) var(--space-1); }
-.sessions-sec { flex: 1; min-height: 0; max-height: none; gap: 2px; }
+.rail-section-label { font-size: var(--fs-caption); letter-spacing: 0.04em; text-transform: none; color: var(--text-3); font-weight: 600; margin: var(--space-3) var(--space-2) var(--space-1); }
+.sessions-sec { flex: 1; min-height: 0; max-height: none; gap: 2px; padding: 3px; }
 .session-item { border-radius: var(--r-ctl); font-size: var(--fs-small); color: var(--text-2); padding: var(--space-2); }
+.session-item:focus-visible { outline-offset: -2px; }
 .session-item:hover { background: var(--surface-2); }
 .session-item.active { background: var(--surface-sel); color: var(--text-1); }
 .conn-sec { padding: 0 var(--space-2); }
@@ -2041,11 +2042,11 @@ textarea {
 .savings-card { background: var(--surface-card); border: 0; border-radius: var(--r-card); padding: var(--space-3); }
 .savings-card .rail-section-label { margin: 0 0 var(--space-1); }
 .savings-amount { font-family: var(--font-mono); font-size: var(--fs-title); color: var(--text-1); }
-.savings-sub { font-size: var(--fs-caption); color: var(--text-4); }
+.savings-sub { font-size: var(--fs-caption); color: var(--text-3); }
 .account-row { border: 0; padding: var(--space-1) 0 0; gap: var(--space-2); }
 .account-avatar { width: 28px; height: 28px; border: 0; background: var(--surface-sel); color: var(--text-1); font-size: var(--fs-caption); }
 .account-email { font-size: var(--fs-small); color: var(--text-1); }
-.account-sub { font-size: var(--fs-caption); color: var(--text-4); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-sub { font-size: var(--fs-caption); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rail-icon-btn {
   display: flex;
   align-items: center;
@@ -2111,7 +2112,10 @@ textarea {
 .now-approval .now-glyph, .now-approval .now-word { color: var(--approve); }
 .now-error .now-glyph, .now-error .now-word { color: var(--error); }
 .now-done .now-glyph, .now-done .now-word { color: var(--done); }
-.now-queue .now-glyph, .now-queue .now-word { color: var(--queue); }
+.now-queue .now-glyph { color: var(--queue); }
+.now-queue .now-word { color: var(--text-3); }
+.now-hint, .now-more { font-size: var(--fs-caption); color: var(--text-3); padding: var(--space-2) 0 0; }
+.now-pop:focus { outline: none; }
 
 /* Yazma kutusu */
 .composer { border: 0; background: transparent; padding: var(--space-3) var(--space-4) var(--space-4); gap: var(--space-2); }
@@ -2162,14 +2166,14 @@ textarea {
 :focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; }
 .locale-picker { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .locale-picker select { max-width: 100%; background: var(--obsidian); color: inherit; padding: 6px; }
-.storage-notice { font-size: 0.6875rem; color: var(--steel-400); padding: 6px; overflow-wrap: anywhere; }
+.storage-notice { font-size: 0.6875rem; color: var(--text-3); padding: 6px; overflow-wrap: anywhere; }
 .storage-notice button { margin-inline-start: 8px; }
 pre, code, .mcp-args, .changes-path { direction: ltr; unicode-bidi: isolate; text-align: start; }
 [dir="rtl"] .approve-card, [dir="rtl"] .sheet { text-align: start; }
 button, select, input { min-block-size: 32px; }
 @media (max-width: 850px) {
   .shell { grid-template-columns: minmax(140px, 180px) minmax(0, 1fr); height: auto; flex: 1; }
-  .inspector { display: flex; grid-column: 1 / -1; min-height: 220px; border-top: 1px solid var(--steel-700); }
+  .inspector { display: flex; grid-column: 1 / -1; min-height: 220px; border: 0; margin-top: var(--space-2); background: var(--surface-1); }
   .rail { max-width: none; width: auto; }
   .win { height: auto; min-height: 100vh; }
   .chat { min-height: 60vh; }

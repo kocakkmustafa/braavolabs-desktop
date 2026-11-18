@@ -501,5 +501,7 @@
   "now.done": "bitti",
   "now.queued": "sırada",
   "now.chatTurn": "Yanıt hazırlanıyor",
-  "now.localApproval": "Kararını bekleyen bir onay penceresi var"
+  "now.localApproval": "Kararını bekleyen bir onay penceresi var",
+  "now.companyHint": "Şirket işleri için Şirket sekmesini aç",
+  "now.more": "+{n} daha"
 }

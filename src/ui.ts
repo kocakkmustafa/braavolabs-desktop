@@ -1345,13 +1345,18 @@ export function renderWorkspace(deps: UiDeps): void {
     row.append(el("span", "now-glyph", NOW_GLYPH[kind]), el("span", "now-text", text), el("span", "now-word mono", t(wordKey)));
     return row;
   };
-  const renderNow = (inboxRows: Array<[NowKind, string]> = []) => {
+  let lastInboxRows: Array<[NowKind, string]> = [];
+  let nowCleanup: (() => void) | null = null;
+  const renderNow = (inboxRows: Array<[NowKind, string]> = lastInboxRows) => {
+    lastInboxRows = inboxRows;
     nowPop.replaceChildren(el("div", "now-title", t("now.title")));
     const rows: HTMLElement[] = [];
     if (dispatching) rows.push(nowRow("run", t("now.chatTurn")));
     if (openApprovals.size) rows.push(nowRow("approval", t("now.localApproval")));
-    const data = companyPanel?.state();
-    if (data) {
+    // Company data is only trustworthy while the panel is live (Company surface); otherwise say where to look.
+    const data = surface === "company" ? companyPanel?.state() : undefined;
+    if (!data) rows.push(el("div", "now-hint", t("now.companyHint")));
+    else {
       for (const a of data.approvals) rows.push(nowRow("approval", a.title));
       for (const task of data.tasks) {
         const kind: NowKind | null = task.status === "RUNNING" ? "run" : task.status === "OPEN" ? "queue" : task.status === "FAILED" ? "error" : task.status === "DONE" ? "done" : null;
@@ -1359,15 +1364,26 @@ export function renderWorkspace(deps: UiDeps): void {
       }
     }
     for (const [kind, text] of inboxRows) rows.push(nowRow(kind, text));
-    if (!rows.length) nowPop.append(el("div", "now-empty", t("now.empty")));
-    else nowPop.append(...rows.slice(0, 12));
+    const live = rows.filter(r => !r.classList.contains("now-hint"));
+    if (!live.length) nowPop.append(el("div", "now-empty", t("now.empty")));
+    else nowPop.append(...live.slice(0, 12));
+    if (live.length > 12) nowPop.append(el("div", "now-more", t("now.more", { n: live.length - 12 })));
+    if (!data) nowPop.append(rows.find(r => r.classList.contains("now-hint"))!);
   };
   const setNow = (open: boolean) => {
     nowOpen = open;
     nowBtn.setAttribute("aria-expanded", String(open));
     nowPop.style.display = open ? "" : "none";
+    nowCleanup?.(); nowCleanup = null;
     if (!open) return;
+    lastInboxRows = [];
     renderNow();
+    nowPop.focus();
+    // Redraw while open: company store changes and chat-turn start/stop (send button's disabled flips with the turn).
+    const unsub = surface === "company" ? companyPanel?.subscribe(() => renderNow()) : undefined;
+    const observer = new MutationObserver(() => renderNow());
+    observer.observe(sendBtn, { attributes: true, attributeFilter: ["disabled"] });
+    nowCleanup = () => { unsub?.(); observer.disconnect(); };
     if (!isInboxEnabled()) return;
     const seq = ++nowSeq;
     void loadBuckets(cfg, { save: deps.persist, limit: 6 }).then((buckets) => {
@@ -1382,6 +1398,8 @@ export function renderWorkspace(deps: UiDeps): void {
   };
   nowBtn.addEventListener("click", (e) => { e.stopPropagation(); setNow(!nowOpen); });
   nowPop.addEventListener("click", (e) => e.stopPropagation());
+  nowPop.tabIndex = -1;
+  nowWrap.addEventListener("focusout", (e) => { if (nowOpen && !nowWrap.contains(e.relatedTarget as Node | null)) setNow(false); });
   const onNowOutside = () => { if (nowOpen) setNow(false); };
   window.addEventListener("click", onNowOutside);
 
