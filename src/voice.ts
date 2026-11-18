@@ -28,7 +28,7 @@ interface RecognitionLike {
   start(): void; stop(): void; abort(): void;
 }
 type RecognitionCtor = new () => RecognitionLike;
-interface SynthesisLike { speak(u: unknown): void; cancel(): void; speaking: boolean }
+interface SynthesisLike { speak(u: unknown): void; cancel(): void; speaking: boolean; pause?(): void; resume?(): void }
 type UtteranceCtor = new (text: string) => { lang: string; onend: (() => void) | null; onerror: (() => void) | null };
 
 export interface VoiceEnv {
@@ -65,11 +65,11 @@ export function createVoice(env: VoiceEnv = globalThis as unknown as VoiceEnv) {
     get listening() { return active !== null; },
 
     /** Start dictation into `before`; resolves nothing — results arrive through the handlers. */
-    dictate(locale: string, before: string, h: DictationHandlers): boolean {
+    dictate(locale: string, before: string, h: DictationHandlers, opts: { continuous?: boolean } = {}): boolean {
       if (!Recognition || active) return false;
       const rec = new Recognition();
       rec.lang = speechLang(locale);
-      rec.continuous = true;
+      rec.continuous = opts.continuous ?? true;
       rec.interimResults = true;
       let finalText = "";
       let failure: { kind: DictationError; detail: string } | undefined;
@@ -107,18 +107,23 @@ export function createVoice(env: VoiceEnv = globalThis as unknown as VoiceEnv) {
     stopDictation(): void { active?.stop(); },
 
     /** Read text aloud in the app language; any earlier reading stops first. */
-    speak(text: string, locale: string, onEnd?: () => void): boolean {
+    speak(text: string, locale: string, onEnd?: () => void, onError?: () => void): boolean {
       if (!synth || !Utterance || !text.trim()) return false;
       synth.cancel();
       const u = new Utterance(text.slice(0, 20_000));
       u.lang = speechLang(locale);
       u.onend = () => onEnd?.();
-      u.onerror = () => onEnd?.();
+      u.onerror = () => (onError ?? onEnd)?.();
       synth.speak(u);
       return true;
     },
 
     stopSpeaking(): void { synth?.cancel(); },
+    /** Voice chat: pause / resume the current reading (no-op where the webview lacks them). */
+    pauseSpeaking(): void { synth?.pause?.(); },
+    resumeSpeaking(): void { synth?.resume?.(); },
+    /** Stop the microphone without waiting for a final result (voice chat end). */
+    abortDictation(): void { active?.abort(); },
     get speaking() { return Boolean(synth?.speaking); },
   };
 }
