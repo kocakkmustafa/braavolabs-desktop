@@ -2575,3 +2575,35 @@ pre, code, .changes-path, .mcp-args, .key-input { direction: ltr; unicode-bidi: 
   .set-nav-item { width: auto; flex: none; }
 }
 [dir="rtl"] .sheet .toggle.on::after { transform: translateX(-14px); }
+
+/* ── UI-03b giriş + bilgisayar kontrolü izinleri (D25, D28): çerçevesiz, ton + gölge ── */
+.login-wrap { background: radial-gradient(900px 520px at 12% 8%, var(--glow-a), transparent 70%), radial-gradient(800px 480px at 90% 95%, var(--glow-b), transparent 70%), var(--bg); }
+.login-card { width: min(380px, calc(100% - 32px)); border: 0; border-radius: var(--r-window); background: var(--glass-pop); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); box-shadow: var(--shadow-pop); padding: var(--space-7) var(--space-6); }
+.login-card h1 { font-size: var(--fs-title-lg); font-weight: 600; color: var(--text-1); gap: var(--space-3); margin-bottom: var(--space-1); }
+.login-card .brand-dot { flex: none; width: 36px; height: 36px; border-radius: var(--r-card); background: linear-gradient(140deg, rgba(217, 178, 110, 0.22), rgba(197, 182, 230, 0.22)); box-shadow: none; }
+.login-card .brand-dot::before { content: ""; display: block; width: 100%; height: 100%; background: var(--text-1); -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Cpath fill-rule='evenodd' d='M11 40V22C11 12.5 17 6 24 6C31 6 37 12.5 37 22V40ZM14 18.5H34V22H14ZM17 26.5H19.6V35.5H17ZM22.7 26.5H25.3V35.5H22.7ZM28.4 26.5H31V35.5H28.4Z'/%3E%3C/svg%3E") center / 70% no-repeat; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Cpath fill-rule='evenodd' d='M11 40V22C11 12.5 17 6 24 6C31 6 37 12.5 37 22V40ZM14 18.5H34V22H14ZM17 26.5H19.6V35.5H17ZM22.7 26.5H25.3V35.5H22.7ZM28.4 26.5H31V35.5H28.4Z'/%3E%3C/svg%3E") center / 70% no-repeat; }
+.login-card .sub { color: var(--text-3); font-size: var(--fs-small); margin-bottom: var(--space-5); }
+.login-card .locale-picker { background: transparent; padding: 0; margin-bottom: var(--space-2); font-size: var(--fs-small); color: var(--text-3); justify-content: space-between; }
+.login-card .theme-picker .set-sub { display: none; }
+.field { margin-bottom: var(--space-4); }
+.field label { color: var(--text-2); font-size: var(--fs-caption); margin-bottom: var(--space-1); }
+.field input { border: 0; background: var(--surface-sel); color: var(--text-1); border-radius: var(--r-ctl); height: var(--h-ctl-lg); padding: 0 var(--space-3); transition: background var(--dur-fast) var(--ease); }
+.field input:focus { border: 0; outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.login-btn { border: 0; background: var(--primary); color: var(--primary-ink); height: var(--h-ctl-lg); padding: 0; border-radius: var(--r-ctl); transition: filter var(--dur-fast) var(--ease); }
+.login-btn:hover:not(:disabled) { filter: brightness(0.93); }
+.login-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.login-btn:disabled { background: var(--surface-sel); color: var(--text-4); }
+.login-error { border: 0; background: var(--error-soft); color: var(--error); border-radius: var(--r-ctl); padding: var(--space-3); }
+.login-error::before { content: "■ "; }
+.login-advanced > summary { color: var(--text-3); border-radius: var(--r-chip); }
+.login-advanced > summary:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.cc-perm { border: 0; background: var(--surface-card); border-radius: var(--r-card); padding: var(--space-3) var(--space-4); }
+.cc-ok { color: var(--done); font-size: var(--fs-caption); }
+.cc-ok::before { content: "✓ "; }
+.cc-missing { color: var(--run); font-size: var(--fs-caption); }
+.cc-missing::before { content: "○ "; }
+.cc-banner { border: 0; background: var(--run-soft); color: var(--run); border-radius: var(--r-card); padding: var(--space-3) var(--space-4); }
+.cc-banner::before { content: "● "; }
+.cc-shot { border: 0; border-radius: var(--r-card); box-shadow: var(--shadow-pop); }
+.cc-app { color: var(--text-2); }
+.cc-root .set-btn { border: 0; }
