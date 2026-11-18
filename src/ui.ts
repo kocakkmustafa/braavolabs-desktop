@@ -137,6 +137,8 @@ import {
   type BrandMotion, type MotionState,
 } from "./brand-motion";
 import { createVoice } from "./voice";
+import { createVoiceChat, isVoiceChatEnabled, markVoiceChatIntroSeen, voiceChatIntroSeen, type VoiceChat } from "./voice-chat";
+import { renderIntro, renderStrip, stripView, summaryLine, vcIcon, type VcAction } from "./voice-chat-view";
 import { createBrowserPane } from "./browser-pane";
 import { createComputerPane } from "./computer-pane";
 
@@ -1077,6 +1079,8 @@ export function renderWorkspace(deps: UiDeps): void {
     clearCompareOperation(); dispatching = false; sendBtn.disabled = false;
     for (const row of thinkingMotions.keys()) removeThinking(row);
     setChatMotion("idle", t("chat.stopped"));
+    // The old run's finally will not free voice chat's lane (it no longer owns the workspace): drop a waiting sentence and listen.
+    voiceChat?.cancelTurn();
   };
   activeDispatchStopper = stopDispatch;
   const cancelCurrentCompare = () => {
@@ -1110,9 +1114,88 @@ export function renderWorkspace(deps: UiDeps): void {
       if (started) { micBtn.setAttribute("aria-pressed", "true"); micBtn.setAttribute("aria-label", t("chat.voiceStop")); ta.focus(); }
     });
   }
-  bottomRow.append(ta, enterHint, ...(micBtn ? [micBtn] : []), cancelBtn, sendBtn);
+  // BRA-UI-08: voice chat, behind a default-OFF flag (bv.flags.voiceChat = "1"). Flag off: nothing below is created.
+  let voiceChat: VoiceChat | null = null;
+  /** Token of the voice turn whose answer we are waiting for (0 = none). Per turn, so a cancelled turn's late finally cannot clear a newer one. */
+  let voiceCurrent = 0;
+  let voiceSeq = 0;
+  let waveBtn: HTMLButtonElement | null = null;
+  let vcHost: HTMLElement | null = null;
+  if (isVoiceChatEnabled()) {
+    waveBtn = el("button", "vc-wave-btn");
+    waveBtn.type = "button";
+    waveBtn.title = t("voiceChat.button");
+    waveBtn.setAttribute("aria-label", t("voiceChat.button"));
+    waveBtn.setAttribute("aria-pressed", "false");
+    waveBtn.append(vcIcon("wave", 16));
+    const strip = el("div", "vc-strip");
+    strip.hidden = true;
+    vcHost = el("div", "vc-host");
+    vcHost.append(strip);
+    let intro: HTMLElement | null = null;
+    const dismissIntro = () => { intro?.remove(); intro = null; };
+    const onAction = (id: VcAction) => {
+      const vc = voiceChat;
+      if (!vc) return;
+      if (id === "end") vc.end();
+      else if (id === "cancel") {
+        // A busy sentence is still waiting; the running reply belongs to something else: leave it alone.
+        if (!vc.model.busy) { voiceCurrent = 0; stopDispatch(); }
+        vc.cancelTurn();
+      }
+      else if (id === "pause" || id === "resume") vc.togglePause();
+      else if (id === "interrupt") vc.interrupt();
+      else if (id === "typeInstead" || id === "backToChat") { vc.dismiss(); ta.focus(); }
+      else if (id === "retry" || id === "replay") vc.retry();
+      else if (id === "close") vc.closeError();
+      else if (id === "restart") vc.start();
+    };
+    voiceChat = createVoiceChat({
+      voice,
+      locale: getLocale,
+      online: () => globalThis.navigator?.onLine !== false,
+      // The heard sentence goes straight to run(); the composer draft is never read or written.
+      send: (text) => {
+        if (dispatching) return "busy";
+        const token = ++voiceSeq;
+        voiceCurrent = token;
+        void run(undefined, { text, token });
+        // run() returns before dispatching on a validation hint (hint stays visible in the chat).
+        if (!dispatching) { voiceCurrent = 0; return "rejected"; }
+        return "sent";
+      },
+      // The run voice chat was waiting for is orphaned: its token dies, so a late answer is never read as the new question's.
+      onAbandon: () => { voiceCurrent = 0; },
+      onChange: (model) => {
+        if (workspaceDisposed) return;
+        const view = stripView(model, t);
+        const strip = vcHost!.querySelector<HTMLElement>(".vc-strip")!;
+        renderStrip(strip, view, t, onAction);
+        waveBtn!.setAttribute("aria-pressed", String(voiceChat?.active ?? false));
+        if (view && !intro && !voiceChatIntroSeen() && model.state === "listening") {
+          intro = renderIntro(t, dismissIntro);
+          vcHost!.insertBefore(intro, strip);
+          markVoiceChatIntroSeen();
+        }
+      },
+      onEnded: ({ turns, seconds }) => {
+        if (workspaceDisposed) return;
+        scroll.append(el("div", "vc-summary", summaryLine(t, turns, seconds)));
+        scrollToEnd();
+      },
+    });
+    waveBtn.addEventListener("click", () => {
+      const vc = voiceChat;
+      if (!vc) return;
+      if (vc.active) { vc.end(); return; }
+      if (voice.listening) voice.stopDictation();
+      voice.stopSpeaking();
+      vc.start();
+    });
+  }
+  bottomRow.append(ta, enterHint, ...(micBtn ? [micBtn] : []), ...(waveBtn ? [waveBtn] : []), cancelBtn, sendBtn);
 
-  composer.append(storageNotice, hint, topRow, compareControls.element, bottomRow);
+  composer.append(storageNotice, hint, ...(vcHost ? [vcHost] : []), topRow, compareControls.element, bottomRow);
   chat.append(chatPresence, scroll, composer);
 
   // Boş sohbet (D5): karşılama + 3 sade öneri. Mesaj gelince kendiliğinden kaybolur.
@@ -1456,7 +1539,12 @@ export function renderWorkspace(deps: UiDeps): void {
   });
   // Sheet-local Esc handler; registered once per workspace render.
   const onWorkspaceKey = (e: KeyboardEvent) => {
-    if (e.key === "Escape" && settingsOpen) setSettings(false);
+    // Esc ends voice chat only when nothing else claims it: no open sheet/panel, not already handled,
+    // and focus is in the chat (or nowhere in particular), never inside another dialog.
+    const focus = document.activeElement;
+    const inChat = !focus || focus === document.body || chat.contains(focus);
+    if (e.key === "Escape" && voiceChat?.active && !e.defaultPrevented && !settingsOpen && !nowOpen && inChat) voiceChat.end();
+    else if (e.key === "Escape" && settingsOpen) setSettings(false);
     else if (e.key === "Escape" && nowOpen) { setNow(false); nowBtn.focus(); }
   };
   window.addEventListener("keydown", onWorkspaceKey);
@@ -2046,6 +2134,7 @@ export function renderWorkspace(deps: UiDeps): void {
     thinkingRow: (label: string) => HTMLElement,
     setRunMotion: (state: MotionState, label: string) => void,
     showAnswerMotion: (answer: string) => void,
+    onAnswer?: (answer: string) => void,
   ) => {
     const fail = (message: string, retryable = true) => {
       setRunMotion("error", message);
@@ -2111,6 +2200,7 @@ export function renderWorkspace(deps: UiDeps): void {
       } else {
         if (!cardShown) renderPlainAnswer(scroll, "", t);
         showAnswerMotion(result.text);
+        if (result.text) onAnswer?.(result.text); // daemon turns are stored by the daemon, so this is their only voice hook
         if (result.text) renderStatusCard(scroll, t, `${choice.provider}/${choice.model}`, seeDetails);
         await deps.gov.settle("local.dispatch", "success", detail);
       }
@@ -2132,10 +2222,10 @@ export function renderWorkspace(deps: UiDeps): void {
     }
   };
 
-  const run = async (retry?: { text: string; mode: Mode }) => {
+  const run = async (retry?: { text: string; mode: Mode }, voiceTurn?: { text: string; token: number }) => {
     if (workspaceDisposed || dispatching) return;
     const runMode = retry?.mode ?? mode;
-    const text = retry?.text ?? ta.value.trim();
+    const text = retry?.text ?? voiceTurn?.text ?? ta.value.trim();
     if (!text) return;
     if (runMode === "compare" && !companyInput.value.trim()) {
       hint.textContent = t("chat.companyNeeded");
@@ -2168,13 +2258,19 @@ export function renderWorkspace(deps: UiDeps): void {
     dispatchController = controller;
     const motionVersion = ++chatMotionVersion;
     const ownsRun = () => !workspaceDisposed && isCurrentSession(cfg, owner) && motionVersion === chatMotionVersion;
+    // Voice chat: only the turn that still owns the token may answer or end the strip.
+    const voiceLive = () => voiceTurn !== undefined && voiceTurn.token === voiceCurrent;
+    const voiceAnswer = (answer: string) => {
+      if (voiceLive() && ownsRun()) { voiceCurrent = 0; voiceChat?.reply(answer); }
+    };
     const recordRun = (role: SessionRole, text: string) => {
+      if (role === "assistant") voiceAnswer(text);
       if (ownsRun()) record(role, text, runMode);
     };
     hint.style.display = "none";
     dispatching = true;
     sendBtn.disabled = true;
-    if (!retry) ta.value = "";
+    if (!retry && !voiceTurn) ta.value = "";
     const ownsMotion = ownsRun;
     const setRunMotion = (state: MotionState, label: string) => {
       if (ownsMotion()) setChatMotion(state, label);
@@ -2348,7 +2444,7 @@ export function renderWorkspace(deps: UiDeps): void {
         }
         if (ownsRun()) bumpActivity();
       } else if (runMode === "daemon") {
-        await runDaemonTurn(text, ownsRun, thinkingRow, setRunMotion, showAnswerMotion);
+        await runDaemonTurn(text, ownsRun, thinkingRow, setRunMotion, showAnswerMotion, voiceAnswer);
         if (ownsRun()) bumpActivity();
       } else {
         const stub = await startCompare(cfg, { companyId: runCompanyId, query: text,
@@ -2439,12 +2535,15 @@ export function renderWorkspace(deps: UiDeps): void {
       recordRun("error", msg);
       renderErrorCard(scroll, msg, () => retryLast(text, runMode));
     } finally {
+      // Voice chat: a turn that ended without an answer (error card, cancel) goes back to listening.
+      if (voiceLive()) { voiceCurrent = 0; voiceChat?.turnEnded(); }
       for (const row of runThinkingRows) removeThinking(row);
       if (ownsRun()) {
         clearCompareOperation();
         dispatching = false;
         sendBtn.disabled = false;
         scrollToEnd();
+        voiceChat?.laneFree(); // a sentence heard while this reply ran goes out now
       }
     }
   };
@@ -2548,6 +2647,7 @@ export function renderWorkspace(deps: UiDeps): void {
     if (activeDispatchStopper === stopDispatch) activeDispatchStopper = null;
     void deps.gov.invalidate().catch(() => {});
     workspaceDisposed = true;
+    voiceChat?.dismiss();
     globalThis.removeEventListener?.("bv:open-settings", onOpenSettings);
     companyPanel?.unmount();
     companyPanel = null;
