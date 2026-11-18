@@ -69,18 +69,23 @@ export function deriveTitle(text: string): string {
   return flat.length <= TITLE_MAX ? flat : `${flat.slice(0, TITLE_MAX - 1)}…`;
 }
 
-/** Split for the sidebar: sessions updated since local midnight vs the rest. */
+/** Split for the sidebar: Today / Yesterday / previous 7 days / older, by local midnight of `now`. */
 export function groupSessions<T extends { updatedAt: number } = ChatSession>(
   sessions: T[],
   now: number,
-): { today: T[]; earlier: T[] } {
+): { today: T[]; yesterday: T[]; last7: T[]; older: T[] } {
   const midnight = new Date(now);
   midnight.setHours(0, 0, 0, 0);
-  const cut = midnight.getTime();
-  const today: T[] = [];
-  const earlier: T[] = [];
-  for (const s of sessions) (s.updatedAt >= cut ? today : earlier).push(s);
-  return { today, earlier };
+  const dayStart = (back: number) => { const d = new Date(midnight); d.setDate(d.getDate() - back); return d.getTime(); };
+  const cutToday = midnight.getTime(), cutYesterday = dayStart(1), cutWeek = dayStart(8);
+  const today: T[] = [], yesterday: T[] = [], last7: T[] = [], older: T[] = [];
+  for (const s of sessions) {
+    if (s.updatedAt >= cutToday) today.push(s);
+    else if (s.updatedAt >= cutYesterday) yesterday.push(s);
+    else if (s.updatedAt >= cutWeek) last7.push(s);
+    else older.push(s);
+  }
+  return { today, yesterday, last7, older };
 }
 
 function sanitize(raw: unknown): { sessions: ChatSession[]; changed: boolean } {
