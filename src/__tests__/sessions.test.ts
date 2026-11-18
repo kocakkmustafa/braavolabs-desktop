@@ -174,22 +174,18 @@ describe("storage failure handling (adversarial: quota exhaustion)", () => {
 });
 
 describe("groupSessions", () => {
-  it("splits by local midnight of `now`", () => {
+  it("splits into today / yesterday / previous 7 days / older by local midnight of `now`", () => {
     const now = new Date(2026, 6, 24, 15, 0, 0).getTime();
-    const midnight = new Date(2026, 6, 24, 0, 0, 0).getTime();
-    const mk = (id: string, updatedAt: number) => ({
-      id,
-      title: id,
-      createdAt: 0,
-      updatedAt,
-      entries: [],
-    });
-    const { today, earlier } = groupSessions(
-      [mk("a", midnight + 60_000), mk("b", midnight - 60_000), mk("c", now)],
+    const day = (back: number, h = 12) => new Date(2026, 6, 24 - back, h, 0, 0).getTime();
+    const mk = (id: string, updatedAt: number) => ({ id, title: id, createdAt: 0, updatedAt, entries: [] });
+    const g = groupSessions(
+      [mk("a", day(0, 0) + 60_000), mk("b", day(0, 0) - 60_000), mk("c", now), mk("d", day(3)), mk("e", day(8, 0)), mk("f", day(9)), mk("g", day(40))],
       now,
     );
-    expect(today.map((s) => s.id)).toEqual(["a", "c"]);
-    expect(earlier.map((s) => s.id)).toEqual(["b"]);
+    expect(g.today.map((s) => s.id)).toEqual(["a", "c"]);
+    expect(g.yesterday.map((s) => s.id)).toEqual(["b"]);
+    expect(g.last7.map((s) => s.id)).toEqual(["d", "e"]);
+    expect(g.older.map((s) => s.id)).toEqual(["f", "g"]);
   });
 });
 

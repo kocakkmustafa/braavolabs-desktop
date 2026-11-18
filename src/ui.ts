@@ -28,7 +28,7 @@ import {
   resumeCompany,
 } from "./client";
 import { performSignOut } from "./session";
-import { isInboxEnabled } from "./inbox";
+import { isInboxEnabled, loadBuckets } from "./inbox";
 import { disposeActiveInbox, mountInbox } from "./inbox-ui";
 import { resolvePanelTransport } from "./company-panel/api";
 import type { CompanyPanelHandle } from "./company-panel/mount";
@@ -278,6 +278,60 @@ const el = <K extends keyof HTMLElementTagNameMap>(
   if (text !== undefined) n.textContent = text;
   return n;
 };
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+/** Lucide line icons (1.5 stroke) as inline SVG; paths only, no dependency. */
+const ICONS = {
+  chat: ["M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"],
+  company: ["M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z", "M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2", "M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2", "M10 6h4", "M10 10h4", "M10 14h4", "M10 18h4"],
+  code: ["m18 16 4-4-4-4", "m6 8-4 4 4 4", "m14.5 4-5 16"],
+  plus: ["M5 12h14", "M12 5v14"],
+  search: ["M11 3a8 8 0 1 0 0 16 8 8 0 0 0 0-16Z", "m21 21-4.3-4.3"],
+  settings: ["M21 4h-7", "M10 4H3", "M21 12h-9", "M8 12H3", "M21 20h-5", "M12 20H3", "M14 2v4", "M8 10v4", "M16 18v4"],
+  logout: ["M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4", "m16 17 5-5-5-5", "M21 12H9"],
+  mic: ["M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z", "M19 10v2a7 7 0 0 1-14 0v-2", "M12 19v3"],
+  activity: ["M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"],
+} as const;
+const icon = (name: keyof typeof ICONS, size = 16): SVGSVGElement => {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", String(size));
+  svg.setAttribute("height", String(size));
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.5");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  svg.classList.add("ico");
+  for (const d of ICONS[name]) {
+    const path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("d", d);
+    svg.append(path);
+  }
+  return svg;
+};
+/** Valar (lead agent) mark: M1 grille helmet, 48 grid, evenodd; collar at .55 opacity. */
+const valarIcon = (size = 24): SVGSVGElement => {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 48 48");
+  svg.setAttribute("width", String(size));
+  svg.setAttribute("height", String(size));
+  svg.setAttribute("fill", "currentColor");
+  svg.setAttribute("aria-hidden", "true");
+  svg.classList.add("valar-mark");
+  const helmet = document.createElementNS(SVG_NS, "path");
+  helmet.setAttribute("fill-rule", "evenodd");
+  helmet.setAttribute("d", "M11 40V22C11 12.5 17 6 24 6C31 6 37 12.5 37 22V40ZM14 18.5H34V22H14ZM17 26.5H19.6V35.5H17ZM22.7 26.5H25.3V35.5H22.7ZM28.4 26.5H31V35.5H28.4Z");
+  const collar = document.createElementNS(SVG_NS, "path");
+  collar.setAttribute("d", "M10 42H38V45.5H10Z");
+  collar.setAttribute("opacity", ".55");
+  svg.append(helmet, collar);
+  return svg;
+};
+/** Task / job status as colour + glyph + word (never colour alone). */
+type NowKind = "run" | "approval" | "error" | "done" | "queue";
+const NOW_GLYPH: Record<NowKind, string> = { run: "●", approval: "◆", error: "■", done: "✓", queue: "○" };
 
 // Plan 5.9: dictation into the composer and read-aloud on answers, on the system's own speech services.
 const voice = createVoice();
@@ -536,30 +590,59 @@ export function renderWorkspace(deps: UiDeps): void {
   const lights = el("div", "tb-lights");
   lights.append(el("i", "tb-l1"), el("i", "tb-l2"), el("i", "tb-l3"));
   const crumb = el("span", "tb-crumb mono", t("app.name"));
-  const settingsBtn = el("button", "tb-settings", t("titlebar.settings"));
-  titlebar.append(lights, crumb, el("div", "tb-spacer"), settingsBtn);
+  // "Şu an" (Now): what is running / waiting, from sources that already exist.
+  const nowWrap = el("div", "tb-now");
+  const nowBtn = el("button", "tb-now-btn");
+  nowBtn.type = "button";
+  nowBtn.setAttribute("aria-haspopup", "dialog");
+  nowBtn.setAttribute("aria-expanded", "false");
+  nowBtn.append(icon("activity", 16), el("span", undefined, t("now.button")));
+  const nowPop = el("div", "now-pop");
+  nowPop.setAttribute("role", "dialog");
+  nowPop.setAttribute("aria-label", t("now.title"));
+  nowPop.style.display = "none";
+  nowWrap.append(nowBtn, nowPop);
+  titlebar.append(lights, crumb, el("div", "tb-spacer"), nowWrap);
 
   // --- left rail ---
   const rail = el("aside", "rail");
-  const brand = el("div", "brand");
-  brand.append(el("span", "brand-dot"), document.createTextNode(t("app.name")));
-
-  // Surface switch. Chat is the everyday surface; Code is the vendor-CLI
-  // (Lane-B) surface — the same panel that used to live inline in the rail.
+  // Surface tabs (icon only; active tab gets the single underline in the borderless design).
+  // Chat is the everyday surface; Code is the vendor-CLI (Lane-B) surface.
   const seg = el("div", "seg");
-  const segChatBtn = el("button", "seg-btn active", t("surface.chat"));
-  const segCodeBtn = el("button", "seg-btn", t("surface.code"));
-  const segCompanyBtn = el("button", "seg-btn", t("surface.company"));
+  seg.setAttribute("role", "tablist");
+  seg.setAttribute("aria-label", t("rail.surfaces"));
+  const mkSegBtn = (ico: keyof typeof ICONS, label: string, active = false) => {
+    const b = el("button", active ? "seg-btn active" : "seg-btn");
+    b.type = "button";
+    b.setAttribute("role", "tab");
+    b.setAttribute("aria-label", label);
+    b.title = label;
+    b.append(icon(ico, 20));
+    return b;
+  };
+  const segChatBtn = mkSegBtn("chat", t("surface.chat"), true);
+  const segCodeBtn = mkSegBtn("code", t("surface.code"));
+  const segCompanyBtn = mkSegBtn("company", t("surface.company"));
   seg.append(segChatBtn, segCompanyBtn, segCodeBtn);
 
-  const connSec = el("div");
-  connSec.append(el("div", "rail-section-label", t("rail.connection")));
+  const valarCard = el("div", "valar-card");
+  valarCard.append(valarIcon(28), el("span", "valar-name", t("rail.valar")));
+
+  const connSec = el("div", "conn-sec");
   const conn = el("div", "conn online");
-  conn.append(el("span", "conn-dot"), document.createTextNode(t("rail.connected")));
+  conn.append(el("span", "conn-ico", "✓"), document.createTextNode(t("rail.connected")));
   connSec.append(conn);
 
-  const newChatBtn = el("button", "rail-btn primary", t("rail.newChat"));
-  const memoryBtn = el("button", "rail-btn", t("rail.memory"));
+  const newChatBtn = el("button", "rail-btn primary");
+  newChatBtn.type = "button";
+  newChatBtn.append(icon("plus", 16), el("span", undefined, t("rail.newChat")));
+  // Search reveals the daemon history search (available only while the daemon answers).
+  const searchBtn = el("button", "rail-btn");
+  searchBtn.type = "button";
+  searchBtn.disabled = true;
+  searchBtn.append(icon("search", 16), el("span", undefined, t("rail.search")));
+  const railActions = el("div", "rail-actions");
+  railActions.append(newChatBtn, searchBtn);
 
   // Chat sessions (design v3 TODAY / EARLIER). List + switching live here;
   // the store itself is the pure, tested module in sessions.ts.
@@ -608,6 +691,7 @@ export function renderWorkspace(deps: UiDeps): void {
   historySearch.placeholder = t("sessions.search");
   historySearch.setAttribute("aria-label", t("sessions.search"));
   historySearch.style.display = "none"; // daemon search only
+  searchBtn.addEventListener("click", () => { if (daemonOnline) { historySearch.style.display = ""; historySearch.focus(); } });
 
   // Configuration moved out of the rail and into Settings (design v3): the
   // rail is for what you're working on, Settings for how the app is wired.
@@ -768,7 +852,16 @@ export function renderWorkspace(deps: UiDeps): void {
   const savingsSub = el("div", "savings-sub", t("rail.noSavings"));
   savingsCard.append(savingsAmount, savingsSub);
 
-  const signOutBtn = el("button", "rail-btn", t("rail.signOut"));
+  const signOutBtn = el("button", "rail-icon-btn");
+  signOutBtn.type = "button";
+  signOutBtn.setAttribute("aria-label", t("rail.signOut"));
+  signOutBtn.title = t("rail.signOut");
+  signOutBtn.append(icon("logout", 16));
+  const settingsBtn = el("button", "rail-icon-btn");
+  settingsBtn.type = "button";
+  settingsBtn.setAttribute("aria-label", t("titlebar.settings"));
+  settingsBtn.title = t("titlebar.settings");
+  settingsBtn.append(icon("settings", 16));
 
   // Account row (design v3 footer): who is signed in + the BYOK badge.
   let accountEmail = "";
@@ -778,15 +871,15 @@ export function renderWorkspace(deps: UiDeps): void {
     /* no storage — generic row */
   }
   const account = el("div", "account-row");
-  const avatar = el("div", "account-avatar mono", (accountEmail[0] ?? "•").toUpperCase());
+  const avatar = el("div", "account-avatar mono", (t("rail.profileName")[0] ?? "•").toUpperCase());
   const accountMeta = el("div", "account-meta");
   accountMeta.append(
-    el("div", "account-email", accountEmail || t("app.name")),
-    el("div", "account-sub mono", "BYOK"),
+    el("div", "account-email", t("rail.profileName")),
+    el("div", "account-sub mono", accountEmail || "BYOK"),
   );
-  account.append(avatar, accountMeta);
+  account.append(avatar, accountMeta, settingsBtn, signOutBtn);
 
-  rail.append(brand, seg, newChatBtn, memoryBtn, historySearch, sessionsSec, connSec, spacer, savingsCard, account, signOutBtn);
+  rail.append(seg, valarCard, railActions, historySearch, sessionsSec, spacer, connSec, savingsCard, account);
 
   // --- center chat ---
   const chat = el("div", "chat");
@@ -941,12 +1034,14 @@ export function renderWorkspace(deps: UiDeps): void {
   const enterHint = el("span", "enter-hint mono", t("chat.enterHint"));
   const bottomRow = el("div", "composer-row");
   // Dictation fills the composer (interim words included); sending stays the user's action.
-  const micBtn = voice.canDictate ? el("button", "set-btn mic-btn", t("chat.voiceStart")) : null;
+  const micBtn = voice.canDictate ? el("button", "set-btn mic-btn") : null;
   if (micBtn) {
     micBtn.type = "button";
     micBtn.title = t("chat.voiceNote");
+    micBtn.append(icon("mic", 20));
+    micBtn.setAttribute("aria-label", t("chat.voiceStart"));
     micBtn.setAttribute("aria-pressed", "false");
-    const idle = () => { micBtn.setAttribute("aria-pressed", "false"); micBtn.textContent = t("chat.voiceStart"); };
+    const idle = () => { micBtn.setAttribute("aria-pressed", "false"); micBtn.setAttribute("aria-label", t("chat.voiceStart")); };
     micBtn.addEventListener("click", () => {
       if (voice.listening) { voice.stopDictation(); return; }
       const started = voice.dictate(getLocale(), ta.value, {
@@ -959,7 +1054,7 @@ export function renderWorkspace(deps: UiDeps): void {
           hint.style.display = "block";
         },
       });
-      if (started) { micBtn.setAttribute("aria-pressed", "true"); micBtn.textContent = t("chat.voiceStop"); ta.focus(); }
+      if (started) { micBtn.setAttribute("aria-pressed", "true"); micBtn.setAttribute("aria-label", t("chat.voiceStop")); ta.focus(); }
     });
   }
   bottomRow.append(ta, enterHint, ...(micBtn ? [micBtn] : []), cancelBtn, sendBtn);
@@ -1228,7 +1323,7 @@ export function renderWorkspace(deps: UiDeps): void {
     const inbox = mountInbox(root, cfg, t, deps.persist);
     const inboxBtn = el("button", "tb-settings", t("inbox.title"));
     inboxBtn.addEventListener("click", () => inbox.open());
-    titlebar.insertBefore(inboxBtn, settingsBtn);
+    titlebar.insertBefore(inboxBtn, nowWrap);
   }
   sheetClose.addEventListener("click", () => setSettings(false));
   backdrop.addEventListener("click", (e) => {
@@ -1237,8 +1332,76 @@ export function renderWorkspace(deps: UiDeps): void {
   // Sheet-local Esc handler; registered once per workspace render.
   const onWorkspaceKey = (e: KeyboardEvent) => {
     if (e.key === "Escape" && settingsOpen) setSettings(false);
+    else if (e.key === "Escape" && nowOpen) { setNow(false); nowBtn.focus(); }
   };
   window.addEventListener("keydown", onWorkspaceKey);
+
+  // --- "Şu an" panel: read-only view over existing sources (no new backend) ---
+  let nowOpen = false;
+  let nowSeq = 0;
+  const nowRow = (kind: NowKind, text: string) => {
+    const row = el("div", `now-row now-${kind}`);
+    const wordKey = { run: "now.running", approval: "now.approval", error: "now.error", done: "now.done", queue: "now.queued" }[kind];
+    row.append(el("span", "now-glyph", NOW_GLYPH[kind]), el("span", "now-text", text), el("span", "now-word mono", t(wordKey)));
+    return row;
+  };
+  let lastInboxRows: Array<[NowKind, string]> = [];
+  let nowCleanup: (() => void) | null = null;
+  const renderNow = (inboxRows: Array<[NowKind, string]> = lastInboxRows) => {
+    lastInboxRows = inboxRows;
+    nowPop.replaceChildren(el("div", "now-title", t("now.title")));
+    const rows: HTMLElement[] = [];
+    if (dispatching) rows.push(nowRow("run", t("now.chatTurn")));
+    if (openApprovals.size) rows.push(nowRow("approval", t("now.localApproval")));
+    // Company data is only trustworthy while the panel is live (Company surface); otherwise say where to look.
+    const data = surface === "company" ? companyPanel?.state() : undefined;
+    if (!data) rows.push(el("div", "now-hint", t("now.companyHint")));
+    else {
+      for (const a of data.approvals) rows.push(nowRow("approval", a.title));
+      for (const task of data.tasks) {
+        const kind: NowKind | null = task.status === "RUNNING" ? "run" : task.status === "OPEN" ? "queue" : task.status === "FAILED" ? "error" : task.status === "DONE" ? "done" : null;
+        if (kind) rows.push(nowRow(kind, task.title));
+      }
+    }
+    for (const [kind, text] of inboxRows) rows.push(nowRow(kind, text));
+    const live = rows.filter(r => !r.classList.contains("now-hint"));
+    if (!live.length) nowPop.append(el("div", "now-empty", t("now.empty")));
+    else nowPop.append(...live.slice(0, 12));
+    if (live.length > 12) nowPop.append(el("div", "now-more", t("now.more", { n: live.length - 12 })));
+    if (!data) nowPop.append(rows.find(r => r.classList.contains("now-hint"))!);
+  };
+  const setNow = (open: boolean) => {
+    nowOpen = open;
+    nowBtn.setAttribute("aria-expanded", String(open));
+    nowPop.style.display = open ? "" : "none";
+    nowCleanup?.(); nowCleanup = null;
+    if (!open) return;
+    lastInboxRows = [];
+    renderNow();
+    nowPop.focus();
+    // Redraw while open: company store changes and chat-turn start/stop (send button's disabled flips with the turn).
+    const unsub = surface === "company" ? companyPanel?.subscribe(() => renderNow()) : undefined;
+    const observer = new MutationObserver(() => renderNow());
+    observer.observe(sendBtn, { attributes: true, attributeFilter: ["disabled"] });
+    nowCleanup = () => { unsub?.(); observer.disconnect(); };
+    if (!isInboxEnabled()) return;
+    const seq = ++nowSeq;
+    void loadBuckets(cfg, { save: deps.persist, limit: 6 }).then((buckets) => {
+      if (workspaceDisposed || !nowOpen || seq !== nowSeq) return;
+      const kindOf = { working: "run", needs_approval: "approval", stuck: "error", done: "done" } as const;
+      const out: Array<[NowKind, string]> = [];
+      for (const b of ["needs_approval", "working", "stuck", "done"] as const) {
+        for (const r of buckets[b] ?? []) out.push([kindOf[b], r.pipeline?.name ?? r.id]);
+      }
+      renderNow(out);
+    }).catch(() => { /* keep the local view; the inbox reports its own errors */ });
+  };
+  nowBtn.addEventListener("click", (e) => { e.stopPropagation(); setNow(!nowOpen); });
+  nowPop.addEventListener("click", (e) => e.stopPropagation());
+  nowPop.tabIndex = -1;
+  nowWrap.addEventListener("focusout", (e) => { if (nowOpen && !nowWrap.contains(e.relatedTarget as Node | null)) setNow(false); });
+  const onNowOutside = () => { if (nowOpen) setNow(false); };
+  window.addEventListener("click", onNowOutside);
 
   // --- company surface ---
   let companyBusy = false;
@@ -1371,7 +1534,7 @@ export function renderWorkspace(deps: UiDeps): void {
   let surface: "chat" | "company" | "code" = "chat";
   const applySurface = (s: "chat" | "company" | "code") => {
     surface = s;
-    for (const [button, value] of [[segChatBtn, "chat"], [segCompanyBtn, "company"], [segCodeBtn, "code"]] as const) button.setAttribute("aria-pressed", String(value === s));
+    for (const [button, value] of [[segChatBtn, "chat"], [segCompanyBtn, "company"], [segCodeBtn, "code"]] as const) button.setAttribute("aria-selected", String(value === s));
     segChatBtn.classList.toggle("active", s === "chat");
     segCompanyBtn.classList.toggle("active", s === "company");
     segCodeBtn.classList.toggle("active", s === "code");
@@ -1485,27 +1648,16 @@ export function renderWorkspace(deps: UiDeps): void {
       }
       return;
     }
-    if (daemonOnline) {
-      const { today, earlier } = groupSessions(mergeHistory(daemonConversations, sessionStore.list()), Date.now());
-      if (today.length) {
-        sessionsSec.append(el("div", "rail-section-label", t("sessions.today")));
-        for (const h of today) sessionsSec.append(historyItem(h));
+    const appendBuckets = <T extends { updatedAt: number }>(items: T[], make: (item: T) => HTMLElement) => {
+      const g = groupSessions(items, Date.now());
+      for (const [label, rows] of [["sessions.today", g.today], ["sessions.yesterday", g.yesterday], ["sessions.last7", g.last7], ["sessions.older", g.older]] as const) {
+        if (!rows.length) continue;
+        sessionsSec.append(el("div", "rail-section-label", t(label)));
+        for (const row of rows) sessionsSec.append(make(row));
       }
-      if (earlier.length) {
-        sessionsSec.append(el("div", "rail-section-label", t("sessions.earlier")));
-        for (const h of earlier) sessionsSec.append(historyItem(h));
-      }
-      return;
-    }
-    const { today, earlier } = groupSessions(sessionStore.list(), Date.now());
-    if (today.length) {
-      sessionsSec.append(el("div", "rail-section-label", t("sessions.today")));
-      for (const s of today) sessionsSec.append(sessionItem(s));
-    }
-    if (earlier.length) {
-      sessionsSec.append(el("div", "rail-section-label", t("sessions.earlier")));
-      for (const s of earlier) sessionsSec.append(sessionItem(s));
-    }
+    };
+    if (daemonOnline) appendBuckets(mergeHistory(daemonConversations, sessionStore.list()), historyItem);
+    else appendBuckets(sessionStore.list(), sessionItem);
   };
 
   const syncCrumb = () => {
@@ -1574,6 +1726,7 @@ export function renderWorkspace(deps: UiDeps): void {
       daemonProbe = null;
       if (!workspaceDisposed) {
         historySearch.style.display = daemonOnline ? "" : "none";
+        searchBtn.disabled = !daemonOnline;
         if (daemonOnline && !modeChosenByUser && mode === "cascade" && !dispatching) applyMode("daemon");
         if (mode === "daemon") {
           if (!daemonOnline) showDaemonHint(t("chat.daemonOffline"));
@@ -1817,6 +1970,7 @@ export function renderWorkspace(deps: UiDeps): void {
       if (e instanceof DaemonError && e.code === "not-running") {
         daemonOnline = false;
         historySearch.style.display = "none";
+        searchBtn.disabled = true;
         updateStorageNotice();
       }
       await deps.gov.settle("local.dispatch", "error", detail);
@@ -2172,6 +2326,7 @@ export function renderWorkspace(deps: UiDeps): void {
     motions.clear();
     thinkingMotions.clear();
     window.removeEventListener("keydown", onWorkspaceKey);
+    window.removeEventListener("click", onNowOutside);
     clearTimeout(searchTimer);
     if (compBridge || startingCompanion) void stopCompanion();
     else deps.gov = baseGov;
