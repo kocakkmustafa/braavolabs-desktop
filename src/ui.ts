@@ -1345,6 +1345,9 @@ export function renderWorkspace(deps: UiDeps): void {
     if (open) { releaseSettingsFocus = containDialog(sheet, () => setSettings(false)); sheetClose.focus(); }
   };
   settingsBtn.addEventListener("click", () => setSettings(true));
+  // Şirket sayfasındaki "Ayarlar'ı aç" bağlantısı (bütçe/bağlayıcı/kural sekmeleri Ayarlar'da).
+  const onOpenSettings = () => setSettings(true);
+  globalThis.addEventListener?.("bv:open-settings", onOpenSettings);
   // BRA-P0-04i: jobs inbox, behind a default-OFF flag (bv.flags.jobsInbox = "1").
   if (isInboxEnabled()) {
     const inbox = mountInbox(root, cfg, t, deps.persist);
@@ -2361,6 +2364,7 @@ export function renderWorkspace(deps: UiDeps): void {
     if (activeDispatchStopper === stopDispatch) activeDispatchStopper = null;
     void deps.gov.invalidate().catch(() => {});
     workspaceDisposed = true;
+    globalThis.removeEventListener?.("bv:open-settings", onOpenSettings);
     companyPanel?.unmount();
     companyPanel = null;
     clearCompareOperation();

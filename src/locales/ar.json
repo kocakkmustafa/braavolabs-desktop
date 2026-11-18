@@ -518,5 +518,19 @@
   "chat.suggest.b.prompt": "Review the latest changes in my project and flag any risks.",
   "chat.suggest.c.title": "Plan a task",
   "chat.suggest.c.body": "Break a goal into clear steps.",
-  "chat.suggest.c.prompt": "Help me plan this task step by step: "
+  "chat.suggest.c.prompt": "Help me plan this task step by step: ",
+  "panel.tabs": "Company sections",
+  "panel.tab.agents": "Agents",
+  "panel.tab.org": "Organization",
+  "panel.tab.work": "Work",
+  "panel.tab.routines": "Routines",
+  "panel.tab.reports": "Reports",
+  "panel.dept.management": "Management",
+  "panel.dept.research": "Research",
+  "panel.dept.growth": "Growth",
+  "panel.dept.operations": "Operations",
+  "panel.dept.engineering": "Engineering",
+  "panel.dept.other": "Other",
+  "panel.settingsNote": "Connectors, budget and rules live in Settings.",
+  "panel.openSettings": "Open Settings"
 }

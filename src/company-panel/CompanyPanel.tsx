@@ -12,6 +12,7 @@ import {
   APPROVAL_POLICIES, WORKER_ENGINES,
   type AgentView, type HireForm, type RoutineView, type TaskEventView, type TaskView,
 } from "./map";
+import { groupByDepartment } from "./departments";
 import { parseMarkdown, type Inline } from "./markdown";
 import type { PanelError, PanelState, PanelStore } from "./store";
 
@@ -66,7 +67,8 @@ function SetupHint({ provider }: { provider: string | null }) {
 
 function StatusBadge({ agent }: { agent: AgentView }) {
   const { t } = useEnv();
-  return <span className={`cp-badge cp-badge-${agent.status} mono`}>{t(`panel.status.${agent.status}`)}</span>;
+  const glyph = agent.status === "running" ? "●" : agent.status === "error" ? "■" : agent.status === "paused" ? "○" : "✓";
+  return <span className={`cp-badge cp-badge-${agent.status} mono`}><span aria-hidden="true">{glyph} </span>{t(`panel.status.${agent.status}`)}</span>;
 }
 
 // ── hire wizard ──────────────────────────────────────────────────────────────
@@ -856,28 +858,94 @@ function Header() {
   );
 }
 
+type CompanyTab = "agents" | "org" | "work" | "routines" | "reports";
+const TABS: readonly CompanyTab[] = ["agents", "org", "work", "routines", "reports"];
+
+/** Departman gruplu ajan kartları; kart seçmek ajan ayrıntısını açar (iş mantığı AgentCard'da, aynen). */
+function AgentGroups() {
+  const { t, locale, store } = useEnv();
+  const agents = usePanel(s => s.panel?.agents ?? NONE);
+  const selected = usePanel(s => s.selectedAgentId);
+  if (!agents.length) return <div className="company-empty">{t("panel.noAgents")}</div>;
+  return (
+    <div className="cp-groups">
+      {groupByDepartment(agents).map(g => (
+        <section key={g.department} className="cp-group" aria-label={t(`panel.dept.${g.department}`)}>
+          <div className="rail-section-label">{t(`panel.dept.${g.department}`)}</div>
+          <ul className="cp-plain cp-tiles">
+            {g.agents.map(agent => (
+              <li key={agent.id}>
+                <button className={`cp-tile${selected === agent.id ? " active" : ""}`} aria-pressed={selected === agent.id}
+                  onClick={() => store.getState().selectAgent(selected === agent.id ? null : agent.id)}>
+                  <span className="cp-tile-mark" aria-hidden="true">{(agent.name.trim()[0] ?? "?").toUpperCase()}</span>
+                  <span className="cp-node-main">
+                    <span className="cp-node-name">{agent.name}</span>
+                    <span className="cp-node-sub mono">{agent.title || agent.role}</span>
+                    <span className="cp-node-sub mono">{t("panel.monthUsage", { runs: formatInt(locale, agent.month.runs), tokens: formatInt(locale, agent.month.inputTokens + agent.month.outputTokens) })}</span>
+                  </span>
+                  <StatusBadge agent={agent} />
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function SettingsLink() {
+  const { t } = useEnv();
+  return (
+    <div className="cp-card cp-sub cp-settings-link">
+      <span>{t("panel.settingsNote")}</span>
+      <button className="set-btn" type="button" onClick={() => globalThis.dispatchEvent?.(new Event("bv:open-settings"))}>{t("panel.openSettings")}</button>
+    </div>
+  );
+}
+
 function Ready() {
   const wizardOpen = usePanel(s => s.wizardOpen);
   const selected = usePanel(s => s.panel?.agents.find(a => a.id === s.selectedAgentId) ?? null);
   const { t } = useEnv();
+  const [tab, setTab] = useState<CompanyTab>("agents");
+  // Her sekme gövdesi DOM'da kalır (hidden): durum ve veri kaybolmaz, sekme yalnız görünümü seçer.
+  const panelProps = (id: CompanyTab) => ({ role: "tabpanel", id: `cp-panel-${id}`, "aria-labelledby": `cp-tab-${id}`, hidden: tab !== id, className: "cp-tabpanel" });
   return (
     <>
       <Header />
       <HireResult />
       {wizardOpen && <HireWizard />}
-      <div className="cp-grid">
+      <div className="cp-tabs" role="tablist" aria-label={t("panel.tabs")}>
+        {TABS.map(id => (
+          <button key={id} role="tab" id={`cp-tab-${id}`} aria-selected={tab === id} aria-controls={`cp-panel-${id}`} className={`cp-tab${tab === id ? " active" : ""}`} onClick={() => setTab(id)}>{t(`panel.tab.${id}`)}</button>
+        ))}
+      </div>
+      <div {...panelProps("agents")}>
+        <div className="cp-grid">
+          <AgentGroups />
+          {selected ? <AgentCard agent={selected} /> : <div className="cp-card cp-sub cp-placeholder">{t("panel.selectAgent")}</div>}
+        </div>
+      </div>
+      <div {...panelProps("org")}>
         <section className="cp-section">
           <div className="rail-section-label">{t("panel.org")}</div>
           <OrgChart />
         </section>
-        {selected ? <AgentCard agent={selected} /> : <div className="cp-card cp-sub cp-placeholder">{t("panel.selectAgent")}</div>}
       </div>
-      <Approvals />
-      <Tasks />
-      <HireWorker />
-      <Routines />
-      <FindingsView />
-      <Activity />
+      <div {...panelProps("work")}>
+        <Approvals />
+        <Tasks />
+        <HireWorker />
+      </div>
+      <div {...panelProps("routines")}>
+        <Routines />
+        <SettingsLink />
+      </div>
+      <div {...panelProps("reports")}>
+        <FindingsView />
+        <Activity />
+      </div>
     </>
   );
 }

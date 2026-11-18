@@ -518,5 +518,19 @@
   "chat.suggest.b.prompt": "Projemdeki son değişiklikleri incele ve riskleri söyle.",
   "chat.suggest.c.title": "Görev planla",
   "chat.suggest.c.body": "Hedefi net adımlara böl.",
-  "chat.suggest.c.prompt": "Bu görevi adım adım planlamama yardım et: "
+  "chat.suggest.c.prompt": "Bu görevi adım adım planlamama yardım et: ",
+  "panel.tabs": "Şirket bölümleri",
+  "panel.tab.agents": "Ajanlar",
+  "panel.tab.org": "Organizasyon",
+  "panel.tab.work": "İşler",
+  "panel.tab.routines": "Rutinler",
+  "panel.tab.reports": "Raporlar",
+  "panel.dept.management": "Yönetim",
+  "panel.dept.research": "Araştırma",
+  "panel.dept.growth": "Büyüme",
+  "panel.dept.operations": "Operasyon",
+  "panel.dept.engineering": "Mühendislik",
+  "panel.dept.other": "Diğer",
+  "panel.settingsNote": "Bağlayıcılar, bütçe ve kurallar Ayarlar'da.",
+  "panel.openSettings": "Ayarlar'ı aç"
 }
