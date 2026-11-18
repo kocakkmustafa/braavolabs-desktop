@@ -542,5 +542,16 @@
   "settings.page.connectors": "Connectors",
   "settings.page.approvals": "Approval rules",
   "settings.page.companion": "Phone companion",
-  "settings.page.privacy": "Privacy and data"
+  "settings.page.privacy": "Privacy and data",
+  "toast.info": "Info",
+  "toast.done": "Done",
+  "toast.error": "Error",
+  "toast.dismiss": "Dismiss notification",
+  "offline.title": "You are offline",
+  "offline.sub": "Braavolabs picks up again when the connection returns.",
+  "offline.back": "Back online",
+  "palette.title": "Command palette",
+  "palette.placeholder": "Search commands…",
+  "palette.empty": "No matching command.",
+  "palette.toggleTheme": "Switch theme (light/dark)"
 }

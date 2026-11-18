@@ -542,5 +542,16 @@
   "settings.page.connectors": "Bağlayıcılar",
   "settings.page.approvals": "Onay kuralları",
   "settings.page.companion": "Telefon eşliği",
-  "settings.page.privacy": "Gizlilik ve veri"
+  "settings.page.privacy": "Gizlilik ve veri",
+  "toast.info": "Bilgi",
+  "toast.done": "Tamam",
+  "toast.error": "Hata",
+  "toast.dismiss": "Bildirimi kapat",
+  "offline.title": "Çevrimdışısın",
+  "offline.sub": "Bağlantı dönünce Braavolabs kaldığı yerden devam eder.",
+  "offline.back": "Yeniden çevrimiçisin",
+  "palette.title": "Komut paleti",
+  "palette.placeholder": "Bir komut ara…",
+  "palette.empty": "Eşleşen komut yok.",
+  "palette.toggleTheme": "Temayı değiştir (açık/koyu)"
 }

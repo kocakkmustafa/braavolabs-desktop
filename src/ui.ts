@@ -6,6 +6,8 @@
  * Login handlers have source-executing regression tests; real WebView paint,
  * native validity bubbles and keyboard behavior still need native UI checks.
  */
+import { createToaster, type ToastKind } from "./toast";
+import { filterCommands, isPaletteShortcut, movePaletteIndex, type PaletteCommand } from "./palette";
 import { SETTINGS_PAGE_IDS, nextSettingsPage, type SettingsPageId } from "./settings-pages";
 import { resolveTheme, THEMES } from "./theme";
 import type { Config } from "./config";
@@ -363,6 +365,20 @@ function speakButton(t: Translator, text: () => string): HTMLButtonElement | nul
     if (voice.speak(text(), getLocale(), reset)) { btn.setAttribute("aria-pressed", "true"); btn.textContent = t("chat.speakStop"); }
   });
   return btn;
+}
+
+let toaster: ReturnType<typeof createToaster> | null = null;
+/** Toast göster (D7). Satır içi role=status/alert bildirimleri yerinde kalır; bu ek, görünür katmandır. */
+function notify(t: Translator, kind: ToastKind, text: string): void {
+  if (typeof document === "undefined" || !document.body) return;
+  if (!toaster) {
+    let host = document.querySelector<HTMLElement>(".toast-host");
+    if (!host) { host = el("div", "toast-host"); document.body.append(host); }
+    const h = host;
+    toaster = createToaster({ createElement: (tag) => document.createElement(tag) as never, host: () => h as never },
+      { info: t("toast.info"), done: t("toast.done"), error: t("toast.error") }, t("toast.dismiss"));
+  }
+  toaster.show(kind, text);
 }
 
 /** Keyboard containment and restoration for in-app dialogs. Native confirmation
@@ -1345,6 +1361,7 @@ export function renderWorkspace(deps: UiDeps): void {
   rmToggle.addEventListener("click", () => {
     const persisted = prefs.setReducedMotion(!prefs.reducedMotion());
     rmNotice.textContent = persisted ? "" : t("settings.preferenceUnsaved");
+    if (!persisted) notify(t, "error", t("settings.preferenceUnsaved"));
     applyReducedMotion(document.documentElement, effectiveReducedMotion(prefs, osPrefersReducedMotion()));
     notifyBrandMotionPreference();
     syncRm();
@@ -2440,6 +2457,73 @@ export function renderWorkspace(deps: UiDeps): void {
   // where the C3/#1 regression is guarded.
   signOutBtn.addEventListener("click", () => performSignOut(cfg, deps));
 
+  // --- çevrimdışı bandı (D30): tarayıcının ağ olayları; sahte durum yok ---
+  const offlineBanner = el("div", "offline-banner");
+  offlineBanner.setAttribute("role", "status");
+  offlineBanner.append(el("span", "offline-glyph", "■"), el("b", undefined, t("offline.title")), el("span", undefined, t("offline.sub")));
+  offlineBanner.hidden = typeof navigator === "undefined" || navigator.onLine !== false;
+  win.prepend(offlineBanner);
+  const onOffline = () => { offlineBanner.hidden = false; notify(t, "error", t("offline.title")); };
+  const onOnline = () => { offlineBanner.hidden = true; notify(t, "done", t("offline.back")); };
+  window.addEventListener("offline", onOffline);
+  window.addEventListener("online", onOnline);
+
+  // --- komut paleti ⌘K / Ctrl+K (D6): küçük, klavye gezinmeli, role=dialog + odak tuzağı ---
+  let paletteOpen = false;
+  const paletteCommands = (): PaletteCommand[] => [
+    { id: "new", label: t("rail.newChat"), run: () => { applySurface("chat"); startNewSession(); } },
+    { id: "settings", label: t("titlebar.settings"), run: () => setSettings(true) },
+    { id: "chat", label: t("surface.chat"), run: () => applySurface("chat") },
+    { id: "company", label: t("surface.company"), run: () => applySurface("company") },
+    { id: "code", label: t("surface.code"), run: () => applySurface("code") },
+    { id: "theme", label: t("palette.toggleTheme"), run: () => {
+      const th = resolveTheme(); const next = th.choice() === "dark" ? "light" : "dark";
+      if (!th.set(next)) notify(t, "error", t("settings.preferenceUnsaved"));
+    } },
+  ];
+  const openPalette = () => {
+    if (paletteOpen || settingsOpen) return;
+    paletteOpen = true;
+    const pBackdrop = el("div", "pal-backdrop");
+    const paletteCard = el("div", "pal-card");
+    paletteCard.setAttribute("aria-label", t("palette.title"));
+    const input = el("input", "pal-input") as HTMLInputElement;
+    input.type = "text"; input.placeholder = t("palette.placeholder");
+    input.setAttribute("role", "combobox"); input.setAttribute("aria-expanded", "true"); input.setAttribute("aria-controls", "pal-list"); input.setAttribute("aria-label", t("palette.title"));
+    const list = el("div", "pal-list"); list.id = "pal-list"; list.setAttribute("role", "listbox");
+    const empty = el("div", "pal-empty", t("palette.empty"));
+    const all = paletteCommands();
+    let shown: PaletteCommand[] = []; let active = 0;
+    let release: (() => void) | undefined;
+    const close = () => { if (!paletteOpen) return; paletteOpen = false; release?.(); release = undefined; pBackdrop.remove(); };
+    const paint = () => {
+      list.replaceChildren();
+      shown.forEach((c, i) => {
+        const row = el("div", `pal-row${i === active ? " active" : ""}`);
+        row.id = `pal-opt-${c.id}`; row.setAttribute("role", "option"); row.setAttribute("aria-selected", String(i === active));
+        row.append(el("span", undefined, c.label));
+        row.addEventListener("click", () => { close(); c.run(); });
+        row.addEventListener("mousemove", () => { if (active !== i) { active = i; paint(); } });
+        list.append(row);
+      });
+      empty.hidden = shown.length > 0;
+      if (shown[active]) input.setAttribute("aria-activedescendant", `pal-opt-${shown[active].id}`); else input.removeAttribute("aria-activedescendant");
+    };
+    const refilter = () => { shown = filterCommands(all, input.value); active = 0; paint(); };
+    input.addEventListener("input", refilter);
+    input.addEventListener("keydown", (e) => {
+      const next = e.key === "ArrowDown" || e.key === "ArrowUp" ? movePaletteIndex(active, shown.length, e.key) : null;
+      if (next !== null) { e.preventDefault(); active = next; paint(); }
+      else if (e.key === "Enter" && shown[active]) { e.preventDefault(); const c = shown[active]; close(); c.run(); }
+    });
+    pBackdrop.addEventListener("click", (e) => { if (e.target === pBackdrop) close(); });
+    paletteCard.append(input, list, empty); pBackdrop.append(paletteCard); root.append(pBackdrop);
+    release = containDialog(paletteCard, close);
+    refilter(); input.focus();
+  };
+  const onPaletteKey = (e: KeyboardEvent) => { if (isPaletteShortcut(e)) { e.preventDefault(); openPalette(); } };
+  window.addEventListener("keydown", onPaletteKey);
+
   // Everything this render owns beyond the DOM: the companion bridge + the
   // governance decorator installed with it, and the window key listener.
   disposeWorkspace = () => {
@@ -2455,6 +2539,9 @@ export function renderWorkspace(deps: UiDeps): void {
     motions.clear();
     thinkingMotions.clear();
     window.removeEventListener("keydown", onWorkspaceKey);
+    window.removeEventListener("keydown", onPaletteKey);
+    window.removeEventListener("offline", onOffline);
+    window.removeEventListener("online", onOnline);
     window.removeEventListener("click", onNowOutside);
     clearTimeout(searchTimer);
     if (compBridge || startingCompanion) void stopCompanion();

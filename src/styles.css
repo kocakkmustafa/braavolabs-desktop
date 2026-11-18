@@ -2607,3 +2607,38 @@ pre, code, .changes-path, .mcp-args, .key-input { direction: ltr; unicode-bidi: 
 .cc-shot { border: 0; border-radius: var(--r-card); box-shadow: var(--shadow-pop); }
 .cc-app { color: var(--text-2); }
 .cc-root .set-btn { border: 0; }
+
+/* ── UI-03c toast (D7), komut paleti (D6), çevrimdışı bandı (D30) ── */
+.toast-host { position: fixed; inset-block-end: var(--space-5); inset-inline-end: var(--space-5); z-index: 90; display: flex; flex-direction: column; gap: var(--space-2); max-width: min(380px, calc(100vw - 32px)); }
+.toast {
+  display: flex; align-items: flex-start; gap: var(--space-2); padding: var(--space-3) var(--space-4); border: 0; border-radius: var(--r-card);
+  background: var(--glass-pop); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); box-shadow: var(--shadow-pop);
+  color: var(--text-1); font-size: var(--fs-small); animation: toast-in var(--dur) var(--ease);
+}
+.toast-glyph { flex: none; }
+.toast-word { flex: none; font-weight: 600; }
+.toast-text { flex: 1; min-width: 0; color: var(--text-2); overflow-wrap: anywhere; }
+.toast-done .toast-glyph, .toast-done .toast-word { color: var(--done); }
+.toast-error .toast-glyph, .toast-error .toast-word { color: var(--error); }
+.toast-info .toast-glyph, .toast-info .toast-word { color: var(--run); }
+.toast-close { flex: none; border: 0; background: transparent; color: var(--text-3); border-radius: var(--r-chip); width: 24px; height: 24px; cursor: pointer; }
+.toast-close:hover { background: var(--surface-2); color: var(--text-1); }
+.toast-close:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.pal-backdrop { position: fixed; inset: 0; z-index: 60; background: var(--scrim); display: flex; align-items: flex-start; justify-content: center; padding-top: 14vh; }
+.pal-card { width: min(520px, calc(100vw - 32px)); max-height: 60vh; display: flex; flex-direction: column; border: 0; border-radius: var(--r-window); padding: var(--space-2); background: var(--glass-pop); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); box-shadow: var(--shadow-pop); }
+.pal-card:focus { outline: none; }
+.pal-input { border: 0; background: var(--surface-2); color: var(--text-1); height: var(--h-ctl-lg); border-radius: var(--r-ctl); padding: 0 var(--space-3); font-size: var(--fs-body); }
+.pal-input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.pal-list { overflow-y: auto; margin-top: var(--space-2); display: flex; flex-direction: column; gap: 2px; }
+.pal-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); min-height: var(--h-ctl-lg); padding: 0 var(--space-3); border-radius: var(--r-ctl); color: var(--text-2); font-size: var(--fs-body); cursor: pointer; }
+.pal-row.active { background: var(--surface-sel); color: var(--text-1); }
+.pal-kbd { color: var(--text-4); font-size: var(--fs-caption); }
+.pal-empty { padding: var(--space-4); color: var(--text-3); font-size: var(--fs-small); }
+.pal-empty[hidden] { display: none; }
+.offline-banner { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-4); background: var(--error-soft); color: var(--text-1); font-size: var(--fs-small); }
+.offline-banner[hidden] { display: none; }
+.offline-banner span:last-child { color: var(--text-2); }
+.offline-glyph { color: var(--error); }
+.reduce-motion .toast { animation: none; }
+@media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
