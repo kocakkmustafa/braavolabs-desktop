@@ -559,5 +559,11 @@
   "changes.tab": "Changes",
   "chat.seeChanges": "See changes",
   "changes.root": "Root",
-  "panel.approvalsPending": "{count} approvals waiting"
+  "panel.approvalsPending": "{count} approvals waiting",
+  "settings.page.appearance": "Appearance",
+  "settings.page.keys": "Models and keys",
+  "settings.page.connectors": "Connectors",
+  "settings.page.approvals": "Approval rules",
+  "settings.page.companion": "Phone companion",
+  "settings.page.privacy": "Privacy and data"
 }

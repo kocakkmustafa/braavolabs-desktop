@@ -6,6 +6,7 @@
  * Login handlers have source-executing regression tests; real WebView paint,
  * native validity bubbles and keyboard behavior still need native UI checks.
  */
+import { SETTINGS_PAGE_IDS, nextSettingsPage, type SettingsPageId } from "./settings-pages";
 import { resolveTheme, THEMES } from "./theme";
 import type { Config } from "./config";
 import type { ModelSelection } from "./compare-selection";
@@ -296,6 +297,12 @@ const ICONS = {
   retry: ["M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8", "M21 3v5h-5", "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16", "M8 16H3v5"],
   file: ["M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z", "M14 2v4a2 2 0 0 0 2 2h4"],
   folder: ["M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"],
+  sun: ["M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z", "M12 2v2", "M12 20v2", "m4.93 4.93 1.41 1.41", "m17.66 17.66 1.41 1.41", "M2 12h2", "M20 12h2", "m6.34 17.66-1.41 1.41", "m19.07 4.93-1.41 1.41"],
+  key: ["m21 2-9.6 9.6", "m15.5 7.5 3 3L22 7l-3-3", "M7.5 10.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11Z"],
+  plug: ["M12 22v-5", "M9 8V2", "M15 8V2", "M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"],
+  shield: ["M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"],
+  phone: ["M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Z", "M12 18h.01"],
+  lock: ["M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Z", "M7 11V7a5 5 0 0 1 10 0v4"],
   activity: ["M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"],
 } as const;
 const icon = (name: keyof typeof ICONS, size = 16): SVGSVGElement => {
@@ -1146,7 +1153,6 @@ export function renderWorkspace(deps: UiDeps): void {
   const sheetClose = el("button", "sheet-close mono", t("settings.close"));
   sheetHead.append(sheetClose);
   const sheetBody = el("div", "sheet-body");
-  sheetBody.append(languageSelector(deps), themeSelector(deps));
 
   // Design-v3 settings IA: four labelled sections. Rows are thin wiring —
   // anything with behavior delegates to tested modules (vault/mcp/gov/prefs).
@@ -1167,7 +1173,6 @@ export function renderWorkspace(deps: UiDeps): void {
   });
   const secModels = el("div", "sheet-sec");
   secModels.append(
-    el("div", "sheet-sec-label mono", t("settings.secModels")),
     keysSec,
     setRow(t("settings.vendorCli"), t("settings.vendorCliSub"), openCodeBtn),
   );
@@ -1175,7 +1180,6 @@ export function renderWorkspace(deps: UiDeps): void {
   // CONNECTORS & HOSTS — MCP registry + the host-runtime disclosure line.
   const secConn = el("div", "sheet-sec");
   secConn.append(
-    el("div", "sheet-sec-label mono", t("settings.secConnectors")),
     mcpSec,
     setRow(t("settings.hosts"), t("settings.hostsSub")),
   );
@@ -1303,7 +1307,6 @@ export function renderWorkspace(deps: UiDeps): void {
   const secComp = el("div", "sheet-sec");
   const compRow = setRow(t("settings.companionTitle"), t("settings.companionSub"), compToggle);
   secComp.append(
-    el("div", "sheet-sec-label mono", t("settings.secCompanion")),
     compRow,
     compStatus,
     setRow(t("settings.companionPhone"), t("settings.companionPhoneSub")),
@@ -1329,7 +1332,6 @@ export function renderWorkspace(deps: UiDeps): void {
   killBtn.addEventListener("click", () => void showKillDialog(deps));
   const secGov = el("div", "sheet-sec");
   secGov.append(
-    el("div", "sheet-sec-label mono", t("settings.secGovernance")),
     setRow(t("settings.policyTitle"), t("settings.policySub")),
     policyList,
     setRow(t("settings.killTitle"), t("settings.killSub"), killBtn),
@@ -1347,16 +1349,62 @@ export function renderWorkspace(deps: UiDeps): void {
     notifyBrandMotionPreference();
     syncRm();
   });
-  const secApp = el("div", "sheet-sec");
-  secApp.append(
-    el("div", "sheet-sec-label mono", t("settings.secApp")),
+  const secAppearance = el("div", "sheet-sec");
+  secAppearance.append(
+    languageSelector(deps),
+    themeSelector(deps),
     setRow(t("settings.reducedMotion"), t("settings.reducedMotionSub"), rmToggle),
     rmNotice,
-    setRow(t("settings.telemetry"), t("settings.telemetrySub")),
   );
+  const secPrivacy = el("div", "sheet-sec");
+  secPrivacy.append(setRow(t("settings.telemetry"), t("settings.telemetrySub")));
 
-  sheetBody.append(secModels, secConn, secComp, secGov, secApp);
-  sheet.append(sheetHead, sheetBody);
+  // Sol sayfa listesi + sağ sayfa paneli (Ilık Grafit D13–D24). Yalnız koda karşılığı
+  // olan sayfalar var; her mevcut ayar tam olarak bir sayfada durur.
+  const pageContent: Record<SettingsPageId, { icon: keyof typeof ICONS; sections: HTMLElement[] }> = {
+    appearance: { icon: "sun", sections: [secAppearance] },
+    keys: { icon: "key", sections: [secModels] },
+    connectors: { icon: "plug", sections: [secConn] },
+    approvals: { icon: "shield", sections: [secGov] },
+    companion: { icon: "phone", sections: [secComp] },
+    privacy: { icon: "lock", sections: [secPrivacy] },
+  };
+  const sheetMain = el("div", "sheet-main");
+  const pageNav = el("div", "set-nav");
+  pageNav.setAttribute("role", "tablist"); pageNav.setAttribute("aria-orientation", "vertical");
+  pageNav.setAttribute("aria-label", t("settings.title"));
+  const pageTabs = new Map<SettingsPageId, HTMLButtonElement>();
+  const pagePanels = new Map<SettingsPageId, HTMLElement>();
+  let currentPage: SettingsPageId = SETTINGS_PAGE_IDS[0];
+  const showPage = (id: SettingsPageId, focus = false) => {
+    currentPage = id;
+    for (const pid of SETTINGS_PAGE_IDS) {
+      const on = pid === id;
+      const tab = pageTabs.get(pid)!, panel = pagePanels.get(pid)!;
+      tab.classList.toggle("active", on); tab.setAttribute("aria-selected", String(on)); tab.tabIndex = on ? 0 : -1;
+      panel.hidden = !on;
+    }
+    if (focus) pageTabs.get(id)!.focus();
+  };
+  for (const pid of SETTINGS_PAGE_IDS) {
+    const tab = el("button", "set-nav-item");
+    tab.type = "button"; tab.id = `set-tab-${pid}`;
+    tab.setAttribute("role", "tab"); tab.setAttribute("aria-controls", `set-panel-${pid}`);
+    tab.append(icon(pageContent[pid].icon, 16), el("span", undefined, t(`settings.page.${pid}`)));
+    tab.addEventListener("click", () => showPage(pid));
+    tab.addEventListener("keydown", (e) => {
+      const next = nextSettingsPage(SETTINGS_PAGE_IDS, pid, e.key) as SettingsPageId | null;
+      if (next) { e.preventDefault(); showPage(next, true); }
+    });
+    pageNav.append(tab); pageTabs.set(pid, tab);
+    const panel = el("div", "set-page");
+    panel.id = `set-panel-${pid}`; panel.setAttribute("role", "tabpanel"); panel.setAttribute("aria-labelledby", tab.id);
+    panel.append(el("h2", "set-page-title", t(`settings.page.${pid}`)), ...pageContent[pid].sections);
+    sheetBody.append(panel); pagePanels.set(pid, panel);
+  }
+  showPage(currentPage);
+  sheetMain.append(pageNav, sheetBody);
+  sheet.append(sheetHead, sheetMain);
   backdrop.append(sheet);
   root.append(backdrop);
 

@@ -536,5 +536,11 @@
   "changes.tab": "Değişiklikler",
   "chat.seeChanges": "Değişiklikleri gör",
   "changes.root": "Kök",
-  "panel.approvalsPending": "{count} onay bekliyor"
+  "panel.approvalsPending": "{count} onay bekliyor",
+  "settings.page.appearance": "Görünüm",
+  "settings.page.keys": "Modeller ve anahtarlar",
+  "settings.page.connectors": "Bağlayıcılar",
+  "settings.page.approvals": "Onay kuralları",
+  "settings.page.companion": "Telefon eşliği",
+  "settings.page.privacy": "Gizlilik ve veri"
 }
