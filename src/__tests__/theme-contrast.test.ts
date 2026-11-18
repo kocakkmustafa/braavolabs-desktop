@@ -21,14 +21,19 @@ it("Ilık Grafit: metin 1-2 her yüzeyde, metin 3 zemin/kartta 4.5:1; metin 4 ve
     expect(contrast("#ffffff", p["--danger-fill"])).toBeGreaterThanOrEqual(4.5);
   }
 });
-it("eski belirteç adları yeni belirteçlere takma ad olarak bağlı; global kenarsız denetimler", () => {
-  for (const [legacy, token] of [["--obsidian", "--bg"], ["--arc-blue", "--primary"], ["--ember", "--run"], ["--molten", "--error"], ["--text", "--text-1"]]) {
-    expect(css).toMatch(new RegExp(`${legacy}:\\s*var\\(${token}\\)`));
-  }
+it("eski takma adlar kaldırıldı; yeni belirteçler iki temada tanımlı; global kenarsız denetimler", () => {
+  expect(css).not.toMatch(/--(obsidian|steel-\d+|arc-blue|arc|ember|ember-dim|molten|gunmetal|radius|radius-sm|mono|sans|muted|text|text-muted|text-dim)\s*:/);
+  expect(css).not.toMatch(/var\(--(obsidian|steel-\d+|arc-blue|arc|ember|ember-dim|molten|gunmetal|radius|radius-sm|mono|sans|muted|text|text-muted|text-dim)[,)]/);
+  for (const p of palettes()) for (const token of ["--bg", "--surface-1", "--surface-card", "--surface-2", "--surface-sel", "--text-1", "--text-2", "--text-3", "--text-4", "--primary", "--primary-ink", "--run", "--approve", "--error", "--done", "--queue", "--focus-ring", "--danger-fill"]) expect(p[token], token).toMatch(/^#[\da-f]{6}$/);
   expect(css).toMatch(/button,\s*input,\s*select,\s*textarea\s*\{[^}]*border:\s*0;/);
   expect(css).toContain("outline: 2px solid var(--focus-ring)");
-  expect(css).toMatch(/data-theme="light"\] \{[^}]*--text-dim: var\(--text-2\);[^}]*--steel-400: var\(--text-2\);/);
+  expect(css).toMatch(/data-theme="light"\] \{[^}]*--text-sub: var\(--text-2\);/);
   expect(css).not.toMatch(/\.toggle\.on::after \{[^}]*#fff/);
+});
+it("--text-sub (küçük metin tonu) her yüzeyde 4.5:1", () => {
+  const sub = (p: Record<string, string>, theme: string) => css.includes("--text-sub: var(--text-2);") && theme === "light" ? p["--text-2"] : p["--text-3"];
+  const [dark, light] = palettes();
+  for (const [p, theme] of [[dark, "dark"], [light, "light"]] as const) for (const bg of ["--bg", "--surface-1", "--surface-card", "--surface-2"]) expect(contrast(sub(p, theme), p[bg]), `${theme} text-sub/${bg}`).toBeGreaterThanOrEqual(4.5);
 });
 it("preserves Inspector at narrow widths and allows larger text and motion preference without a GUI claim", () => {
   expect(css).not.toMatch(/\.inspector\s*\{\s*display:\s*none/);
