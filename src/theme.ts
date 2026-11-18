@@ -12,6 +12,7 @@ interface ThemeMedia {
 }
 export function createTheme(root: ThemeRoot, storage: KVStorage | undefined, media: ThemeMedia) {
   let choice: Theme = "system";
+  const listeners = new Set<() => void>();
   try { const saved = storage?.getItem(THEME_KEY); if (isTheme(saved)) choice = saved; } catch { /* use system */ }
   const apply = () => {
     root.dataset.themePreference = choice;
@@ -25,8 +26,11 @@ export function createTheme(root: ThemeRoot, storage: KVStorage | undefined, med
     set(value: Theme): boolean {
       if (!isTheme(value)) throw new Error("unsupported theme");
       choice = value; apply();
+      for (const l of [...listeners]) l();
       try { if (!storage) return false; storage.setItem(THEME_KEY, value); return true; } catch { return false; }
     },
+    /** Tema her değiştiğinde (ayarlar, komut paleti…) çağrılır; abonelikten çıkma işlevi döner. */
+    subscribe(listener: () => void): () => void { listeners.add(listener); return () => { listeners.delete(listener); }; },
     dispose: () => media.removeEventListener("change", apply),
   };
 }

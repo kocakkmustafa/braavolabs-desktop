@@ -6,6 +6,9 @@
  * Login handlers have source-executing regression tests; real WebView paint,
  * native validity bubbles and keyboard behavior still need native UI checks.
  */
+import { createToaster, type ToastKind } from "./toast";
+import { createPaletteController, isPaletteShortcut, paletteBlocked, type PaletteCommand } from "./palette";
+import { SETTINGS_PAGE_IDS, nextSettingsPage, type SettingsPageId } from "./settings-pages";
 import { resolveTheme, THEMES } from "./theme";
 import type { Config } from "./config";
 import type { ModelSelection } from "./compare-selection";
@@ -296,6 +299,12 @@ const ICONS = {
   retry: ["M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8", "M21 3v5h-5", "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16", "M8 16H3v5"],
   file: ["M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z", "M14 2v4a2 2 0 0 0 2 2h4"],
   folder: ["M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"],
+  sun: ["M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z", "M12 2v2", "M12 20v2", "m4.93 4.93 1.41 1.41", "m17.66 17.66 1.41 1.41", "M2 12h2", "M20 12h2", "m6.34 17.66-1.41 1.41", "m19.07 4.93-1.41 1.41"],
+  key: ["m21 2-9.6 9.6", "m15.5 7.5 3 3L22 7l-3-3", "M7.5 10.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11Z"],
+  plug: ["M12 22v-5", "M9 8V2", "M15 8V2", "M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"],
+  shield: ["M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"],
+  phone: ["M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Z", "M12 18h.01"],
+  lock: ["M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Z", "M7 11V7a5 5 0 0 1 10 0v4"],
   activity: ["M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"],
 } as const;
 const icon = (name: keyof typeof ICONS, size = 16): SVGSVGElement => {
@@ -358,6 +367,20 @@ function speakButton(t: Translator, text: () => string): HTMLButtonElement | nul
   return btn;
 }
 
+let toaster: ReturnType<typeof createToaster> | null = null;
+/** Toast göster (D7). Satır içi role=status/alert bildirimleri yerinde kalır; bu ek, görünür katmandır. */
+function notify(t: Translator, kind: ToastKind, text: string): void {
+  if (typeof document === "undefined" || !document.body) return;
+  if (!toaster) {
+    let host = document.querySelector<HTMLElement>(".toast-host");
+    if (!host) { host = el("div", "toast-host"); document.body.append(host); }
+    const h = host;
+    toaster = createToaster({ createElement: (tag) => document.createElement(tag) as never, host: () => h as never },
+      { info: t("toast.info"), done: t("toast.done"), error: t("toast.error") }, t("toast.dismiss"));
+  }
+  toaster.show(kind, text);
+}
+
 /** Keyboard containment and restoration for in-app dialogs. Native confirmation
  * remains the separate host authority; this only improves navigation. */
 function containDialog(card: HTMLElement, dismiss: () => void): () => void {
@@ -401,6 +424,8 @@ function themeSelector(deps: UiDeps): HTMLElement {
     const option = el("option", undefined, deps.t(`theme.${value}`)); option.value = value; select.append(option);
   }
   select.value = theme.choice();
+  // Tema başka yerden de değişir (komut paleti): seçici tek kaynaktan (theme) eşitlenir.
+  theme.subscribe?.(() => { select.value = theme.choice(); });
   const notice = el("div", "storage-notice"); notice.setAttribute("role", "status");
   select.addEventListener("change", () => {
     const value = THEMES.find(value => value === select.value); if (!value) return;
@@ -1146,7 +1171,6 @@ export function renderWorkspace(deps: UiDeps): void {
   const sheetClose = el("button", "sheet-close mono", t("settings.close"));
   sheetHead.append(sheetClose);
   const sheetBody = el("div", "sheet-body");
-  sheetBody.append(languageSelector(deps), themeSelector(deps));
 
   // Design-v3 settings IA: four labelled sections. Rows are thin wiring —
   // anything with behavior delegates to tested modules (vault/mcp/gov/prefs).
@@ -1167,7 +1191,6 @@ export function renderWorkspace(deps: UiDeps): void {
   });
   const secModels = el("div", "sheet-sec");
   secModels.append(
-    el("div", "sheet-sec-label mono", t("settings.secModels")),
     keysSec,
     setRow(t("settings.vendorCli"), t("settings.vendorCliSub"), openCodeBtn),
   );
@@ -1175,7 +1198,6 @@ export function renderWorkspace(deps: UiDeps): void {
   // CONNECTORS & HOSTS — MCP registry + the host-runtime disclosure line.
   const secConn = el("div", "sheet-sec");
   secConn.append(
-    el("div", "sheet-sec-label mono", t("settings.secConnectors")),
     mcpSec,
     setRow(t("settings.hosts"), t("settings.hostsSub")),
   );
@@ -1191,7 +1213,9 @@ export function renderWorkspace(deps: UiDeps): void {
   const baseGov = deps.gov;
   const compToggle = el("button", "toggle");
   const compStatus = el("div", "set-sub mono", t("settings.companionOff"));
-  const syncComp = () => compToggle.classList.toggle("on", !!compBridge);
+  compToggle.setAttribute("aria-label", t("settings.companionTitle"));
+  const syncComp = () => { compToggle.classList.toggle("on", !!compBridge); compToggle.setAttribute?.("aria-pressed", String(!!compBridge)); };
+  syncComp();
   const stopCompanion = async () => {
     deps.gov = baseGov;
     activeRelayStopper = null;
@@ -1303,7 +1327,6 @@ export function renderWorkspace(deps: UiDeps): void {
   const secComp = el("div", "sheet-sec");
   const compRow = setRow(t("settings.companionTitle"), t("settings.companionSub"), compToggle);
   secComp.append(
-    el("div", "sheet-sec-label mono", t("settings.secCompanion")),
     compRow,
     compStatus,
     setRow(t("settings.companionPhone"), t("settings.companionPhoneSub")),
@@ -1329,7 +1352,6 @@ export function renderWorkspace(deps: UiDeps): void {
   killBtn.addEventListener("click", () => void showKillDialog(deps));
   const secGov = el("div", "sheet-sec");
   secGov.append(
-    el("div", "sheet-sec-label mono", t("settings.secGovernance")),
     setRow(t("settings.policyTitle"), t("settings.policySub")),
     policyList,
     setRow(t("settings.killTitle"), t("settings.killSub"), killBtn),
@@ -1347,16 +1369,65 @@ export function renderWorkspace(deps: UiDeps): void {
     notifyBrandMotionPreference();
     syncRm();
   });
-  const secApp = el("div", "sheet-sec");
-  secApp.append(
-    el("div", "sheet-sec-label mono", t("settings.secApp")),
+  const secAppearance = el("div", "sheet-sec");
+  secAppearance.append(
+    languageSelector(deps),
+    themeSelector(deps),
     setRow(t("settings.reducedMotion"), t("settings.reducedMotionSub"), rmToggle),
     rmNotice,
-    setRow(t("settings.telemetry"), t("settings.telemetrySub")),
   );
+  const secPrivacy = el("div", "sheet-sec");
+  secPrivacy.append(setRow(t("settings.telemetry"), t("settings.telemetrySub")));
 
-  sheetBody.append(secModels, secConn, secComp, secGov, secApp);
-  sheet.append(sheetHead, sheetBody);
+  // Sol sayfa listesi + sağ sayfa paneli (Ilık Grafit D13–D24). Yalnız koda karşılığı
+  // olan sayfalar var; her mevcut ayar tam olarak bir sayfada durur.
+  const pageContent: Record<SettingsPageId, { icon: keyof typeof ICONS; sections: HTMLElement[] }> = {
+    appearance: { icon: "sun", sections: [secAppearance] },
+    keys: { icon: "key", sections: [secModels] },
+    connectors: { icon: "plug", sections: [secConn] },
+    approvals: { icon: "shield", sections: [secGov] },
+    companion: { icon: "phone", sections: [secComp] },
+    privacy: { icon: "lock", sections: [secPrivacy] },
+  };
+  const sheetMain = el("div", "sheet-main");
+  const pageNav = el("div", "set-nav");
+  pageNav.setAttribute("role", "tablist");
+  const narrow = typeof matchMedia === "function" ? matchMedia("(max-width: 640px)") : null;
+  const syncOrientation = () => pageNav.setAttribute("aria-orientation", narrow?.matches ? "horizontal" : "vertical");
+  syncOrientation(); narrow?.addEventListener?.("change", syncOrientation);
+  pageNav.setAttribute("aria-label", t("settings.title"));
+  const pageTabs = new Map<SettingsPageId, HTMLButtonElement>();
+  const pagePanels = new Map<SettingsPageId, HTMLElement>();
+  let currentPage: SettingsPageId = SETTINGS_PAGE_IDS[0];
+  const showPage = (id: SettingsPageId, focus = false) => {
+    currentPage = id;
+    for (const pid of SETTINGS_PAGE_IDS) {
+      const on = pid === id;
+      const tab = pageTabs.get(pid)!, panel = pagePanels.get(pid)!;
+      tab.classList.toggle("active", on); tab.setAttribute("aria-selected", String(on)); tab.tabIndex = on ? 0 : -1;
+      panel.hidden = !on;
+    }
+    if (focus) pageTabs.get(id)!.focus();
+  };
+  for (const pid of SETTINGS_PAGE_IDS) {
+    const tab = el("button", "set-nav-item");
+    tab.type = "button"; tab.id = `set-tab-${pid}`;
+    tab.setAttribute("role", "tab"); tab.setAttribute("aria-controls", `set-panel-${pid}`);
+    tab.append(icon(pageContent[pid].icon, 16), el("span", undefined, t(`settings.page.${pid}`)));
+    tab.addEventListener("click", () => showPage(pid));
+    tab.addEventListener("keydown", (e) => {
+      const next = nextSettingsPage(SETTINGS_PAGE_IDS, pid, e.key, { horizontal: !!narrow?.matches, rtl: document.documentElement.dir === "rtl" }) as SettingsPageId | null;
+      if (next) { e.preventDefault(); showPage(next, true); }
+    });
+    pageNav.append(tab); pageTabs.set(pid, tab);
+    const panel = el("div", "set-page");
+    panel.id = `set-panel-${pid}`; panel.setAttribute("role", "tabpanel"); panel.setAttribute("aria-labelledby", tab.id);
+    panel.append(el("h2", "set-page-title", t(`settings.page.${pid}`)), ...pageContent[pid].sections);
+    sheetBody.append(panel); pagePanels.set(pid, panel);
+  }
+  showPage(currentPage);
+  sheetMain.append(pageNav, sheetBody);
+  sheet.append(sheetHead, sheetMain);
   backdrop.append(sheet);
   root.append(backdrop);
 
@@ -2392,6 +2463,84 @@ export function renderWorkspace(deps: UiDeps): void {
   // where the C3/#1 regression is guarded.
   signOutBtn.addEventListener("click", () => performSignOut(cfg, deps));
 
+  // --- çevrimdışı bandı (D30): tarayıcının ağ olayları; sahte durum yok ---
+  const offlineBanner = el("div", "offline-banner");
+  offlineBanner.setAttribute("role", "status");
+  offlineBanner.append(el("span", "offline-glyph", "■"), el("b", undefined, t("offline.title")), el("span", undefined, t("offline.sub")));
+  offlineBanner.hidden = typeof navigator === "undefined" || navigator.onLine !== false;
+  win.prepend(offlineBanner);
+  // Tek duyuru kanalı: bant. Çevrimiçi olunca bant "geri geldi" der ve kısa süre sonra kapanır.
+  const offlineTitle = offlineBanner.querySelector("b") as HTMLElement;
+  const offlineSub = offlineBanner.lastElementChild as HTMLElement;
+  let backTimer: ReturnType<typeof setTimeout> | undefined;
+  const onOffline = () => {
+    clearTimeout(backTimer);
+    offlineTitle.textContent = t("offline.title"); offlineSub.textContent = t("offline.sub"); offlineBanner.classList.remove("back"); offlineBanner.hidden = false;
+  };
+  const onOnline = () => {
+    offlineTitle.textContent = t("offline.back"); offlineSub.textContent = ""; offlineBanner.classList.add("back");
+    clearTimeout(backTimer); backTimer = setTimeout(() => { offlineBanner.hidden = true; offlineBanner.classList.remove("back"); }, 4000);
+  };
+  window.addEventListener("offline", onOffline);
+  window.addEventListener("online", onOnline);
+
+  // --- komut paleti ⌘K / Ctrl+K (D6): küçük, klavye gezinmeli, role=dialog + odak tuzağı ---
+  const paletteCommands = (): PaletteCommand[] => [
+    { id: "new", label: t("rail.newChat"), run: () => { applySurface("chat"); startNewSession(); } },
+    { id: "settings", label: t("titlebar.settings"), run: () => setSettings(true) },
+    { id: "chat", label: t("surface.chat"), run: () => applySurface("chat") },
+    { id: "company", label: t("surface.company"), run: () => applySurface("company") },
+    { id: "code", label: t("surface.code"), run: () => applySurface("code") },
+    { id: "theme", label: t("palette.toggleTheme"), run: () => {
+      const th = resolveTheme(); const next = th.choice() === "dark" ? "light" : "dark";
+      if (!th.set(next)) notify(t, "error", t("settings.preferenceUnsaved"));
+    } },
+  ];
+  let paintPalette: () => void = () => {};
+  // Açık onay/kill modalı (.approve-overlay), ayarlar ya da palet varken palet açılmaz:
+  // bekleyen onay varken arkadaki "Yeni sohbet" çalıştırılamaz.
+  const palette = createPaletteController({
+    commands: paletteCommands,
+    blocked: () => paletteBlocked({ paletteOpen: false, settingsOpen, modalOpen: !!document.querySelector(".approve-overlay") }),
+    onChange: () => paintPalette(),
+  });
+  const openPalette = () => {
+    if (!palette.open()) return;
+    const pBackdrop = el("div", "pal-backdrop");
+    const paletteCard = el("div", "pal-card");
+    paletteCard.setAttribute("aria-label", t("palette.title"));
+    const input = el("input", "pal-input") as HTMLInputElement;
+    input.type = "text"; input.placeholder = t("palette.placeholder");
+    input.setAttribute("role", "combobox"); input.setAttribute("aria-expanded", "true"); input.setAttribute("aria-controls", "pal-list"); input.setAttribute("aria-label", t("palette.title"));
+    const list = el("div", "pal-list"); list.id = "pal-list"; list.setAttribute("role", "listbox");
+    const empty = el("div", "pal-empty", t("palette.empty")); empty.setAttribute("role", "status");
+    let release: (() => void) | undefined;
+    const teardown = () => { paintPalette = () => {}; release?.(); release = undefined; pBackdrop.remove(); };
+    paintPalette = () => {
+      if (!palette.isOpen()) { teardown(); return; }
+      const shown = palette.shown(), active = palette.active();
+      list.replaceChildren();
+      shown.forEach((c, i) => {
+        const row = el("div", `pal-row${i === active ? " active" : ""}`);
+        row.id = `pal-opt-${c.id}`; row.setAttribute("role", "option"); row.setAttribute("aria-selected", String(i === active));
+        row.append(el("span", undefined, c.label));
+        row.addEventListener("click", () => palette.choose(i));
+        row.addEventListener("mousemove", () => palette.setActive(i));
+        list.append(row);
+      });
+      empty.hidden = shown.length > 0;
+      if (shown[active]) input.setAttribute("aria-activedescendant", `pal-opt-${shown[active].id}`); else input.removeAttribute("aria-activedescendant");
+    };
+    input.addEventListener("input", () => palette.setQuery(input.value));
+    input.addEventListener("keydown", (e) => { if (palette.key(e)) e.preventDefault(); });
+    pBackdrop.addEventListener("click", (e) => { if (e.target === pBackdrop) palette.close(); });
+    paletteCard.append(input, list, empty); pBackdrop.append(paletteCard); root.append(pBackdrop);
+    release = containDialog(paletteCard, () => palette.close());
+    paintPalette(); input.focus();
+  };
+  const onPaletteKey = (e: KeyboardEvent) => { if (isPaletteShortcut(e)) { e.preventDefault(); openPalette(); } };
+  window.addEventListener("keydown", onPaletteKey);
+
   // Everything this render owns beyond the DOM: the companion bridge + the
   // governance decorator installed with it, and the window key listener.
   disposeWorkspace = () => {
@@ -2407,6 +2556,10 @@ export function renderWorkspace(deps: UiDeps): void {
     motions.clear();
     thinkingMotions.clear();
     window.removeEventListener("keydown", onWorkspaceKey);
+    window.removeEventListener("keydown", onPaletteKey);
+    window.removeEventListener("offline", onOffline);
+    window.removeEventListener("online", onOnline);
+    clearTimeout(backTimer);
     window.removeEventListener("click", onNowOutside);
     clearTimeout(searchTimer);
     if (compBridge || startingCompanion) void stopCompanion();
