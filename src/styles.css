@@ -1,69 +1,139 @@
 /*
- * Braavolabs Desktop — obsidian identity (§5). NO GREEN anywhere.
- *   obsidian  #0A0B0F   base canvas
- *   steel     grays     structure / dividers / muted text
- *   arc-blue  #3B82F6 / #60A5FA   primary action, focus, model card rims
- *   ember     #F97316   "running" / in-flight / saved-$ footer
- *   molten    #FF4D4D   errors only
- *   JetBrains Mono for metrics (cost, tier, confidence, tokens)
+ * Braavolabs Desktop — Ilık Grafit (tasarım sistemi v1.0, 2026-11-18).
+ * Ekranın %95'i gri ölçek; renk yalnız duruma ayrılır (çalışıyor ● / onay ◆ / hata ■).
+ * Vurgu rengi yok: ana düğme metin rengiyle aynı. Çerçevesiz: ayrım ton + boşluk + gölge.
+ * Durum renkle birlikte simge + sözcükle de anlatılır.
+ *
+ * Yeni belirteçler (--bg, --surface-*, --text-1..4, --run/--approve/--error/--done/--queue,
+ * --primary, --focus-ring, --font-*, --space-*, --r-*, --dur-*) tek kaynaktır; eski adlar
+ * (--obsidian, --steel-*, --arc-blue, --ember, --molten) aşağıda bunlara bağlı takma adlardır
+ * ve UI-01..03 ekranları yeniden yazılırken kaldırılır.
  */
 
 :root {
-  --obsidian: #0a0b0f;
-  --obsidian-raised: #101218;
-  --obsidian-inset: #0d0e13;
-  --steel-900: #14161d;
-  --steel-800: #1b1e27;
-  --steel-700: #262a35;
-  --steel-600: #363b48;
-  --steel-500: #4a5160;
-  --steel-400: #9aa5b7;
-  --steel-300: #98a1b2;
-  --steel-200: #c6cdda;
-  --text: #e7ebf2;
-  --text-muted: #98a1b2;
-  --text-dim: #9aa5b7;
-  --arc-blue: #2563eb;
-  --arc-blue-lit: #60a5fa;
-  --ember: #f97316;
-  --ember-dim: #b45c22;
-  --molten: #ff4d4d;
-  --rail-w: 232px;
+  /* zemin, yüzeyler (düz tonlar; saydam cam katmanı --glass-* ile ayrı) */
+  --bg: #121110;
+  --glow-a: rgba(217, 178, 110, 0.16);
+  --glow-b: rgba(197, 182, 230, 0.14);
+  --surface-1: #181716; /* kenar çubuğu / sağ panel */
+  --surface-card: #21201f; /* kart, girdi */
+  --surface-2: #272625; /* ikincil düğme, hover */
+  --surface-sel: #383736; /* seçili */
+  --glass-window: rgba(26, 25, 24, 0.55);
+  --glass-pop: rgba(34, 33, 31, 0.9);
+  --shadow-window: 0 30px 80px rgba(0, 0, 0, 0.38);
+  --shadow-pop: 0 18px 48px rgba(0, 0, 0, 0.5);
+  --glass-blur: blur(28px) saturate(1.15);
+  /* metin */
+  --text-1: #e8e7e4;
+  --text-2: #c1bfbb;
+  --text-3: #a19f9b;
+  --text-4: #8a8782;
+  /* ana düğme */
+  --primary: #edeae7;
+  --primary-ink: #1a1918;
+  /* durum */
+  --run: #d9b26e;
+  --approve: #c5b6e6;
+  --error: #e8958c;
+  --done: #a19f9b;
+  --queue: #5e5c59;
+  --diff-add: #c3d2f2;
+  --diff-del: #edb3ac;
+  --focus-ring: #c5b6e6;
+  /* yazı, ölçü, hareket */
+  --font-ui: "Geist Variable", Geist, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Geist Mono Variable", "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --fs-caption: 0.75rem;
+  --fs-small: 0.8125rem;
+  --fs-body: 0.875rem;
+  --fs-chat: 0.9375rem;
+  --fs-title: 1.0625rem;
+  --fs-title-lg: 1.25rem;
+  --fs-display: 1.5rem;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --r-chip: 6px;
+  --r-ctl: 8px;
+  --r-card: 12px;
+  --r-window: 14px;
+  --h-ctl: 32px;
+  --h-ctl-lg: 36px;
+  --dur-fast: 120ms;
+  --dur: 200ms;
+  --ease: ease-out;
+  --rail-w: 260px;
   --inspector-w: 320px;
-  --radius: 10px;
-  --radius-sm: 7px;
-  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* eski adlar → Ilık Grafit (geçiş takma adları) */
+  --obsidian: var(--bg);
+  --obsidian-raised: var(--surface-card);
+  --obsidian-inset: var(--surface-1);
+  --steel-900: var(--surface-card);
+  --steel-800: var(--surface-2);
+  --steel-700: var(--surface-sel);
+  --steel-600: #4a4947;
+  --steel-500: var(--queue);
+  --steel-400: var(--text-3);
+  --steel-300: var(--text-3);
+  --steel-200: var(--text-2);
+  --text: var(--text-1);
+  --text-muted: var(--text-2);
+  --text-dim: var(--text-3);
+  --arc-blue: var(--primary);
+  --arc-blue-lit: var(--text-1);
+  --ember: var(--run);
+  --ember-dim: #a98a55;
+  --molten: var(--error);
+  --radius: var(--r-card);
+  --radius-sm: var(--r-ctl);
+  --mono: var(--font-mono);
   --muted: var(--text-muted);
   --arc: var(--arc-blue);
   --gunmetal: var(--steel-700);
-  --danger-fill: #b91c1c;
+  --danger-fill: #b8493d;
   color-scheme: dark;
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif;
+  --sans: var(--font-ui);
 }
 
 
 :root[data-theme="light"] {
   color-scheme: light;
-  --obsidian: #f7f8fc;
-  --obsidian-raised: #ffffff;
-  --obsidian-inset: #eef1f7;
-  --steel-900: #e9edf4;
-  --steel-800: #dce2ec;
-  --steel-700: #b8c2d2;
-  --steel-600: #8895aa;
-  --steel-500: #65748a;
-  --steel-400: #526078;
-  --steel-300: #45536b;
-  --steel-200: #34425a;
-  --text: #182439;
-  --text-muted: #42516a;
-  --text-dim: #53627a;
-  --arc-blue: #1d4ed8;
-  --arc-blue-lit: #1d4ed8;
-  --ember: #a14409;
-  --ember-dim: #a14409;
-  --molten: #b91c1c;
+  --bg: #ece9e4;
+  --glow-a: rgba(217, 178, 110, 0.12);
+  --glow-b: rgba(197, 182, 230, 0.12);
+  --surface-1: #e8e5e0;
+  --surface-card: #f4f2ee;
+  --surface-2: #e2dfda;
+  --surface-sel: #d1ceca;
+  --glass-window: rgba(255, 255, 255, 0.62);
+  --glass-pop: rgba(255, 255, 255, 0.94);
+  --shadow-window: 0 30px 80px rgba(26, 25, 24, 0.16);
+  --shadow-pop: 0 18px 48px rgba(26, 25, 24, 0.2);
+  --text-1: #1f1e1c;
+  --text-2: #4a4845;
+  --text-3: #6b6863;
+  --text-4: #85827c;
+  --primary: #1f1e1c;
+  --primary-ink: #faf9f7;
+  --run: #a97b2c;
+  --approve: #7a64b5;
+  --error: #c0574b;
+  --done: #6b6863;
+  --queue: #b5b1ab;
+  --diff-add: #2f4f8f;
+  --diff-del: #9a3b30;
+  --focus-ring: #7a64b5;
+  --steel-600: #b5b1ab;
+  --ember-dim: #a97b2c;
+  --danger-fill: #b8493d;
 }
+
 
 * {
   box-sizing: border-box;
@@ -77,7 +147,10 @@ body,
 }
 
 body {
-  background: var(--obsidian);
+  background:
+    radial-gradient(60vw 60vh at 0% 0%, var(--glow-a), transparent 70%),
+    radial-gradient(60vw 60vh at 100% 100%, var(--glow-b), transparent 70%),
+    var(--bg);
   color: var(--text);
   font-family: var(--sans);
   font-size: 0.875rem;
@@ -93,6 +166,7 @@ textarea {
   font-family: inherit;
   font-size: inherit;
   color: inherit;
+  border: 0;
 }
 
 .mono {
@@ -460,7 +534,7 @@ textarea {
   align-self: flex-end;
   max-width: 76%;
   background: var(--arc-blue);
-  color: #fff;
+  color: var(--primary-ink);
   padding: 9px 13px;
   border-radius: 13px 13px 3px 13px;
   white-space: pre-wrap;
@@ -637,7 +711,7 @@ textarea {
 .send-btn {
   background: var(--arc-blue);
   border: none;
-  color: #fff;
+  color: var(--primary-ink);
   font-weight: 600;
   padding: 0 18px;
   height: 44px;
@@ -665,7 +739,7 @@ textarea {
 }
 .mode-toggle button.active {
   background: var(--arc-blue);
-  color: #fff;
+  color: var(--primary-ink);
 }
 .company-input {
   background: var(--steel-900);
@@ -796,7 +870,7 @@ textarea {
   width: 100%;
   background: var(--arc-blue);
   border: none;
-  color: #fff;
+  color: var(--primary-ink);
   font-weight: 600;
   padding: 11px;
   border-radius: var(--radius-sm);
@@ -1046,7 +1120,7 @@ textarea {
 .approve-approve {
   background: var(--arc-blue);
   border: 1px solid var(--arc-blue);
-  color: #fff;
+  color: var(--primary-ink);
 }
 .approve-approve:hover {
   background: var(--arc-blue);
@@ -1723,7 +1797,7 @@ textarea {
   cursor: pointer;
 }
 .cp-node:hover, .cp-node.active { border-color: var(--arc-blue); }
-.cp-node:focus-visible { outline: 2px solid var(--arc-blue-lit); outline-offset: 1px; }
+.cp-node:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 .cp-node-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .cp-node-name { font-size: 0.8125rem; overflow-wrap: anywhere; }
 .cp-node-sub { font-size: 0.6875rem; color: var(--text-dim); overflow-wrap: anywhere; }
@@ -1889,7 +1963,7 @@ textarea {
 .compare-controls .company-input { max-width: 100%; }
 
 /* Locale direction, keyboard visibility and bounded recovery messages. */
-:focus-visible { outline: 2px solid var(--arc-blue-lit); outline-offset: 3px; }
+:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; }
 .locale-picker { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .locale-picker select { max-width: 100%; background: var(--obsidian); color: inherit; padding: 6px; }
 .storage-notice { font-size: 0.6875rem; color: var(--steel-400); padding: 6px; overflow-wrap: anywhere; }
@@ -1913,7 +1987,7 @@ button, select, input { min-block-size: 32px; }
 .set-sub, .set-title, .company-summary, .company-name, .storage-notice, .tb-crumb { overflow-wrap: anywhere; }
 button { white-space: normal; overflow-wrap: anywhere; }
 button:disabled, input:disabled, select:disabled, textarea:disabled { cursor: not-allowed; opacity: .65; }
-:is(button,input,select,textarea,a,[tabindex]):focus-visible { outline: 2px solid var(--arc-blue-lit); outline-offset: 3px; }
+:is(button,input,select,textarea,a,[tabindex]):focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; }
 .sheet { max-height: calc(100dvh - 24px); }
 .sheet-head { height: auto; min-height: 48px; }
 .titlebar { height: auto; min-height: 40px; }
