@@ -6,7 +6,7 @@ import { createVoiceChat } from "../voice-chat";
 import {
   ATTACH_FLAG_KEY, ATTACH_NOTICE_KEY, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, MAX_TOTAL_BYTES,
   attachNoticeSeen, composeWire, createTray, formatSize, inspectFile, isAttachError, isAttachmentsEnabled, isSecretName,
-  markAttachNoticeSeen, readAttachment, splitWire, wireJsonBytes, cleanContent, MAX_WIRE_JSON_BYTES, type Attachment, type PickedFile,
+  markAttachNoticeSeen, readAttachment, splitWire, wireJsonBytes, wireExceeds, MAX_DAEMON_CHAT_CHARS, cleanContent, MAX_WIRE_JSON_BYTES, type Attachment, type PickedFile,
 } from "../attachments";
 import { createAttachUi, renderChips, renderSentChips } from "../attachments-view";
 
@@ -134,6 +134,16 @@ describe("what goes to the model (criterion 4)", () => {
     const wire = composeWire("q", [att("1.txt", "one"), att("2.txt", "two")]);
     expect(wire.indexOf("1.txt")).toBeLessThan(wire.indexOf("2.txt"));
     expect(wire.match(/<untrusted_file_[0-9a-f]{24} /g)).toHaveLength(2);
+  });
+  it("the daemon lane is limited by characters (100,000), the other lanes by the JSON body", () => {
+    expect(MAX_DAEMON_CHAT_CHARS).toBe(100_000);
+    const big = "x".repeat(MAX_DAEMON_CHAT_CHARS);
+    const wire = composeWire("q", [att("a.txt", big)]);
+    expect(wireExceeds(wire, true)).toBe(true);
+    expect(wireExceeds(wire, false)).toBe(false);
+    expect(wireExceeds(composeWire("q", [att("a.txt", "x".repeat(50_000))]), true)).toBe(false);
+    expect(wireExceeds("a".repeat(MAX_DAEMON_CHAT_CHARS), true)).toBe(false);
+    expect(wireExceeds("a".repeat(MAX_DAEMON_CHAT_CHARS + 1), true)).toBe(true);
   });
   it("splitWire gives back the typed words and name/size per file, never the content", () => {
     const wire = composeWire("Bunu özetle\n\nlütfen", [att("a.csv", "SECRET-ROW-1\nx", 2048), att("b b.txt", "two", 3)]);
@@ -489,7 +499,7 @@ describe("attachments with voice chat (UI-08), one send path", () => {
     expect(run).toMatch(/const wire = retry \? text : composeWire\(text, pendingFiles\);/);
     expect(run).toMatch(/const sentFiles = pendingFiles\.length \? attachTray\?\.take\(\) \?\? \[\] : \[\];/);
     expect(run.match(/attachTray\?\.take\(\)/g)).toHaveLength(1);
-    const guard = run.indexOf("wireJsonBytes(wire) > MAX_WIRE_JSON_BYTES");
+    const guard = run.indexOf("wireExceeds(wire, runMode === \"daemon\")");
     expect(guard).toBeGreaterThan(run.indexOf("chat.companyNeeded"));
     expect(guard).toBeLessThan(run.indexOf("attachTray?.take()"));
     expect(guard).toBeLessThan(run.indexOf("dispatching = true;"));

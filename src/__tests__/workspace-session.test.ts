@@ -10,7 +10,7 @@ import { createMemoryStore, createConfigPersister } from "../store";
 import { createSessionStore } from "../sessions";
 import { createTauriGovernance } from "../governance";
 import { toCascadeView, toCompareView } from "../render";
-import { MAX_WIRE_JSON_BYTES, composeWire, createTray, splitWire, wireJsonBytes } from "../attachments";
+import { composeWire, createTray, splitWire, wireExceeds } from "../attachments";
 import { compareMotion } from "../brand-motion";
 import { DaemonError } from "../daemon-client";
 
@@ -101,7 +101,7 @@ function fixture(mode = "cascade") {
     isDirectProvider: () => true, resolveDirectModel: () => "synthetic-model", directChat,
     OllamaUnreachableError: class extends Error {}, DirectApiError: class extends Error {},
     daemon, DaemonError, readDaemonModel, showDaemonHint, connectDaemon: vi.fn(async () => {}),
-    attachTray, composeWire, wireJsonBytes, MAX_WIRE_JSON_BYTES, renderSentChips, getLocale: () => "en",
+    attachTray, composeWire, wireExceeds, renderSentChips, getLocale: () => "en",
     deriveTitle: (text: string) => text, kv: element, historySearch: element(), refreshDaemonConversations,
   }) as { run(): Promise<void>; retry(text: string, mode: string): boolean; seeDetails: { target(): string; label(target: string): string; open(target: string): void }; cancel(): void; newChat(): void; load(id: string): void; stop(): void; dispose(): void; setMode(mode: string): void };
   ui.setMode(mode);
@@ -572,6 +572,22 @@ describe("UI-02 sohbet durum/hata kartları (gerçek kapanışlar)", () => {
     expect(f.hint).toMatchObject({ textContent: "attach.errWireTooBig", style: { display: "block" } });
     expect(f.attachTray.items()).toHaveLength(1);
     expect(f.sendBtn.disabled).toBe(false);
+  });
+  it("BRA-UI-09: daemon kipinde wire 100.000 karakteri aşarsa reddedilir, ek tepside kalır; aynı içerik local kipte gider", async () => {
+    const big = { id: 1, name: "big.txt", size: 100, content: "x".repeat(100_000) };
+    const d = fixture("daemon");
+    d.attachTray.add(big);
+    await d.run();
+    expect(d.daemon.sendMessage).not.toHaveBeenCalled();
+    expect(d.daemon.createConversation).not.toHaveBeenCalled();
+    expect(d.hint).toMatchObject({ textContent: "attach.errWireTooBig", style: { display: "block" } });
+    expect(d.attachTray.items()).toHaveLength(1);
+    expect(d.sendBtn.disabled).toBe(false);
+    const l = fixture("local");
+    l.attachTray.add(big);
+    await l.run();
+    expect(l.ollamaChat).toHaveBeenCalledTimes(1);
+    expect(l.attachTray.items()).toHaveLength(0);
   });
   it("BRA-UI-09: reddedilen gönderim (ön denetim) ekleri tutar", async () => {
     const f = fixture("compare");

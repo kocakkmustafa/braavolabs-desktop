@@ -138,7 +138,7 @@ import {
 } from "./brand-motion";
 import { createVoice } from "./voice";
 import { createVoiceChat, isVoiceChatEnabled, markVoiceChatIntroSeen, voiceChatIntroSeen, type VoiceChat } from "./voice-chat";
-import { MAX_WIRE_JSON_BYTES, composeWire, createTray, isAttachmentsEnabled, splitWire, wireJsonBytes, type AttachmentTray } from "./attachments";
+import { composeWire, createTray, isAttachmentsEnabled, splitWire, wireExceeds, type AttachmentTray } from "./attachments";
 import { createAttachUi, renderSentChips, type AttachUi } from "./attachments-view";
 import { renderIntro, renderStrip, stripView, summaryLine, vcIcon, type VcAction } from "./voice-chat-view";
 import { createBrowserPane } from "./browser-pane";
@@ -2274,7 +2274,7 @@ export function renderWorkspace(deps: UiDeps): void {
     // emptied after the checks below, so a refused send keeps the files. The size is measured as it goes on the wire.
     const pendingFiles = retry || voiceTurn ? [] : attachTray?.items() ?? [];
     const wire = retry ? text : composeWire(text, pendingFiles);
-    if (pendingFiles.length && wireJsonBytes(wire) > MAX_WIRE_JSON_BYTES) {
+    if (pendingFiles.length && wireExceeds(wire, runMode === "daemon")) {
       hint.textContent = t("attach.errWireTooBig");
       hint.style.display = "block";
       return;

@@ -194,6 +194,10 @@ export function splitWire(content: string): { text: string; files: Array<{ name:
 export const MAX_WIRE_JSON_BYTES = 250 * 1024;
 /** Size of the message as it goes on the wire: JSON-escaped (quotes, newlines, non-ASCII), UTF-8. */
 export const wireJsonBytes = (wire: string): number => new TextEncoder().encode(JSON.stringify(wire)).length;
+/** The daemon chat refuses a message longer than this many characters (cli daemon/chat.ts MAX_CHAT_CONTENT, 413). */
+export const MAX_DAEMON_CHAT_CHARS = 100_000;
+/** True when the composed message is too big for the lane it is going to: the daemon counts characters, the others the JSON body. */
+export const wireExceeds = (wire: string, daemon: boolean): boolean => daemon ? wire.length > MAX_DAEMON_CHAT_CHARS : wireJsonBytes(wire) > MAX_WIRE_JSON_BYTES;
 
 // ── flag and first-use notice ────────────────────────────────────────────────
 export interface AttachStorage { getItem(key: string): string | null; setItem?(key: string, value: string): void }
