@@ -20,6 +20,8 @@ export interface VcView {
   word: string;
   status: string;
   hint: string;
+  /** Listening/speaking carry a caption line; its text updates in place without rebuilding the strip. */
+  captionSlot: boolean;
   /** Pulse ring on the badge (listening/thinking). */
   pulse: boolean;
   bars: "none" | "level" | "progress";
@@ -53,31 +55,33 @@ export function stripView(m: VoiceChatModel, t: Translate): VcView | null {
     case "idle": return null;
     case "listening":
       return {
-        tone: "work", glyph: "●", icon: "mic", word: t("voiceChat.listening"), status: run, hint: t("voiceChat.listeningHint"),
+        tone: "work", glyph: "●", icon: "mic", word: t("voiceChat.listening"), status: run, hint: t("voiceChat.listeningHint"), captionSlot: true,
         pulse: true, bars: "level", caption: m.heard, live: "polite", role: "status", buttons: [btn("end", true)],
       };
     case "thinking":
       return {
-        tone: "work", glyph: "●", icon: "helmet", word: t("voiceChat.thinking"), status: run, hint: t("voiceChat.thinkingHint"),
+        tone: "work", glyph: "●", icon: "helmet", word: t("voiceChat.thinking"), status: run, hint: t(m.busy ? "voiceChat.busyHint" : "voiceChat.thinkingHint"), captionSlot: false,
         pulse: true, bars: "progress", caption: "", live: "polite", role: "status", buttons: [btn("cancel"), btn("end", true)],
       };
     case "speaking":
       return {
-        tone: "work", glyph: "●", icon: "volume", word: t("voiceChat.speaking"), status: run, hint: t("voiceChat.speakingHint"),
+        tone: "work", glyph: "●", icon: "volume", word: t("voiceChat.speaking"), status: run, hint: t("voiceChat.speakingHint"), captionSlot: true,
         pulse: false, bars: "level", caption: m.reply, live: "off", role: "status",
         buttons: [btn(m.paused ? "resume" : "pause", false, m.paused), btn("interrupt"), btn("end", true)],
       };
     case "ended":
       return {
         tone: "done", glyph: "✓", icon: "check", word: t("voiceChat.ended"), status: t("now.done"),
-        hint: t("voiceChat.endedHint", { time: clock(m.seconds) }), pulse: false, bars: "none", caption: "", live: "polite", role: "status",
+        hint: t("voiceChat.endedHint", { time: clock(m.seconds) }), captionSlot: false, pulse: false, bars: "none", caption: "", live: "polite", role: "status",
         buttons: [btn("restart"), btn("backToChat", true)],
       };
     case "error": {
       const e = ERRORS[m.error ?? "unsupported"];
       return {
-        tone: "err", glyph: "■", icon: e.icon, word: t(e.key), status: t("now.error"), hint: t(`${e.key}Hint`),
-        pulse: false, bars: "none", caption: "", live: "assertive", role: "alert", buttons: e.actions.map(([id, p]) => btn(id, p)),
+        tone: "err", glyph: "■", icon: e.icon, word: t(e.key), status: t("now.error"), hint: t(`${e.key}Hint`), captionSlot: false,
+        pulse: false, bars: "none", caption: "", live: "assertive", role: "alert",
+        // Nothing was ever read (the turn gave no answer): "read again" would have nothing to read.
+        buttons: (m.error === "unplayable" && !m.reply ? [["close", true]] as Array<[VcAction, boolean]> : e.actions).map(([id, p]) => btn(id, p)),
       };
     }
   }
@@ -124,15 +128,10 @@ function levelBars(): HTMLElement {
   return wrap;
 }
 
-/** Re-render the strip into `host` for the current view; `on` receives button clicks. Keeps focus on the same action across updates. */
-export function renderStrip(host: HTMLElement, view: VcView | null, t: Translate, on: (id: VcAction) => void): void {
+function build(host: HTMLElement, view: VcView, t: Translate, on: (id: VcAction) => void): void {
   const focused = (document.activeElement as HTMLElement | null)?.dataset?.vcAction;
   host.replaceChildren();
-  host.hidden = view === null;
-  if (!view) return;
   host.className = `vc-strip vc-${view.tone}`;
-  host.setAttribute("role", view.role);
-  host.setAttribute("aria-live", view.live);
 
   const line = document.createElement("div");
   line.className = "vc-line";
@@ -141,8 +140,11 @@ export function renderStrip(host: HTMLElement, view: VcView | null, t: Translate
   badge.append(vcIcon(view.icon, 20));
   const txt = document.createElement("div");
   txt.className = "vc-txt";
+  // Only the state word is a live region: it is announced when the state changes, never per heard word.
   const word = document.createElement("span");
   word.className = "vc-word";
+  word.setAttribute("role", view.role);
+  word.setAttribute("aria-live", view.live);
   const st = document.createElement("span");
   st.className = "vc-st";
   const glyph = document.createElement("span");
@@ -182,14 +184,28 @@ export function renderStrip(host: HTMLElement, view: VcView | null, t: Translate
   line.append(acts);
   host.append(line);
 
-  if (view.caption) {
+  if (view.captionSlot) {
     const cap = document.createElement("div");
     cap.className = "vc-cap";
     cap.setAttribute("aria-label", t("voiceChat.caption"));
-    cap.textContent = view.caption;
     host.append(cap);
   }
   if (focused) host.querySelector<HTMLElement>(`[data-vc-action="${focused}"]`)?.focus();
+}
+
+/**
+ * Render the strip into `host`. The skeleton (badge, bars, buttons, live word) is rebuilt only when
+ * the STATE changes; interim recognition results update just the caption text node, so buttons stay
+ * the same DOM nodes (clicks are never lost), the bar animation is not restarted and screen readers
+ * are not re-read the whole strip.
+ */
+export function renderStrip(host: HTMLElement, view: VcView | null, t: Translate, on: (id: VcAction) => void): void {
+  if (!view) { host.replaceChildren(); host.hidden = true; delete host.dataset.vcSig; return; }
+  host.hidden = false;
+  const sig = JSON.stringify([view.tone, view.glyph, view.icon, view.word, view.status, view.hint, view.captionSlot, view.pulse, view.bars, view.live, view.role, view.buttons.map(b => [b.id, b.label, b.primary, b.pressed])]);
+  if (host.dataset.vcSig !== sig) { build(host, view, t, on); host.dataset.vcSig = sig; }
+  const cap = host.querySelector<HTMLElement>(".vc-cap");
+  if (cap && cap.textContent !== view.caption) cap.textContent = view.caption;
 }
 
 /** One-line AI notice (first open only). `onDismiss` fires for both "Anladım" and the close icon. */

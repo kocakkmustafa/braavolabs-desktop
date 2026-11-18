@@ -1114,7 +1114,9 @@ export function renderWorkspace(deps: UiDeps): void {
   }
   // BRA-UI-08: voice chat, behind a default-OFF flag (bv.flags.voiceChat = "1"). Flag off: nothing below is created.
   let voiceChat: VoiceChat | null = null;
-  let voiceTurn = false;
+  /** Token of the voice turn whose answer we are waiting for (0 = none). Per turn, so a cancelled turn's late finally cannot clear a newer one. */
+  let voiceCurrent = 0;
+  let voiceSeq = 0;
   let waveBtn: HTMLButtonElement | null = null;
   let vcHost: HTMLElement | null = null;
   if (isVoiceChatEnabled()) {
@@ -1134,7 +1136,11 @@ export function renderWorkspace(deps: UiDeps): void {
       const vc = voiceChat;
       if (!vc) return;
       if (id === "end") vc.end();
-      else if (id === "cancel") { stopDispatch(); vc.cancelTurn(); }
+      else if (id === "cancel") {
+        // A busy sentence is still waiting; the running reply belongs to something else: leave it alone.
+        if (!vc.model.busy) { voiceCurrent = 0; stopDispatch(); }
+        vc.cancelTurn();
+      }
       else if (id === "pause" || id === "resume") vc.togglePause();
       else if (id === "interrupt") vc.interrupt();
       else if (id === "typeInstead" || id === "backToChat") { vc.dismiss(); ta.focus(); }
@@ -1146,12 +1152,15 @@ export function renderWorkspace(deps: UiDeps): void {
       voice,
       locale: getLocale,
       online: () => globalThis.navigator?.onLine !== false,
+      // The heard sentence goes straight to run(); the composer draft is never read or written.
       send: (text) => {
-        voiceTurn = true;
-        ta.value = text;
-        void run();
-        // run() bails out before dispatching on a validation hint or a busy lane: keep listening.
-        if (!dispatching) { voiceTurn = false; ta.value = ""; queueMicrotask(() => voiceChat?.turnEnded()); }
+        if (dispatching) return "busy";
+        const token = ++voiceSeq;
+        voiceCurrent = token;
+        void run(undefined, { text, token });
+        // run() returns before dispatching on a validation hint (hint stays visible in the chat).
+        if (!dispatching) { voiceCurrent = 0; return "rejected"; }
+        return "sent";
       },
       onChange: (model) => {
         if (workspaceDisposed) return;
@@ -1526,7 +1535,11 @@ export function renderWorkspace(deps: UiDeps): void {
   });
   // Sheet-local Esc handler; registered once per workspace render.
   const onWorkspaceKey = (e: KeyboardEvent) => {
-    if (e.key === "Escape" && voiceChat?.active) voiceChat.end();
+    // Esc ends voice chat only when nothing else claims it: no open sheet/panel, not already handled,
+    // and focus is in the chat (or nowhere in particular), never inside another dialog.
+    const focus = document.activeElement;
+    const inChat = !focus || focus === document.body || chat.contains(focus);
+    if (e.key === "Escape" && voiceChat?.active && !e.defaultPrevented && !settingsOpen && !nowOpen && inChat) voiceChat.end();
     else if (e.key === "Escape" && settingsOpen) setSettings(false);
     else if (e.key === "Escape" && nowOpen) { setNow(false); nowBtn.focus(); }
   };
@@ -2117,6 +2130,7 @@ export function renderWorkspace(deps: UiDeps): void {
     thinkingRow: (label: string) => HTMLElement,
     setRunMotion: (state: MotionState, label: string) => void,
     showAnswerMotion: (answer: string) => void,
+    onAnswer?: (answer: string) => void,
   ) => {
     const fail = (message: string, retryable = true) => {
       setRunMotion("error", message);
@@ -2182,6 +2196,7 @@ export function renderWorkspace(deps: UiDeps): void {
       } else {
         if (!cardShown) renderPlainAnswer(scroll, "", t);
         showAnswerMotion(result.text);
+        if (result.text) onAnswer?.(result.text); // daemon turns are stored by the daemon, so this is their only voice hook
         if (result.text) renderStatusCard(scroll, t, `${choice.provider}/${choice.model}`, seeDetails);
         await deps.gov.settle("local.dispatch", "success", detail);
       }
@@ -2203,10 +2218,10 @@ export function renderWorkspace(deps: UiDeps): void {
     }
   };
 
-  const run = async (retry?: { text: string; mode: Mode }) => {
+  const run = async (retry?: { text: string; mode: Mode }, voiceTurn?: { text: string; token: number }) => {
     if (workspaceDisposed || dispatching) return;
     const runMode = retry?.mode ?? mode;
-    const text = retry?.text ?? ta.value.trim();
+    const text = retry?.text ?? voiceTurn?.text ?? ta.value.trim();
     if (!text) return;
     if (runMode === "compare" && !companyInput.value.trim()) {
       hint.textContent = t("chat.companyNeeded");
@@ -2239,14 +2254,19 @@ export function renderWorkspace(deps: UiDeps): void {
     dispatchController = controller;
     const motionVersion = ++chatMotionVersion;
     const ownsRun = () => !workspaceDisposed && isCurrentSession(cfg, owner) && motionVersion === chatMotionVersion;
+    // Voice chat: only the turn that still owns the token may answer or end the strip.
+    const voiceLive = () => voiceTurn !== undefined && voiceTurn.token === voiceCurrent;
+    const voiceAnswer = (answer: string) => {
+      if (voiceLive() && ownsRun()) { voiceCurrent = 0; voiceChat?.reply(answer); }
+    };
     const recordRun = (role: SessionRole, text: string) => {
-      if (voiceTurn && role === "assistant" && ownsRun()) { voiceTurn = false; voiceChat?.reply(text); }
+      if (role === "assistant") voiceAnswer(text);
       if (ownsRun()) record(role, text, runMode);
     };
     hint.style.display = "none";
     dispatching = true;
     sendBtn.disabled = true;
-    if (!retry) ta.value = "";
+    if (!retry && !voiceTurn) ta.value = "";
     const ownsMotion = ownsRun;
     const setRunMotion = (state: MotionState, label: string) => {
       if (ownsMotion()) setChatMotion(state, label);
@@ -2420,7 +2440,7 @@ export function renderWorkspace(deps: UiDeps): void {
         }
         if (ownsRun()) bumpActivity();
       } else if (runMode === "daemon") {
-        await runDaemonTurn(text, ownsRun, thinkingRow, setRunMotion, showAnswerMotion);
+        await runDaemonTurn(text, ownsRun, thinkingRow, setRunMotion, showAnswerMotion, voiceAnswer);
         if (ownsRun()) bumpActivity();
       } else {
         const stub = await startCompare(cfg, { companyId: runCompanyId, query: text,
@@ -2512,13 +2532,14 @@ export function renderWorkspace(deps: UiDeps): void {
       renderErrorCard(scroll, msg, () => retryLast(text, runMode));
     } finally {
       // Voice chat: a turn that ended without an answer (error card, cancel) goes back to listening.
-      if (voiceTurn) { voiceTurn = false; voiceChat?.turnEnded(); }
+      if (voiceLive()) { voiceCurrent = 0; voiceChat?.turnEnded(); }
       for (const row of runThinkingRows) removeThinking(row);
       if (ownsRun()) {
         clearCompareOperation();
         dispatching = false;
         sendBtn.disabled = false;
         scrollToEnd();
+        voiceChat?.laneFree(); // a sentence heard while this reply ran goes out now
       }
     }
   };

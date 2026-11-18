@@ -566,5 +566,6 @@
   "voiceChat.level": "音量レベル",
   "voiceChat.caption": "字幕",
   "voiceChat.intro": "ValarはAIです。音声はこの端末で文字に変換されます。",
-  "voiceChat.introOk": "了解"
+  "voiceChat.introOk": "了解",
+  "voiceChat.busyHint": "Valarは別の返答中です。終わり次第これを送信します。"
 }

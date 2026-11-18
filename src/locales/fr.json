@@ -566,5 +566,6 @@
   "voiceChat.level": "Niveau sonore",
   "voiceChat.caption": "Sous-titre",
   "voiceChat.intro": "Valar est une IA ; votre voix est transcrite sur cet appareil.",
-  "voiceChat.introOk": "Compris"
+  "voiceChat.introOk": "Compris",
+  "voiceChat.busyHint": "Valar répond déjà à autre chose ; j'enverrai ceci dès que ce sera terminé."
 }

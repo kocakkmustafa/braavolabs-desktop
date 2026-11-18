@@ -566,5 +566,6 @@
   "voiceChat.level": "مستوى الصوت",
   "voiceChat.caption": "الترجمة النصية",
   "voiceChat.intro": "Valar ذكاء اصطناعي؛ يتم تحويل كلامك إلى نص على هذا الجهاز.",
-  "voiceChat.introOk": "فهمت"
+  "voiceChat.introOk": "فهمت",
+  "voiceChat.busyHint": "Valar مشغول بردّ آخر؛ سأرسل هذا عند انتهائه."
 }

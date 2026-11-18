@@ -28,7 +28,7 @@ function local(name: string) {
   return found;
 }
 const gates = ["gateAction", "gateForToken"].map(name => source.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === name)!.getText(source)).join("\n");
-const compiled = ts.transpileModule(`${gates}\nlet mode='cascade', dispatching=false, chatMotionVersion=0, workspaceDisposed=false, activeSession=null, nextDispatchRemote=false, daemonTurn=null, activeDaemonConv=null, daemonOnline=true, voiceTurn=false, voiceChat=null;\n${local("dispatchController")}
+const compiled = ts.transpileModule(`${gates}\nlet mode='cascade', dispatching=false, chatMotionVersion=0, workspaceDisposed=false, activeSession=null, nextDispatchRemote=false, daemonTurn=null, activeDaemonConv=null, daemonOnline=true, voiceCurrent=0, voiceChat=null;\n${local("dispatchController")}
 ${local("compareOperation")}\n${local("clearCompareOperation")}\n${local("stopDaemonTurn")}\n${local("stopDispatch")}
 ${local("cancelCurrentCompare")}\n${local("record")}\n${local("startNewSession")}\n${local("loadSession")}\n${local("daemonErrorText")}\n${local("runDaemonTurn")}\n${local("run")}\n${local("retryLast")}\n${local("seeDetails")}\n({ run, retry:retryLast, seeDetails, cancel:cancelCurrentCompare, newChat:startNewSession, load:loadSession, stop:stopDispatch, dispose:()=>{workspaceDisposed=true;clearCompareOperation()}, setMode:(value)=>{mode=value} });`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function delayed<T>() {

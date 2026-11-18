@@ -589,5 +589,6 @@
   "voiceChat.level": "Tingkat suara",
   "voiceChat.caption": "Teks",
   "voiceChat.intro": "Valar adalah AI; ucapan Anda ditranskripsikan di perangkat ini.",
-  "voiceChat.introOk": "Mengerti"
+  "voiceChat.introOk": "Mengerti",
+  "voiceChat.busyHint": "Valar sedang menjawab hal lain; saya akan mengirim ini setelah selesai."
 }

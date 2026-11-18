@@ -589,5 +589,6 @@
   "voiceChat.level": "Poziom dźwięku",
   "voiceChat.caption": "Napisy",
   "voiceChat.intro": "Valar to sztuczna inteligencja; Twoja mowa jest zamieniana na tekst na tym urządzeniu.",
-  "voiceChat.introOk": "Rozumiem"
+  "voiceChat.introOk": "Rozumiem",
+  "voiceChat.busyHint": "Valar jest zajęty inną odpowiedzią; wyślę to, gdy skończy."
 }

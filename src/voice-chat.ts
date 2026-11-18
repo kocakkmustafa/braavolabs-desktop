@@ -19,6 +19,8 @@ export interface VoiceChatModel {
   state: VoiceChatState;
   error: VoiceChatError | null;
   paused: boolean;
+  /** Thinking, but the chat lane was busy with another reply: the sentence waits and is sent when it frees up. */
+  busy: boolean;
   /** What was heard in the current turn (interim included). */
   heard: string;
   /** What is being read aloud (caption); kept after an "unplayable" failure so it can be replayed. */
@@ -33,8 +35,9 @@ export interface VoiceChatDeps {
   voice: Voice;
   locale(): string;
   online(): boolean;
-  /** Hand the heard text to the chat's normal send path. */
-  send(text: string): void;
+  /** Hand the heard text to the chat's normal send path (never through the composer draft).
+   *  "busy": a reply is still running, keep the sentence and call `laneFree()` later; "rejected": the chat refused it. */
+  send(text: string): "sent" | "busy" | "rejected";
   now?(): number;
   onChange(model: Readonly<VoiceChatModel>): void;
   /** Voice chat ended after at least one turn. */
@@ -46,11 +49,41 @@ export const MAX_EMPTY_TURNS = 3;
 const CAPTION_MAX = 600;
 const SPEAKABLE_MAX = 4000;
 
-/** Markdown/code are not read aloud: fenced code, diffs, inline code, links, markers. */
+const FENCE = /^\s{0,3}(`{3,}|~{3,})/;
+const DIFF_HEAD = /^(diff --git |index [0-9a-f]+\.\.|--- |\+\+\+ |@@ )/;
+const TABLE_ROW = /^\s*\|.*\|\s*$/;
+const TABLE_RULE = /^\s*:?-{2,}:?(\s*\|\s*:?-{2,}:?)+\s*\|?\s*$/;
+
+/** Markdown/code are not read aloud: fenced code (backticks or tildes), indented code, diffs, tables, inline code, links, markers. */
 export function speakable(markdown: string): string {
-  return markdown
-    .replace(/```[\s\S]*?(```|$)/g, " ")
-    .replace(/^(\+\+\+|---|@@).*$/gm, " ")
+  const kept: string[] = [];
+  let fence: string | null = null; // opening marker of the fence we are inside
+  let inDiff = false;
+  let inIndented = false;
+  let prevBlank = true;
+  for (const line of markdown.split(/\r?\n/)) {
+    const blank = line.trim() === "";
+    if (fence) {
+      const close = new RegExp("^\\s{0,3}" + (fence[0] === "`" ? "`" : "~") + "{" + fence.length + ",}\\s*$");
+      if (close.test(line)) fence = null;
+      continue;
+    }
+    const open = FENCE.exec(line);
+    if (open) { fence = open[1]; inDiff = false; inIndented = false; prevBlank = false; continue; }
+    if (DIFF_HEAD.test(line)) { inDiff = true; prevBlank = false; continue; }
+    if (inDiff) {
+      if (/^[+\- \\]/.test(line)) continue;
+      inDiff = false;
+    }
+    // Indented code cannot interrupt a paragraph: it needs a blank line before it (or more indented code).
+    if (/^( {4,}|\t)/.test(line) && !blank && (prevBlank || inIndented)) { inIndented = true; continue; }
+    if (!blank) inIndented = false;
+    if (TABLE_ROW.test(line) || TABLE_RULE.test(line)) { prevBlank = false; continue; }
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { prevBlank = true; continue; }
+    kept.push(line);
+    prevBlank = blank;
+  }
+  return kept.join("\n")
     .replace(/`([^`]*)`/g, " ")
     .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
     .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
@@ -64,18 +97,19 @@ export function speakable(markdown: string): string {
 
 export function createVoiceChat(deps: VoiceChatDeps) {
   const now = deps.now ?? (() => Date.now());
-  const m: VoiceChatModel = { state: "idle", error: null, paused: false, heard: "", reply: "", turns: 0, seconds: 0 };
+  const m: VoiceChatModel = { state: "idle", error: null, paused: false, busy: false, heard: "", reply: "", turns: 0, seconds: 0 };
   let gen = 0; // bumps on every phase change; callbacks from an earlier phase are ignored
   let startedAt = 0;
   let empty = 0;
   let pendingText = "";
+  let queued = ""; // heard while the chat lane was busy
   const emit = () => deps.onChange({ ...m });
   const set = (patch: Partial<VoiceChatModel>) => { Object.assign(m, patch); emit(); };
 
   const fail = (error: VoiceChatError) => {
     gen++;
     deps.voice.stopSpeaking();
-    set({ state: "error", error, paused: false });
+    set({ state: "error", error, paused: false, busy: false });
   };
 
   const listen = () => {
@@ -106,9 +140,20 @@ export function createVoiceChat(deps: VoiceChatDeps) {
     if (!deps.online()) { pendingText = text; set({ heard: text }); return fail("offline"); }
     pendingText = "";
     gen++;
-    set({ state: "thinking", error: null, heard: text, turns: m.turns + 1 });
-    deps.send(text);
+    set({ state: "thinking", error: null, heard: text, busy: false });
+    dispatch(text);
   };
+
+  const dispatch = (text: string) => {
+    const result = deps.send(text);
+    if (result === "busy") { queued = text; return set({ busy: true }); }
+    queued = "";
+    if (result === "rejected") return noAnswer();
+    set({ busy: false, turns: m.turns + 1 });
+  };
+
+  /** The turn produced nothing to read: say so (the chat has the text or error card) instead of going quiet. */
+  const noAnswer = () => { m.reply = ""; fail("unplayable"); };
 
   const speakReply = (text: string) => {
     const g = ++gen;
@@ -137,7 +182,7 @@ export function createVoiceChat(deps: VoiceChatDeps) {
     start(): void {
       if (m.state === "listening" || m.state === "thinking" || m.state === "speaking") return;
       startedAt = now(); empty = 0; pendingText = "";
-      set({ turns: 0, seconds: 0, reply: "", heard: "" });
+      set({ turns: 0, seconds: 0, reply: "", heard: "", busy: false });
       if (!deps.voice.canDictate || !deps.voice.canSpeak) return fail("unsupported");
       listen();
     },
@@ -149,7 +194,7 @@ export function createVoiceChat(deps: VoiceChatDeps) {
     dismiss(): void {
       gen++;
       deps.voice.stopSpeaking(); deps.voice.abortDictation();
-      set({ state: "idle", error: null, paused: false, heard: "", reply: "" });
+      set({ state: "idle", error: null, paused: false, heard: "", reply: "", busy: false });
     },
 
     /** "Sözünü kes": cut the reading and listen again. */
@@ -162,7 +207,10 @@ export function createVoiceChat(deps: VoiceChatDeps) {
     },
 
     /** "Vazgeç" while thinking: ignore the pending answer and listen again. */
-    cancelTurn(): void { if (m.state === "thinking") listen(); },
+    cancelTurn(): void { if (m.state === "thinking") { queued = ""; listen(); } },
+
+    /** The chat lane freed up: send the sentence that was waiting. */
+    laneFree(): void { if (m.state === "thinking" && queued) { const text = queued; queued = ""; dispatch(text); } },
 
     /** The chat produced an answer for the turn voice chat sent. */
     reply(markdown: string): void {
@@ -172,15 +220,15 @@ export function createVoiceChat(deps: VoiceChatDeps) {
       speakReply(text);
     },
 
-    /** The chat turn ended without an answer (error card is already in the chat): keep listening. */
-    turnEnded(): void { if (m.state === "thinking") listen(); },
+    /** The chat turn ended without an answer (an error card is already in the chat): say "could not read" rather than going quiet. */
+    turnEnded(): void { if (m.state === "thinking" && !m.busy) noAnswer(); },
 
     /** Error-strip "Tekrar dene". */
     retry(): void {
       if (m.state !== "error") return;
       if (m.error === "offline" && pendingText) return submit(pendingText);
       if (m.error === "offline") return listen();
-      if (m.error === "unplayable") return speakReply(m.reply);
+      if (m.error === "unplayable") return m.reply ? speakReply(m.reply) : listen();
       startedAt = now(); empty = 0;
       if (!deps.voice.canDictate || !deps.voice.canSpeak) return fail("unsupported");
       listen();

@@ -566,5 +566,6 @@
   "voiceChat.level": "Lautstärke",
   "voiceChat.caption": "Untertitel",
   "voiceChat.intro": "Valar ist eine KI; Ihre Sprache wird auf diesem Gerät transkribiert.",
-  "voiceChat.introOk": "Verstanden"
+  "voiceChat.introOk": "Verstanden",
+  "voiceChat.busyHint": "Valar ist mit einer anderen Antwort beschäftigt; ich sende dies, sobald sie fertig ist."
 }

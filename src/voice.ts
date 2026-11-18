@@ -58,6 +58,10 @@ export function createVoice(env: VoiceEnv = globalThis as unknown as VoiceEnv) {
   const synth = env.speechSynthesis;
   const Utterance = env.SpeechSynthesisUtterance;
   let active: RecognitionLike | null = null;
+  /** We asked `active` to stop/abort; real engines fire its onend later, asynchronously. */
+  let closing = false;
+  /** A dictation requested while the previous session was still closing: starts when that session's onend arrives. */
+  let queued: (() => void) | null = null;
 
   return {
     canDictate: typeof Recognition === "function",
@@ -66,8 +70,9 @@ export function createVoice(env: VoiceEnv = globalThis as unknown as VoiceEnv) {
 
     /** Start dictation into `before`; resolves nothing — results arrive through the handlers. */
     dictate(locale: string, before: string, h: DictationHandlers, opts: { continuous?: boolean } = {}): boolean {
-      if (!Recognition || active) return false;
-      const rec = new Recognition();
+      if (!Recognition || (active && !closing)) return false;
+      const begin = (): boolean => {
+      const rec = new Recognition!();
       rec.lang = speechLang(locale);
       rec.continuous = opts.continuous ?? true;
       rec.interimResults = true;
@@ -92,9 +97,11 @@ export function createVoice(env: VoiceEnv = globalThis as unknown as VoiceEnv) {
         };
       };
       rec.onend = () => {
-        if (active === rec) active = null;
+        const wasActive = active === rec;
+        if (wasActive) { active = null; closing = false; }
         h.onText(appendSpoken(before, finalText));
         h.onEnd(failure);
+        if (wasActive) { const next = queued; queued = null; next?.(); }
       };
       try { rec.start(); } catch (error) {
         h.onEnd({ kind: "failed", detail: String(error instanceof Error ? error.message : error).slice(0, 80) });
@@ -102,9 +109,13 @@ export function createVoice(env: VoiceEnv = globalThis as unknown as VoiceEnv) {
       }
       active = rec;
       return true;
+      };
+      // Previous session still closing (stop/abort sent, onend not yet delivered): start right after it ends.
+      if (active) { queued = () => { begin(); }; return true; }
+      return begin();
     },
 
-    stopDictation(): void { active?.stop(); },
+    stopDictation(): void { queued = null; if (active) { closing = true; active.stop(); } },
 
     /** Read text aloud in the app language; any earlier reading stops first. */
     speak(text: string, locale: string, onEnd?: () => void, onError?: () => void): boolean {
@@ -123,7 +134,7 @@ export function createVoice(env: VoiceEnv = globalThis as unknown as VoiceEnv) {
     pauseSpeaking(): void { synth?.pause?.(); },
     resumeSpeaking(): void { synth?.resume?.(); },
     /** Stop the microphone without waiting for a final result (voice chat end). */
-    abortDictation(): void { active?.abort(); },
+    abortDictation(): void { queued = null; if (active) { closing = true; active.abort(); } },
     get speaking() { return Boolean(synth?.speaking); },
   };
 }

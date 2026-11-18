@@ -15,8 +15,9 @@ class FakeRecognition {
   started = 0; aborted = 0; throwOnStart = false;
   constructor() { FakeRecognition.all.push(this); }
   start() { if (this.throwOnStart) throw new Error("boom"); this.started += 1; }
-  stop() { this.onend?.(); }
-  abort() { this.aborted += 1; this.onerror?.({ error: "aborted" }); this.onend?.(); }
+  // Like a real engine: stop()/abort() return at once and onend arrives LATER.
+  stop() { queueMicrotask(() => this.onend?.()); }
+  abort() { this.aborted += 1; queueMicrotask(() => { this.onerror?.({ error: "aborted" }); this.onend?.(); }); }
   /** One utterance: interim words, then the final result, then the service ends the session. */
   say(text: string) {
     this.onresult?.({ resultIndex: 0, results: [{ isFinal: false, 0: { transcript: text } }] });
@@ -26,6 +27,8 @@ class FakeRecognition {
   fail(error: string) { this.onerror?.({ error }); this.onend?.(); }
   silence() { this.fail("no-speech"); }
 }
+
+const flush = () => new Promise<void>(r => setTimeout(r, 0));
 
 function setup(opts: { speech?: boolean; recognition?: boolean; online?: boolean } = {}) {
   FakeRecognition.all = [];
@@ -37,15 +40,17 @@ function setup(opts: { speech?: boolean; recognition?: boolean; online?: boolean
     ...(opts.speech === false ? {} : { speechSynthesis: synth, SpeechSynthesisUtterance: Utterance as never }),
   };
   const sent: string[] = [];
+  let sendResult: "sent" | "busy" | "rejected" = "sent";
   const models: VoiceChatModel[] = [];
   const ended = vi.fn();
   let online = opts.online ?? true;
   let clock = 1_000;
+  const voice = createVoice(env);
   const chat = createVoiceChat({
-    voice: createVoice(env), locale: () => "tr", online: () => online,
-    send: (t) => sent.push(t), now: () => clock, onChange: (x) => models.push(x), onEnded: ended,
+    voice, locale: () => "tr", online: () => online,
+    send: (t) => { sent.push(t); return sendResult; }, now: () => clock, onChange: (x) => models.push(x), onEnded: ended,
   });
-  return { chat, sent, models, ended, utterances, synth, setOnline: (v: boolean) => { online = v; }, tick: (ms: number) => { clock += ms; } };
+  return { chat, sent, models, ended, utterances, synth, voice, setSend: (r: "sent" | "busy" | "rejected") => { sendResult = r; }, setOnline: (v: boolean) => { online = v; }, tick: (ms: number) => { clock += ms; } };
 }
 
 describe("voice chat state machine (BRA-UI-08)", () => {
@@ -75,7 +80,7 @@ describe("voice chat state machine (BRA-UI-08)", () => {
     expect(t.chat.model.heard).toBe("merha");
   });
 
-  it("Bitir while listening, thinking and speaking stops mic and voice; summary only after a turn", () => {
+  it("Bitir while listening, thinking and speaking stops mic and voice; summary only after a turn", async () => {
     const a = setup();
     a.chat.start();
     a.chat.end();
@@ -101,6 +106,8 @@ describe("voice chat state machine (BRA-UI-08)", () => {
     expect(c.chat.model.state).toBe("ended");
     c.chat.start(); // Yeniden başlat
     expect(c.chat.model).toMatchObject({ state: "listening", turns: 0 });
+    await flush();
+    expect(FakeRecognition.last.started).toBe(1);
   });
 
   it("Sözünü kes cuts the reading and listens; Duraklat/Sürdür toggles", () => {
@@ -121,13 +128,15 @@ describe("voice chat state machine (BRA-UI-08)", () => {
     expect(t.chat.model.state).toBe("listening");
   });
 
-  it("Vazgeç and a failed chat turn return to listening; answer-less replies are not read", () => {
+  it("Vazgeç returns to listening; a turn that ends without an answer says so instead of going quiet; code-only replies are not read", () => {
     const t = setup();
     t.chat.start(); FakeRecognition.last.say("a");
     t.chat.cancelTurn();
     expect(t.chat.model.state).toBe("listening");
     FakeRecognition.last.say("b");
     t.chat.turnEnded();
+    expect(t.chat.model).toMatchObject({ state: "error", error: "unplayable", reply: "" });
+    t.chat.retry(); // nothing to read again: just listen
     expect(t.chat.model.state).toBe("listening");
     FakeRecognition.last.say("c");
     t.chat.reply("```ts\nconst x = 1\n```");
@@ -196,7 +205,7 @@ describe("voice chat state machine (BRA-UI-08)", () => {
     t.chat.retry();
     expect(t.sent).toEqual(["durum nedir"]);
     expect(t.chat.model.state).toBe("thinking");
-    t.chat.turnEnded();
+    t.chat.cancelTurn();
     FakeRecognition.last.fail("network");
     expect(t.chat.model.error).toBe("offline");
     t.chat.retry();
@@ -216,6 +225,86 @@ describe("voice chat state machine (BRA-UI-08)", () => {
     expect(t.chat.model.state).toBe("listening");
   });
 
+  it("restart right after Bitir waits for the old session's async onend instead of failing as 'unsupported'", async () => {
+    const t = setup();
+    t.chat.start();
+    const first = FakeRecognition.last;
+    t.chat.end();
+    t.chat.start(); // old onend has not been delivered yet
+    expect(t.chat.model).toMatchObject({ state: "listening", error: null });
+    expect(FakeRecognition.all).toHaveLength(1);
+    await flush();
+    expect(first.aborted).toBe(1);
+    expect(FakeRecognition.all).toHaveLength(2);
+    expect(FakeRecognition.last.started).toBe(1);
+    expect(t.chat.model).toMatchObject({ state: "listening", error: null });
+    FakeRecognition.last.say("merhaba");
+    expect(t.sent).toEqual(["merhaba"]);
+  });
+
+  it("dictation running when the wave button is pressed: stop, then voice chat starts once onend arrives", async () => {
+    const t = setup();
+    const ended = vi.fn();
+    expect(t.voice.dictate("tr", "", { onText: vi.fn(), onEnd: ended })).toBe(true);
+    expect(t.voice.dictate("tr", "", { onText: vi.fn(), onEnd: vi.fn() })).toBe(false); // genuinely busy
+    t.voice.stopDictation();
+    t.chat.start();
+    expect(t.chat.model.state).toBe("listening");
+    expect(FakeRecognition.all).toHaveLength(1);
+    await flush();
+    expect(ended).toHaveBeenCalledTimes(1);
+    expect(FakeRecognition.all).toHaveLength(2);
+    expect(t.chat.model.error).toBeNull();
+  });
+
+  it("Bitir while a restart is still queued cancels the queued start", async () => {
+    const t = setup();
+    t.chat.start(); t.chat.end(); t.chat.start(); t.chat.end();
+    await flush();
+    expect(FakeRecognition.all).toHaveLength(1);
+    expect(t.chat.model.state).toBe("idle");
+  });
+
+  it("a sentence heard while the chat is busy waits and is sent when the lane frees up (never dropped)", () => {
+    const t = setup();
+    t.chat.start();
+    t.setSend("busy");
+    FakeRecognition.last.say("ikinci soru");
+    expect(t.chat.model).toMatchObject({ state: "thinking", busy: true, turns: 0 });
+    t.chat.laneFree();
+    expect(t.sent).toEqual(["ikinci soru", "ikinci soru"]); // retried once the lane was free (still busy here)
+    t.setSend("sent");
+    t.chat.laneFree();
+    expect(t.sent).toHaveLength(3);
+    expect(t.chat.model).toMatchObject({ state: "thinking", busy: false, turns: 1 });
+    t.chat.laneFree(); // nothing queued any more
+    expect(t.sent).toHaveLength(3);
+  });
+
+  it("Vazgeç drops a waiting sentence; turnEnded does not fire while it is waiting; a refused send is 'unplayable'", () => {
+    const t = setup();
+    t.chat.start(); t.setSend("busy");
+    FakeRecognition.last.say("bekleyen");
+    t.chat.turnEnded();
+    expect(t.chat.model.state).toBe("thinking");
+    t.setSend("sent");
+    t.chat.cancelTurn();
+    t.chat.laneFree();
+    expect(t.sent).toEqual(["bekleyen"]);
+    expect(t.chat.model.state).toBe("listening");
+    t.setSend("rejected");
+    FakeRecognition.last.say("reddedilen");
+    expect(t.chat.model).toMatchObject({ state: "error", error: "unplayable" });
+  });
+
+  it("a daemon-style answer (handed over by the chat, not via the transcript) is read aloud", () => {
+    const t = setup();
+    t.chat.start(); FakeRecognition.last.say("selam");
+    t.chat.reply("Merhaba! Nasıl yardımcı olabilirim?");
+    expect(t.chat.model.state).toBe("speaking");
+    expect(t.utterances[0].text).toBe("Merhaba! Nasıl yardımcı olabilirim?");
+  });
+
   it("never reaches the network: only the injected send is called", () => {
     const t = setup();
     t.chat.start(); FakeRecognition.last.say("merhaba");
@@ -228,6 +317,16 @@ describe("speakable", () => {
     expect(speakable("# Başlık\n- **madde** bir\n```diff\n+ a\n- b\n```\nson [bağlantı](https://x.y) https://z.w")).toBe("Başlık madde bir son bağlantı");
     expect(speakable("```ts\nunterminated")).toBe("");
     expect(speakable("a".repeat(5000))).toHaveLength(4000);
+  });
+  it("skips tilde fences, longer fences, indented code, unfenced diffs and tables; keeps list items and prose", () => {
+    expect(speakable("önce\n\n~~~sh\nrm -rf x\n~~~\n\nsonra")).toBe("önce sonra");
+    expect(speakable("a\n````md\n```\ninner\n```\n````\nb")).toBe("a b");
+    expect(speakable("Örnek:\n\n    const x = 1;\n    run(x);\n\nBitti.")).toBe("Örnek: Bitti.");
+    expect(speakable("Bir paragraf\n    devam eden satır")).toBe("Bir paragraf devam eden satır"); // not code: cannot interrupt a paragraph
+    expect(speakable("Değişiklik:\n--- a/x.ts\n+++ b/x.ts\n@@ -1,2 +1,2 @@\n-eski\n+yeni\n bağlam\n\nTamam.")).toBe("Değişiklik: Tamam.");
+    expect(speakable("| Ad | Değer |\n|---|---|\n| a | 1 |\n\nÖzet burada.")).toBe("Özet burada.");
+    expect(speakable("- bir\n- iki\n+ üç")).toBe("bir iki üç");
+    expect(speakable("```ts\nunterminated\n+ x")).toBe("");
   });
 });
 

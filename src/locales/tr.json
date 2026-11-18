@@ -566,5 +566,6 @@
   "voiceChat.level": "Ses seviyesi",
   "voiceChat.caption": "Altyazı",
   "voiceChat.intro": "Valar bir yapay zekâdır; konuşmanız bu cihazda yazıya çevrilir.",
-  "voiceChat.introOk": "Anladım"
+  "voiceChat.introOk": "Anladım",
+  "voiceChat.busyHint": "Valar başka bir yanıtla meşgul; bitince bunu göndereceğim."
 }

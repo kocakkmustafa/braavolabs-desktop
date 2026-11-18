@@ -2529,6 +2529,7 @@ pre, code, .changes-path, .mcp-args, .key-input { direction: ltr; unicode-bidi: 
 .vc-btn.vc-ghost { background: transparent; color: var(--text-2); }
 .vc-icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 2rem; height: 2rem; padding: 0; border: 0; border-radius: var(--r-ctl); background: transparent; color: var(--text-2); }
 .vc-icon-btn:hover { background: var(--surface-2); color: var(--text-1); }
+.vc-cap:empty { display: none; }
 .vc-cap { padding: 2px 2px 0; font-size: var(--fs-chat); line-height: 1.5; color: var(--text-sub); }
 .vc-info { display: flex; align-items: center; gap: 10px; padding: 6px 6px 6px 12px; border: 0; border-radius: var(--r-card); background: var(--surface-2); color: var(--text-2); font-size: var(--fs-small); }
 .vc-info > span { flex: 1; min-width: 0; }

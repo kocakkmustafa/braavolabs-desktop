@@ -589,5 +589,6 @@
   "voiceChat.level": "ध्वनि स्तर",
   "voiceChat.caption": "कैप्शन",
   "voiceChat.intro": "Valar एक एआई है; आपकी आवाज़ इसी डिवाइस पर लिखित में बदली जाती है।",
-  "voiceChat.introOk": "समझ गया"
+  "voiceChat.introOk": "समझ गया",
+  "voiceChat.busyHint": "Valar किसी और जवाब में व्यस्त है; खत्म होने पर मैं इसे भेजूँगा।"
 }

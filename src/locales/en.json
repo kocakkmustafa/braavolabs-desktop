@@ -566,5 +566,6 @@
   "voiceChat.level": "Sound level",
   "voiceChat.caption": "Caption",
   "voiceChat.intro": "Valar is an AI; your speech is transcribed on this device.",
-  "voiceChat.introOk": "Got it"
+  "voiceChat.introOk": "Got it",
+  "voiceChat.busyHint": "Valar is busy with another reply; I will send this when it finishes."
 }

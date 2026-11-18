@@ -589,5 +589,6 @@
   "voiceChat.level": "Livello audio",
   "voiceChat.caption": "Sottotitoli",
   "voiceChat.intro": "Valar è un'IA; il tuo parlato viene trascritto su questo dispositivo.",
-  "voiceChat.introOk": "Ho capito"
+  "voiceChat.introOk": "Ho capito",
+  "voiceChat.busyHint": "Valar è occupato con un'altra risposta; invierò questo appena finisce."
 }

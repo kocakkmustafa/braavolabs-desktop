@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { LOCALES, MESSAGES, makeT } from "../i18n";
-import { clock, stripView, summaryLine } from "../voice-chat-view";
+import { clock, renderStrip, stripView, summaryLine } from "../voice-chat-view";
 import type { VoiceChatModel } from "../voice-chat";
 
 const read = (rel: string) => readFileSync(new URL(rel, import.meta.url), "utf8");
 const css = read("../styles.css");
-const m = (patch: Partial<VoiceChatModel>): VoiceChatModel => ({ state: "listening", error: null, paused: false, heard: "", reply: "", turns: 0, seconds: 0, ...patch });
+const m = (patch: Partial<VoiceChatModel>): VoiceChatModel => ({ state: "listening", error: null, paused: false, busy: false, heard: "", reply: "", turns: 0, seconds: 0, ...patch });
 
 describe("voice chat strip view (BRA-UI-08)", () => {
   const t = makeT("en");
@@ -31,7 +31,7 @@ describe("voice chat strip view (BRA-UI-08)", () => {
   });
 
   it("the four error strips carry the Yazarak devam et way out where recognition is the problem", () => {
-    const err = (error: VoiceChatModel["error"]) => stripView(m({ state: "error", error }), t)!;
+    const err = (error: VoiceChatModel["error"]) => stripView(m({ state: "error", error, reply: "yanıt" }), t)!;
     for (const e of ["denied", "unsupported", "offline", "unplayable"] as const) {
       expect(err(e)).toMatchObject({ tone: "err", glyph: "■", status: "error", role: "alert", live: "assertive" });
     }
@@ -39,6 +39,7 @@ describe("voice chat strip view (BRA-UI-08)", () => {
     expect(err("unsupported").buttons.map(b => b.id)).toEqual(["typeInstead"]);
     expect(err("offline").buttons.map(b => b.id)).toEqual(["typeInstead", "retry"]);
     expect(err("unplayable").buttons.map(b => b.id)).toEqual(["close", "replay"]);
+    expect(stripView(m({ state: "error", error: "unplayable", reply: "" }), t)!.buttons.map(b => b.id)).toEqual(["close"]); // nothing was read: no "read again"
     expect(err("unsupported").word).toBe("Speech recognition is unavailable here");
   });
 
@@ -129,5 +130,90 @@ describe("voice chat contrast on its surfaces", () => {
       for (const fg of ["--run", "--error", "--done"]) for (const bg of ["--surface-card", "--surface-1"]) expect(ratio(p[fg], p[bg]), `${name} ${fg}/${bg}`).toBeGreaterThanOrEqual(3);
       expect(ratio(p["--primary-ink"], p["--primary"])).toBeGreaterThanOrEqual(4.5);
     }
+  });
+});
+
+
+// ── a tiny DOM, just enough for renderStrip ──────────────────────────────────
+class FakeNode {
+  children: FakeNode[] = []; attrs: Record<string, string> = {}; dataset: Record<string, string> = {}; listeners: Record<string, Array<() => void>> = {};
+  style: Record<string, string> = {}; className = ""; hidden = false; type = ""; private text = ""; rebuilt = 0;
+  constructor(readonly tag: string) {}
+  get textContent() { return this.text + this.children.map(c => c.textContent).join(""); }
+  set textContent(v: string) { this.text = v; this.children = []; }
+  append(...n: Array<FakeNode | string>) { for (const x of n) { if (typeof x === "string") this.text += x; else this.children.push(x); } }
+  replaceChildren() { this.children = []; this.text = ""; this.rebuilt += 1; }
+  setAttribute(k: string, v: string) { this.attrs[k] = v; }
+  addEventListener(e: string, f: () => void) { (this.listeners[e] ??= []).push(f); }
+  focus() {}
+  walk(): FakeNode[] { return [this, ...this.children.flatMap(c => c.walk())]; }
+  querySelector(sel: string): FakeNode | null {
+    const cls = /^\.([\w-]+)$/.exec(sel)?.[1];
+    const act = /^\[data-vc-action="([\w]+)"\]$/.exec(sel)?.[1];
+    return this.walk().slice(1).find(n => (cls && n.className.split(" ").includes(cls)) || (act && n.dataset.vcAction === act)) ?? null;
+  }
+}
+const installDom = () => {
+  (globalThis as { document?: unknown }).document = {
+    createElement: (tag: string) => new FakeNode(tag), createElementNS: (_: string, tag: string) => new FakeNode(tag), activeElement: null,
+  };
+};
+
+describe("renderStrip keeps its skeleton while interim words arrive", () => {
+  const t = makeT("en");
+  it("rebuilds only when the state changes; buttons stay the same nodes; only the caption text moves; aria-live sits on the state word", () => {
+    installDom();
+    try {
+      const host = new FakeNode("div");
+      const clicks: string[] = [];
+      const draw = (patch: Partial<VoiceChatModel>) => renderStrip(host as never, stripView(m(patch), t), t, id => clicks.push(id));
+      draw({ state: "listening", heard: "" });
+      const end = host.querySelector('[data-vc-action="end"]')!;
+      const bars = host.querySelector(".vc-bars")!;
+      const word = host.querySelector(".vc-word")!;
+      const builds = host.rebuilt;
+      expect(word.attrs["aria-live"]).toBe("polite");
+      expect(host.attrs["aria-live"]).toBeUndefined();
+      for (const heard of ["m", "me", "mer", "merha", "merhaba"]) draw({ state: "listening", heard });
+      expect(host.rebuilt).toBe(builds);
+      expect(host.querySelector('[data-vc-action="end"]')).toBe(end);
+      expect(host.querySelector(".vc-bars")).toBe(bars);
+      expect(host.querySelector(".vc-word")).toBe(word);
+      expect(host.querySelector(".vc-cap")!.textContent).toBe("merhaba");
+      end.listeners.click[0]();
+      expect(clicks).toEqual(["end"]);
+      draw({ state: "thinking", heard: "merhaba" });
+      expect(host.rebuilt).toBe(builds + 1);
+      expect(host.querySelector(".vc-cap")).toBeNull();
+      draw({ state: "idle" });
+      expect(host.hidden).toBe(true);
+    } finally { delete (globalThis as { document?: unknown }).document; }
+  });
+});
+
+describe("ui.ts voice wiring (source-level guarantees; the workspace needs a GUI webview)", () => {
+  const ui = read("../ui.ts");
+  const block = ui.slice(ui.indexOf("send: (text) => {"), ui.indexOf("onChange: (model) => {"));
+  it("voice send never reads or writes the composer draft, and refuses nothing silently", () => {
+    expect(block).not.toMatch(/ta\.value/);
+    expect(block).toContain('return "busy"');
+    expect(block).toContain('return "rejected"');
+    expect(ui).toContain("run(undefined, { text, token })");
+    expect(ui).toContain("if (!retry && !voiceTurn) ta.value =");
+    expect(ui).toContain("voiceChat?.laneFree()");
+  });
+  it("daemon answers are handed to voice chat", () => {
+    expect(ui).toMatch(/runDaemonTurn\(text, ownsRun, thinkingRow, setRunMotion, showAnswerMotion, voiceAnswer\)/);
+    expect(ui).toContain("if (result.text) onAnswer?.(result.text)");
+  });
+  it("voice turns are tracked by token, so a cancelled turn's finally cannot end a newer turn", () => {
+    expect(ui).toContain("voiceTurn.token === voiceCurrent");
+    expect(ui).toMatch(/if \(voiceLive\(\)\) \{ voiceCurrent = 0; voiceChat\?\.turnEnded\(\); \}/);
+    expect(ui).toMatch(/if \(!vc\.model\.busy\) \{ voiceCurrent = 0; stopDispatch\(\); \}/);
+    expect(ui).not.toMatch(/\bvoiceTurn = (true|false)/);
+  });
+  it("Esc ends voice chat only outside dialogs, when not already handled and focus is in the chat", () => {
+    expect(ui).toMatch(/e\.key === "Escape" && voiceChat\?\.active && !e\.defaultPrevented && !settingsOpen && !nowOpen && inChat/);
+    expect(ui).toContain("chat.contains(focus)");
   });
 });

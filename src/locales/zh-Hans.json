@@ -589,5 +589,6 @@
   "voiceChat.level": "音量",
   "voiceChat.caption": "字幕",
   "voiceChat.intro": "Valar 是 AI；你的语音在本设备上转写为文字。",
-  "voiceChat.introOk": "知道了"
+  "voiceChat.introOk": "知道了",
+  "voiceChat.busyHint": "Valar 正忙于另一条回复；结束后我会发送这条。"
 }

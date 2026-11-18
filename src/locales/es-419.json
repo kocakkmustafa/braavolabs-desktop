@@ -566,5 +566,6 @@
   "voiceChat.level": "Nivel de sonido",
   "voiceChat.caption": "Subtítulo",
   "voiceChat.intro": "Valar es una IA; tu voz se transcribe en este dispositivo.",
-  "voiceChat.introOk": "Entendido"
+  "voiceChat.introOk": "Entendido",
+  "voiceChat.busyHint": "Valar está ocupado con otra respuesta; lo enviaré cuando termine."
 }
