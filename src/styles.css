@@ -24,7 +24,7 @@
   --shadow-window: 0 30px 80px rgba(0, 0, 0, 0.38);
   --shadow-pop: 0 18px 48px rgba(0, 0, 0, 0.5);
   --scrim: rgba(10, 9, 9, 0.5);
-  --mascot-cell: #232420; /* maskot atlasının opak zemini; hücre her iki temada sabit koyu karo */
+  --mascot-cell: #232420; /* KABUL NOTU: maskot atlası opak RGB (#232420 zeminli); hücre AÇIK temada da kasıtlı olarak koyu karo kalır, şerit ise tema yüzeyini izler. PR açıklamasına yazılacak. */
   --on-danger: #fff;
   --error-soft: rgba(232, 149, 140, 0.14);
   --run-soft: rgba(217, 178, 110, 0.16);
@@ -1641,7 +1641,7 @@ textarea {
   font: inherit;
   font-size: 0.8125rem;
   font-weight: 600;
-  color: #fff;
+  color: var(--on-danger);
   background: var(--danger-fill);
   border: none;
   border-radius: 999px;
@@ -1731,7 +1731,7 @@ textarea {
   flex: none;
 }
 .company-status.bad {
-  color: var(--ember, #ff7a1a);
+  color: var(--ember);
 }
 .company-empty,
 .company-error {
@@ -1740,7 +1740,7 @@ textarea {
   padding: 10px 0;
 }
 .company-error {
-  color: var(--molten, #ff4d4d);
+  color: var(--molten);
 }
 
 /* ── Company panel (plan 2.5, React island) ───────────────────────────── */
@@ -1932,7 +1932,7 @@ textarea {
 }
 .changes-status {
   font-size: 0.65625rem;
-  color: var(--ember, #ff7a1a);
+  color: var(--ember);
   width: 22px;
   flex: none;
 }
@@ -1959,7 +1959,7 @@ textarea {
   padding: 8px 0;
 }
 .changes-error {
-  color: var(--molten, #ff4d4d);
+  color: var(--molten);
 }
 
 /* Server compare choices wrap independently of the prompt row. */
@@ -2612,7 +2612,7 @@ pre, code, .changes-path, .mcp-args, .key-input { direction: ltr; unicode-bidi: 
 .cc-root .set-btn { border: 0; }
 
 /* ── UI-03c toast (D7), komut paleti (D6), çevrimdışı bandı (D30) ── */
-.toast-host { position: fixed; inset-block-end: var(--space-5); inset-inline-end: var(--space-5); z-index: 90; display: flex; flex-direction: column; gap: var(--space-2); max-width: min(380px, calc(100vw - 32px)); }
+.toast-host { position: fixed; inset-block-end: var(--space-5); inset-inline-end: var(--space-5); z-index: 200; /* modal/ayarlar/palet üstünde */ display: flex; flex-direction: column; gap: var(--space-2); max-width: min(380px, calc(100vw - 32px)); }
 .toast {
   display: flex; align-items: flex-start; gap: var(--space-2); padding: var(--space-3) var(--space-4); border: 0; border-radius: var(--r-card);
   background: var(--glass-pop); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); box-shadow: var(--shadow-pop);
@@ -2643,5 +2643,9 @@ pre, code, .changes-path, .mcp-args, .key-input { direction: ltr; unicode-bidi: 
 .offline-banner[hidden] { display: none; }
 .offline-banner span:last-child { color: var(--text-2); }
 .offline-glyph { color: var(--error); }
+.offline-banner.back { background: var(--surface-2); }
+.offline-banner.back .offline-glyph::before { content: "✓"; }
+.offline-banner.back .offline-glyph { font-size: 0; }
+.offline-banner.back .offline-glyph::before { font-size: var(--fs-small); color: var(--done); }
 .reduce-motion .toast { animation: none; }
 @media (prefers-reduced-motion: reduce) { .toast { animation: none; } }

@@ -7,7 +7,7 @@
  * native validity bubbles and keyboard behavior still need native UI checks.
  */
 import { createToaster, type ToastKind } from "./toast";
-import { filterCommands, isPaletteShortcut, movePaletteIndex, type PaletteCommand } from "./palette";
+import { createPaletteController, isPaletteShortcut, paletteBlocked, type PaletteCommand } from "./palette";
 import { SETTINGS_PAGE_IDS, nextSettingsPage, type SettingsPageId } from "./settings-pages";
 import { resolveTheme, THEMES } from "./theme";
 import type { Config } from "./config";
@@ -424,6 +424,8 @@ function themeSelector(deps: UiDeps): HTMLElement {
     const option = el("option", undefined, deps.t(`theme.${value}`)); option.value = value; select.append(option);
   }
   select.value = theme.choice();
+  // Tema başka yerden de değişir (komut paleti): seçici tek kaynaktan (theme) eşitlenir.
+  theme.subscribe?.(() => { select.value = theme.choice(); });
   const notice = el("div", "storage-notice"); notice.setAttribute("role", "status");
   select.addEventListener("change", () => {
     const value = THEMES.find(value => value === select.value); if (!value) return;
@@ -1211,7 +1213,9 @@ export function renderWorkspace(deps: UiDeps): void {
   const baseGov = deps.gov;
   const compToggle = el("button", "toggle");
   const compStatus = el("div", "set-sub mono", t("settings.companionOff"));
-  const syncComp = () => compToggle.classList.toggle("on", !!compBridge);
+  compToggle.setAttribute("aria-label", t("settings.companionTitle"));
+  const syncComp = () => { compToggle.classList.toggle("on", !!compBridge); compToggle.setAttribute?.("aria-pressed", String(!!compBridge)); };
+  syncComp();
   const stopCompanion = async () => {
     deps.gov = baseGov;
     activeRelayStopper = null;
@@ -1361,7 +1365,6 @@ export function renderWorkspace(deps: UiDeps): void {
   rmToggle.addEventListener("click", () => {
     const persisted = prefs.setReducedMotion(!prefs.reducedMotion());
     rmNotice.textContent = persisted ? "" : t("settings.preferenceUnsaved");
-    if (!persisted) notify(t, "error", t("settings.preferenceUnsaved"));
     applyReducedMotion(document.documentElement, effectiveReducedMotion(prefs, osPrefersReducedMotion()));
     notifyBrandMotionPreference();
     syncRm();
@@ -1388,7 +1391,10 @@ export function renderWorkspace(deps: UiDeps): void {
   };
   const sheetMain = el("div", "sheet-main");
   const pageNav = el("div", "set-nav");
-  pageNav.setAttribute("role", "tablist"); pageNav.setAttribute("aria-orientation", "vertical");
+  pageNav.setAttribute("role", "tablist");
+  const narrow = typeof matchMedia === "function" ? matchMedia("(max-width: 640px)") : null;
+  const syncOrientation = () => pageNav.setAttribute("aria-orientation", narrow?.matches ? "horizontal" : "vertical");
+  syncOrientation(); narrow?.addEventListener?.("change", syncOrientation);
   pageNav.setAttribute("aria-label", t("settings.title"));
   const pageTabs = new Map<SettingsPageId, HTMLButtonElement>();
   const pagePanels = new Map<SettingsPageId, HTMLElement>();
@@ -1410,7 +1416,7 @@ export function renderWorkspace(deps: UiDeps): void {
     tab.append(icon(pageContent[pid].icon, 16), el("span", undefined, t(`settings.page.${pid}`)));
     tab.addEventListener("click", () => showPage(pid));
     tab.addEventListener("keydown", (e) => {
-      const next = nextSettingsPage(SETTINGS_PAGE_IDS, pid, e.key) as SettingsPageId | null;
+      const next = nextSettingsPage(SETTINGS_PAGE_IDS, pid, e.key, { horizontal: !!narrow?.matches, rtl: document.documentElement.dir === "rtl" }) as SettingsPageId | null;
       if (next) { e.preventDefault(); showPage(next, true); }
     });
     pageNav.append(tab); pageTabs.set(pid, tab);
@@ -2463,13 +2469,22 @@ export function renderWorkspace(deps: UiDeps): void {
   offlineBanner.append(el("span", "offline-glyph", "■"), el("b", undefined, t("offline.title")), el("span", undefined, t("offline.sub")));
   offlineBanner.hidden = typeof navigator === "undefined" || navigator.onLine !== false;
   win.prepend(offlineBanner);
-  const onOffline = () => { offlineBanner.hidden = false; notify(t, "error", t("offline.title")); };
-  const onOnline = () => { offlineBanner.hidden = true; notify(t, "done", t("offline.back")); };
+  // Tek duyuru kanalı: bant. Çevrimiçi olunca bant "geri geldi" der ve kısa süre sonra kapanır.
+  const offlineTitle = offlineBanner.querySelector("b") as HTMLElement;
+  const offlineSub = offlineBanner.lastElementChild as HTMLElement;
+  let backTimer: ReturnType<typeof setTimeout> | undefined;
+  const onOffline = () => {
+    clearTimeout(backTimer);
+    offlineTitle.textContent = t("offline.title"); offlineSub.textContent = t("offline.sub"); offlineBanner.classList.remove("back"); offlineBanner.hidden = false;
+  };
+  const onOnline = () => {
+    offlineTitle.textContent = t("offline.back"); offlineSub.textContent = ""; offlineBanner.classList.add("back");
+    clearTimeout(backTimer); backTimer = setTimeout(() => { offlineBanner.hidden = true; offlineBanner.classList.remove("back"); }, 4000);
+  };
   window.addEventListener("offline", onOffline);
   window.addEventListener("online", onOnline);
 
   // --- komut paleti ⌘K / Ctrl+K (D6): küçük, klavye gezinmeli, role=dialog + odak tuzağı ---
-  let paletteOpen = false;
   const paletteCommands = (): PaletteCommand[] => [
     { id: "new", label: t("rail.newChat"), run: () => { applySurface("chat"); startNewSession(); } },
     { id: "settings", label: t("titlebar.settings"), run: () => setSettings(true) },
@@ -2481,9 +2496,16 @@ export function renderWorkspace(deps: UiDeps): void {
       if (!th.set(next)) notify(t, "error", t("settings.preferenceUnsaved"));
     } },
   ];
+  let paintPalette: () => void = () => {};
+  // Açık onay/kill modalı (.approve-overlay), ayarlar ya da palet varken palet açılmaz:
+  // bekleyen onay varken arkadaki "Yeni sohbet" çalıştırılamaz.
+  const palette = createPaletteController({
+    commands: paletteCommands,
+    blocked: () => paletteBlocked({ paletteOpen: false, settingsOpen, modalOpen: !!document.querySelector(".approve-overlay") }),
+    onChange: () => paintPalette(),
+  });
   const openPalette = () => {
-    if (paletteOpen || settingsOpen) return;
-    paletteOpen = true;
+    if (!palette.open()) return;
     const pBackdrop = el("div", "pal-backdrop");
     const paletteCard = el("div", "pal-card");
     paletteCard.setAttribute("aria-label", t("palette.title"));
@@ -2491,35 +2513,30 @@ export function renderWorkspace(deps: UiDeps): void {
     input.type = "text"; input.placeholder = t("palette.placeholder");
     input.setAttribute("role", "combobox"); input.setAttribute("aria-expanded", "true"); input.setAttribute("aria-controls", "pal-list"); input.setAttribute("aria-label", t("palette.title"));
     const list = el("div", "pal-list"); list.id = "pal-list"; list.setAttribute("role", "listbox");
-    const empty = el("div", "pal-empty", t("palette.empty"));
-    const all = paletteCommands();
-    let shown: PaletteCommand[] = []; let active = 0;
+    const empty = el("div", "pal-empty", t("palette.empty")); empty.setAttribute("role", "status");
     let release: (() => void) | undefined;
-    const close = () => { if (!paletteOpen) return; paletteOpen = false; release?.(); release = undefined; pBackdrop.remove(); };
-    const paint = () => {
+    const teardown = () => { paintPalette = () => {}; release?.(); release = undefined; pBackdrop.remove(); };
+    paintPalette = () => {
+      if (!palette.isOpen()) { teardown(); return; }
+      const shown = palette.shown(), active = palette.active();
       list.replaceChildren();
       shown.forEach((c, i) => {
         const row = el("div", `pal-row${i === active ? " active" : ""}`);
         row.id = `pal-opt-${c.id}`; row.setAttribute("role", "option"); row.setAttribute("aria-selected", String(i === active));
         row.append(el("span", undefined, c.label));
-        row.addEventListener("click", () => { close(); c.run(); });
-        row.addEventListener("mousemove", () => { if (active !== i) { active = i; paint(); } });
+        row.addEventListener("click", () => palette.choose(i));
+        row.addEventListener("mousemove", () => palette.setActive(i));
         list.append(row);
       });
       empty.hidden = shown.length > 0;
       if (shown[active]) input.setAttribute("aria-activedescendant", `pal-opt-${shown[active].id}`); else input.removeAttribute("aria-activedescendant");
     };
-    const refilter = () => { shown = filterCommands(all, input.value); active = 0; paint(); };
-    input.addEventListener("input", refilter);
-    input.addEventListener("keydown", (e) => {
-      const next = e.key === "ArrowDown" || e.key === "ArrowUp" ? movePaletteIndex(active, shown.length, e.key) : null;
-      if (next !== null) { e.preventDefault(); active = next; paint(); }
-      else if (e.key === "Enter" && shown[active]) { e.preventDefault(); const c = shown[active]; close(); c.run(); }
-    });
-    pBackdrop.addEventListener("click", (e) => { if (e.target === pBackdrop) close(); });
+    input.addEventListener("input", () => palette.setQuery(input.value));
+    input.addEventListener("keydown", (e) => { if (palette.key(e)) e.preventDefault(); });
+    pBackdrop.addEventListener("click", (e) => { if (e.target === pBackdrop) palette.close(); });
     paletteCard.append(input, list, empty); pBackdrop.append(paletteCard); root.append(pBackdrop);
-    release = containDialog(paletteCard, close);
-    refilter(); input.focus();
+    release = containDialog(paletteCard, () => palette.close());
+    paintPalette(); input.focus();
   };
   const onPaletteKey = (e: KeyboardEvent) => { if (isPaletteShortcut(e)) { e.preventDefault(); openPalette(); } };
   window.addEventListener("keydown", onPaletteKey);
@@ -2542,6 +2559,7 @@ export function renderWorkspace(deps: UiDeps): void {
     window.removeEventListener("keydown", onPaletteKey);
     window.removeEventListener("offline", onOffline);
     window.removeEventListener("online", onOnline);
+    clearTimeout(backTimer);
     window.removeEventListener("click", onNowOutside);
     clearTimeout(searchTimer);
     if (compBridge || startingCompanion) void stopCompanion();
