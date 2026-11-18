@@ -2585,8 +2585,7 @@ function renderCascadeAnswer(scroll: HTMLElement, v: CascadeView, t: Translator)
 
 function renderCompareAnswer(scroll: HTMLElement, v: CompareView, t: Translator): void {
   if (!v.hasResult) {
-    const card = el("div", "msg-final");
-    card.style.borderLeftColor = "var(--molten)";
+    const card = el("div", "msg-final is-error");
     card.append(el("div", "msg-label", v.status), document.createTextNode(v.error || t("chat.empty")));
     scroll.append(card);
     return;
@@ -2610,8 +2609,7 @@ function renderCompareAnswer(scroll: HTMLElement, v: CompareView, t: Translator)
   scroll.append(grid);
 
   if (v.status !== "COMPLETED") {
-    const card = el("div", "msg-final");
-    card.style.borderLeftColor = "var(--molten)";
+    const card = el("div", "msg-final is-error");
     card.append(el("div", "msg-label", v.status), document.createTextNode(v.error || t("chat.empty")));
     scroll.append(card);
     return;
@@ -3169,7 +3167,7 @@ function renderMcpSection(deps: UiDeps): HTMLElement {
         if (!await checkCapability()) return;
         const parsed = parseToolArgs(argsTa.value);
         resultBox.style.display = "block";
-        resultBox.style.borderLeftColor = "var(--molten)";
+        resultBox.style.borderLeftColor = "var(--error)";
         if (!parsed.ok) {
           resultBox.innerHTML = "";
           resultBox.append(el("div", "msg-label", t("mcp.errorResult")), document.createTextNode(t("mcp.invalidArgs")));
@@ -3199,7 +3197,7 @@ function renderMcpSection(deps: UiDeps): HTMLElement {
           await deps.gov.settle("mcp.tool", view.isError ? "error" : "success", detail);
         } catch (e) {
           resultBox.innerHTML = "";
-          resultBox.style.borderLeftColor = "var(--molten)";
+          resultBox.style.borderLeftColor = "var(--error)";
           const msg = e instanceof McpGateError ? t("gov.rejectedByUser") : t("mcp.actionFailed");
           resultBox.append(el("div", "msg-label", t("mcp.errorResult")), document.createTextNode(msg));
           await deps.gov.settle("mcp.tool", "error", detail);
@@ -3233,7 +3231,7 @@ function renderMcpSection(deps: UiDeps): HTMLElement {
       if (!gate.ok) {
         toolsPanel.innerHTML = "";
         const err = el("div", "mcp-result");
-        err.style.borderLeftColor = "var(--molten)";
+        err.style.borderLeftColor = "var(--error)";
         err.append(el("div", "msg-label", t("mcp.errorResult")), document.createTextNode(gate.reason));
         toolsPanel.append(err);
         return;
@@ -3243,7 +3241,7 @@ function renderMcpSection(deps: UiDeps): HTMLElement {
     } catch (e) {
       toolsPanel.innerHTML = "";
       const err = el("div", "mcp-result");
-      err.style.borderLeftColor = "var(--molten)";
+      err.style.borderLeftColor = "var(--error)";
       err.append(el("div", "msg-label", t("mcp.errorResult")), document.createTextNode(t("mcp.actionFailed")));
       toolsPanel.append(err);
     }
