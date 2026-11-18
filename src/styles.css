@@ -24,6 +24,7 @@
   --shadow-window: 0 30px 80px rgba(0, 0, 0, 0.38);
   --shadow-pop: 0 18px 48px rgba(0, 0, 0, 0.5);
   --scrim: rgba(10, 9, 9, 0.5);
+  --mascot-cell: #232420; /* maskot atlasının opak zemini; hücre her iki temada sabit koyu karo */
   --on-danger: #fff;
   --error-soft: rgba(232, 149, 140, 0.14);
   --run-soft: rgba(217, 178, 110, 0.16);
@@ -240,7 +241,7 @@ textarea {
 }
 .conn.online .conn-dot {
   background: var(--arc-blue-lit);
-  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.15);
+  box-shadow: 0 0 0 3px var(--surface-sel);
 }
 .rail-btn {
   width: 100%;
@@ -393,7 +394,7 @@ textarea {
 }
 .laneb-badge.on {
   color: var(--arc-blue-lit);
-  border-color: rgba(96, 165, 250, 0.35);
+  border-color: var(--surface-sel);
 }
 .laneb-badge.off {
   color: var(--text-dim);
@@ -497,9 +498,9 @@ textarea {
   align-items: center;
   gap: 14px;
   padding: 10px 26px;
-  background: #232420;
-  border-bottom: 1px solid #2a2b27;
-  color: #edeee6;
+  background: var(--surface-card);
+  border-bottom: 0;
+  color: var(--text-1);
 }
 .chat-presence-label {
   font-size: 0.8125rem;
@@ -509,8 +510,8 @@ textarea {
   -webkit-line-clamp: 2;
   overflow: hidden;
 }
-.chat-presence[data-state="thinking"] { color: #d7ac8e; }
-.chat-presence[data-state="success"] { color: #a3b6d9; }
+.chat-presence[data-state="thinking"] { color: var(--run); }
+.chat-presence[data-state="success"] { color: var(--text-2); }
 .brand-motion {
   display: inline-block;
   flex: 0 0 auto;
@@ -520,7 +521,7 @@ textarea {
 }
 .brand-motion-mascot {
   image-rendering: pixelated;
-  background-color: #232420;
+  background-color: var(--mascot-cell);
   background-size: 400% 300%;
   background-repeat: no-repeat;
   border-radius: 10px;
@@ -836,7 +837,7 @@ textarea {
   height: 100%;
   display: grid;
   place-items: center;
-  background: radial-gradient(1200px 600px at 50% -10%, rgba(59, 130, 246, 0.08), transparent),
+  background: radial-gradient(1200px 600px at 50% -10%, var(--glow-a), transparent),
     var(--obsidian);
 }
 .login-card {
@@ -897,8 +898,8 @@ textarea {
   cursor: not-allowed;
 }
 .login-error {
-  background: rgba(255, 77, 77, 0.1);
-  border: 1px solid rgba(255, 77, 77, 0.35);
+  background: var(--error-soft);
+  border: 0;
   color: var(--molten);
   border-radius: var(--radius-sm);
   padding: 9px 11px;
@@ -971,18 +972,18 @@ textarea {
 }
 .policy-badge.auto {
   color: var(--arc-blue-lit);
-  border-color: rgba(96, 165, 250, 0.4);
-  background: rgba(59, 130, 246, 0.08);
+  border-color: transparent;
+  background: var(--surface-2);
 }
 .policy-badge.ask {
   color: var(--ember);
-  border-color: rgba(249, 115, 22, 0.4);
-  background: rgba(249, 115, 22, 0.08);
+  border-color: transparent;
+  background: var(--run-soft);
 }
 .policy-badge.deny {
   color: var(--molten);
-  border-color: rgba(255, 77, 77, 0.4);
-  background: rgba(255, 77, 77, 0.08);
+  border-color: transparent;
+  background: var(--error-soft);
 }
 .audit-row {
   display: grid;
@@ -1020,7 +1021,8 @@ textarea {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--ember);
-  border: 1px solid rgba(249, 115, 22, 0.4);
+  border: 0;
+  background: var(--run-soft);
   border-radius: 999px;
   padding: 1px 6px;
 }
@@ -1370,8 +1372,8 @@ textarea {
   color: var(--text);
 }
 .rail-btn.primary:hover {
-  border-color: #3b82f6;
-  color: var(--arc-blue-lit);
+  border-color: transparent;
+  color: var(--text-1);
 }
 
 /* Code surface: the Lane-B panel takes the whole center column. */
@@ -1574,7 +1576,7 @@ textarea {
 }
 .set-btn:hover {
   color: var(--arc-blue-lit);
-  border-color: var(--arc, #3b82f6);
+  border-color: var(--surface-sel);
 }
 .policy-list {
   display: grid;
@@ -1597,27 +1599,28 @@ textarea {
   text-overflow: ellipsis;
 }
 .chip-ask {
-  border-color: rgba(255, 122, 26, 0.5);
-  color: var(--ember, #ff7a1a);
+  border-color: transparent;
+  background: var(--run-soft);
+  color: var(--run);
 }
 .kill-btn {
   font: inherit;
   font-size: 0.75rem;
   font-weight: 600;
-  color: var(--molten, #ff4d4d);
-  background: transparent;
-  border: 1px solid rgba(255, 77, 77, 0.4);
+  color: var(--error);
+  background: var(--error-soft);
+  border: 0;
   border-radius: 999px;
   padding: 5px 14px;
   cursor: pointer;
   flex: none;
 }
 .kill-btn:hover {
-  border-color: var(--molten, #ff4d4d);
-  background: rgba(255, 77, 77, 0.08);
+  border-color: transparent;
+  background: var(--error-soft);
 }
 .kill-card {
-  border-color: rgba(255, 77, 77, 0.45);
+  border-color: transparent;
 }
 .kill-scope {
   font-size: 0.71875rem;
@@ -1672,7 +1675,7 @@ textarea {
   transition: transform 0.2s, background 0.2s;
 }
 .toggle.on {
-  background: var(--arc, #3b82f6);
+  background: var(--primary);
 }
 .toggle.on::after {
   transform: translateX(14px);
@@ -1909,7 +1912,7 @@ textarea {
 }
 .changes-path:focus {
   outline: none;
-  border-color: var(--arc, #3b82f6);
+  border-color: var(--focus-ring);
 }
 .changes-body {
   display: flex;
@@ -2175,9 +2178,9 @@ textarea {
 /* Locale direction, keyboard visibility and bounded recovery messages. */
 :focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; }
 .locale-picker { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
-.locale-picker select { max-width: 100%; background: var(--obsidian); color: inherit; padding: 6px; }
+.locale-picker select { max-width: 100%; background: var(--surface-2); color: var(--text-1); border: 0; border-radius: var(--r-ctl); padding: var(--space-2) var(--space-3); }
 .storage-notice { font-size: 0.6875rem; color: var(--text-3); padding: 6px; overflow-wrap: anywhere; }
-.storage-notice button { margin-inline-start: 8px; }
+.storage-notice button { margin-inline-start: 8px; border: 0; border-radius: var(--r-ctl); background: var(--surface-2); color: var(--text-1); padding: var(--space-1) var(--space-3); cursor: pointer; }
 pre, code, .mcp-args, .changes-path { direction: ltr; unicode-bidi: isolate; text-align: start; }
 [dir="rtl"] .approve-card, [dir="rtl"] .sheet { text-align: start; }
 button, select, input { min-block-size: 32px; }
