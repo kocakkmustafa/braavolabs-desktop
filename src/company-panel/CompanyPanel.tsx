@@ -3,7 +3,7 @@
  * state and daemon calls live in the zustand store; these components only read
  * it and forward intent. Daemon/web-derived text is always rendered as text.
  */
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import type { Translator } from "../i18n";
 import { modelOptions, parseModelRef, providersNeedingModel } from "../daemon-client";
@@ -12,6 +12,7 @@ import {
   APPROVAL_POLICIES, WORKER_ENGINES,
   type AgentView, type HireForm, type RoutineView, type TaskEventView, type TaskView,
 } from "./map";
+import { groupByDepartment } from "./departments";
 import { parseMarkdown, type Inline } from "./markdown";
 import type { PanelError, PanelState, PanelStore } from "./store";
 
@@ -66,7 +67,8 @@ function SetupHint({ provider }: { provider: string | null }) {
 
 function StatusBadge({ agent }: { agent: AgentView }) {
   const { t } = useEnv();
-  return <span className={`cp-badge cp-badge-${agent.status} mono`}>{t(`panel.status.${agent.status}`)}</span>;
+  const glyph = agent.status === "running" ? "●" : agent.status === "error" ? "■" : agent.status === "paused" ? "○" : "✓";
+  return <span className={`cp-badge cp-badge-${agent.status} mono`}><span aria-hidden="true">{glyph} </span>{t(`panel.status.${agent.status}`)}</span>;
 }
 
 // ── hire wizard ──────────────────────────────────────────────────────────────
@@ -221,7 +223,7 @@ function HireResult() {
 
 // ── org chart + agent card ───────────────────────────────────────────────────
 
-function OrgChart() {
+function OrgChart({ onPick }: { onPick?: () => void }) {
   const { t, locale, store } = useEnv();
   const rows = usePanel(s => s.panel?.rows ?? NONE);
   const selected = usePanel(s => s.selectedAgentId);
@@ -230,7 +232,7 @@ function OrgChart() {
     <ul className="cp-tree" role="tree" aria-label={t("panel.org")}>
       {rows.map(({ agent, depth }) => (
         <li key={agent.id} role="treeitem" aria-level={depth + 1} aria-selected={selected === agent.id} style={{ paddingInlineStart: `${depth * 18}px` }}>
-          <button className={`cp-node${selected === agent.id ? " active" : ""}`} onClick={() => store.getState().selectAgent(selected === agent.id ? null : agent.id)}>
+          <button className={`cp-node${selected === agent.id ? " active" : ""}`} onClick={() => { store.getState().selectAgent(selected === agent.id ? null : agent.id); if (selected !== agent.id) onPick?.(); }}>
             <span className="cp-node-main">
               <span className="cp-node-name">{agent.name}</span>
               <span className="cp-node-sub mono">
@@ -856,28 +858,112 @@ function Header() {
   );
 }
 
+type CompanyTab = "agents" | "org" | "work" | "routines" | "reports";
+const TABS: readonly CompanyTab[] = ["agents", "org", "work", "routines", "reports"];
+
+/** Departman gruplu ajan kartları; kart seçmek ajan ayrıntısını açar (iş mantığı AgentCard'da, aynen). */
+function AgentGroups() {
+  const { t, locale, store } = useEnv();
+  const agents = usePanel(s => s.panel?.agents ?? NONE);
+  const selected = usePanel(s => s.selectedAgentId);
+  if (!agents.length) return <div className="company-empty">{t("panel.noAgents")}</div>;
+  return (
+    <div className="cp-groups">
+      {groupByDepartment(agents).map(g => (
+        <section key={g.department} className="cp-group" aria-label={t(`panel.dept.${g.department}`)}>
+          <div className="rail-section-label">{t(`panel.dept.${g.department}`)}</div>
+          <ul className="cp-plain cp-tiles">
+            {g.agents.map(agent => (
+              <li key={agent.id}>
+                <button className={`cp-tile${selected === agent.id ? " active" : ""}`} aria-pressed={selected === agent.id}
+                  onClick={() => store.getState().selectAgent(selected === agent.id ? null : agent.id)}>
+                  <span className="cp-tile-mark" aria-hidden="true">{(agent.name.trim()[0] ?? "?").toUpperCase()}</span>
+                  <span className="cp-node-main">
+                    <span className="cp-node-name">{agent.name}</span>
+                    <span className="cp-node-sub mono">{agent.title || agent.role}</span>
+                    <span className="cp-node-sub mono">{t("panel.monthUsage", { runs: formatInt(locale, agent.month.runs), tokens: formatInt(locale, agent.month.inputTokens + agent.month.outputTokens) })}</span>
+                  </span>
+                  <StatusBadge agent={agent} />
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function SettingsLink() {
+  const { t } = useEnv();
+  return (
+    <div className="cp-card cp-sub cp-settings-link">
+      <span>{t("panel.settingsNote")}</span>
+      <button className="set-btn" type="button" onClick={() => globalThis.dispatchEvent?.(new Event("bv:open-settings"))}>{t("panel.openSettings")}</button>
+    </div>
+  );
+}
+
 function Ready() {
   const wizardOpen = usePanel(s => s.wizardOpen);
   const selected = usePanel(s => s.panel?.agents.find(a => a.id === s.selectedAgentId) ?? null);
   const { t } = useEnv();
+  const [tab, setTab] = useState<CompanyTab>("agents");
+  const pending = usePanel(s => s.approvals.length);
+  const tabRefs = useRef<Partial<Record<CompanyTab, HTMLButtonElement | null>>>({});
+  // ARIA sekme kalıbı: ok tuşları / Home / End gezinir ve odağı taşır (otomatik etkinleştirme).
+  const onTabKey = (e: KeyboardEvent<HTMLButtonElement>) => {
+    const i = TABS.indexOf(tab);
+    const rtl = typeof document !== "undefined" && document.documentElement.dir === "rtl";
+    const next = e.key === "ArrowRight" ? i + (rtl ? -1 : 1) : e.key === "ArrowLeft" ? i + (rtl ? 1 : -1) : e.key === "Home" ? 0 : e.key === "End" ? TABS.length - 1 : null;
+    if (next === null) return;
+    e.preventDefault();
+    const target = TABS[(next + TABS.length) % TABS.length];
+    setTab(target);
+    tabRefs.current[target]?.focus();
+  };
+  // Her sekme gövdesi DOM'da kalır (hidden): durum ve veri kaybolmaz, sekme yalnız görünümü seçer.
+  const panelProps = (id: CompanyTab) => ({ role: "tabpanel", id: `cp-panel-${id}`, "aria-labelledby": `cp-tab-${id}`, hidden: tab !== id, tabIndex: 0, className: "cp-tabpanel" });
   return (
     <>
       <Header />
       <HireResult />
       {wizardOpen && <HireWizard />}
-      <div className="cp-grid">
+      <div className="cp-tabs" role="tablist" aria-label={t("panel.tabs")}>
+        {TABS.map(id => (
+          <button key={id} ref={el => { tabRefs.current[id] = el; }} role="tab" id={`cp-tab-${id}`} aria-selected={tab === id} aria-controls={`cp-panel-${id}`}
+            tabIndex={tab === id ? 0 : -1} onKeyDown={onTabKey} className={`cp-tab${tab === id ? " active" : ""}`} onClick={() => setTab(id)}>
+            {t(`panel.tab.${id}`)}
+            {id === "work" && pending > 0 && <span className="cp-tab-pending mono"><span aria-hidden="true"> ◆ </span>{pending}<span className="cp-sr"> {t("panel.approvalsPending", { count: pending })}</span></span>}
+          </button>
+        ))}
+      </div>
+      <div className="cp-sr" role="status" aria-live="polite">{pending > 0 ? t("panel.approvalsPending", { count: pending }) : ""}</div>
+      <div {...panelProps("agents")}>
+        <div className="cp-grid">
+          <AgentGroups />
+          {selected ? <AgentCard agent={selected} /> : <div className="cp-card cp-sub cp-placeholder">{t("panel.selectAgent")}</div>}
+        </div>
+      </div>
+      <div {...panelProps("org")}>
         <section className="cp-section">
           <div className="rail-section-label">{t("panel.org")}</div>
-          <OrgChart />
+          <OrgChart onPick={() => { setTab("agents"); tabRefs.current.agents?.focus(); }} />
         </section>
-        {selected ? <AgentCard agent={selected} /> : <div className="cp-card cp-sub cp-placeholder">{t("panel.selectAgent")}</div>}
       </div>
-      <Approvals />
-      <Tasks />
-      <HireWorker />
-      <Routines />
-      <FindingsView />
-      <Activity />
+      <div {...panelProps("work")}>
+        <Approvals />
+        <Tasks />
+        <HireWorker />
+      </div>
+      <div {...panelProps("routines")}>
+        <Routines />
+        <SettingsLink />
+      </div>
+      <div {...panelProps("reports")}>
+        <FindingsView />
+        <Activity />
+      </div>
     </>
   );
 }
