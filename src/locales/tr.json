@@ -592,5 +592,7 @@
   "attach.secretTitle": "Bu dosya sır içerebilir, yine de ekle?",
   "attach.secretAdd": "Yine de ekle",
   "attach.notice": "Eklediğiniz dosyanın içeriği seçili model sağlayıcısına gönderilir.",
-  "attach.noticeOk": "Anladım"
+  "attach.noticeOk": "Anladım",
+  "attach.needText": "Dosyayla birlikte gönderilecek bir mesaj yazın.",
+  "attach.errWireTooBig": "Mesaj ekleriyle birlikte gönderilemeyecek kadar büyük. Bir eki kaldırın ya da mesajı kısaltın."
 }

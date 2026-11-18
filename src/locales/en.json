@@ -592,5 +592,7 @@
   "attach.secretTitle": "This file may contain secrets. Add it anyway?",
   "attach.secretAdd": "Add anyway",
   "attach.notice": "The contents of a file you attach are sent to the selected model provider.",
-  "attach.noticeOk": "Got it"
+  "attach.noticeOk": "Got it",
+  "attach.needText": "Write a message to send with your file.",
+  "attach.errWireTooBig": "The message with its attachments is too large to send. Remove an attachment or shorten the message."
 }

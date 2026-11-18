@@ -592,5 +592,7 @@
   "attach.secretTitle": "このファイルには機密情報が含まれている可能性があります。それでも追加しますか？",
   "attach.secretAdd": "それでも追加",
   "attach.notice": "添付したファイルの内容は、選択したモデルプロバイダーに送信されます。",
-  "attach.noticeOk": "了解"
+  "attach.noticeOk": "了解",
+  "attach.needText": "ファイルと一緒に送るメッセージを入力してください。",
+  "attach.errWireTooBig": "添付ファイルを含めたメッセージが大きすぎて送信できません。添付を削除するか、メッセージを短くしてください。"
 }

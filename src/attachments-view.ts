@@ -205,30 +205,39 @@ export function createAttachUi(deps: AttachUiDeps): AttachUi {
   };
   tray.subscribe(sync);
 
+  // One note at a time. The first-use notice counts as seen only once it was displayed and then left (dismissed or replaced).
+  let noticeShown = false;
+  let noticeOnScreen = false;
+  const setNote = (spec: NoteSpec | null) => {
+    if (noticeOnScreen) { noticeOnScreen = false; markAttachNoticeSeen(deps.storage); }
+    if (spec) renderNote(noteHost, spec, t); else clearNote(noteHost);
+  };
+
   const errorNote = (e: AttachError, retry?: () => void) => {
     const vars = { name: e.name, size: formatSize(e.size, deps.locale()), max: maxFile, total: formatSize(MAX_TOTAL_BYTES, deps.locale()), n: MAX_ATTACHMENTS };
     const key = { tooBig: "errTooBig", unsupported: "errUnsupported", unreadable: "errUnreadable", tooMany: "errTooMany", total: "errTotal" }[e.kind];
-    const buttons: NoteButton[] = [{ label: t("attach.close"), onClick: () => clearNote(noteHost) }];
+    const buttons: NoteButton[] = [{ label: t("attach.close"), onClick: () => setNote(null) }];
     if (retry) buttons.push({ label: t("attach.retry"), primary: true, onClick: retry });
-    else if (e.kind !== "tooMany") buttons.push({ label: t("attach.chooseOther"), primary: true, onClick: () => { clearNote(noteHost); input.click(); } });
-    renderNote(noteHost, { tone: "err", icon: "warn", title: t(`attach.${key}`), text: t(`attach.${key}Hint`, vars), buttons }, t);
+    else if (e.kind !== "tooMany") buttons.push({ label: t("attach.chooseOther"), primary: true, onClick: () => { setNote(null); input.click(); } });
+    setNote({ tone: "err", icon: "warn", title: t(`attach.${key}`), text: t(`attach.${key}Hint`, vars), buttons });
   };
 
   const askSecret = (name: string): Promise<boolean> => new Promise(resolve => {
-    renderNote(noteHost, {
+    setNote({
       tone: "err", icon: "lock", title: t("attach.secretTitle"), text: name,
       buttons: [
-        { label: t("attach.cancel"), onClick: () => { clearNote(noteHost); resolve(false); } },
-        { label: t("attach.secretAdd"), primary: true, onClick: () => { clearNote(noteHost); resolve(true); } },
+        { label: t("attach.cancel"), onClick: () => { setNote(null); resolve(false); } },
+        { label: t("attach.secretAdd"), primary: true, onClick: () => { setNote(null); resolve(true); } },
       ],
-    }, t);
+    });
   });
 
   const showNoticeOnce = () => {
     if (attachNoticeSeen(deps.storage)) return;
-    const dismiss = () => clearNote(noteHost);
-    renderNote(noteHost, { tone: "info", icon: "lock", text: t("attach.notice"), buttons: [{ label: t("attach.noticeOk"), onClick: dismiss }] }, t);
-    markAttachNoticeSeen(deps.storage);
+    if (noticeShown) return; // already on screen this session
+    noticeShown = true;
+    noticeOnScreen = true;
+    renderNote(noteHost, { tone: "info", icon: "lock", text: t("attach.notice"), buttons: [{ label: t("attach.noticeOk"), onClick: () => setNote(null) }] }, t);
   };
 
   async function addOne(file: PickedFile): Promise<void> {
@@ -239,16 +248,20 @@ export function createAttachUi(deps: AttachUiDeps): AttachUi {
     if (disposed) return;
     const res = await read(file);
     if (disposed) return;
-    if (isAttachError(res)) { errorNote(res, res.kind === "unreadable" ? () => { clearNote(noteHost); void addOne(file); } : undefined); return; }
+    if (isAttachError(res)) { errorNote(res, res.kind === "unreadable" ? () => { setNote(null); void handleFiles([file]); } : undefined); return; }
     // The tray may have filled up while the secret question or the read was pending.
     const late = inspectFile({ name: res.name, size: res.size, type: "text/plain" }, tray);
     if (late) { errorNote(late); return; }
-    clearNote(noteHost);
+    setNote(null);
     tray.add(res);
     showNoticeOnce();
   }
 
-  const handleFiles = async (files: PickedFile[]) => { for (const f of files) { if (disposed) return; await addOne(f); } };
+  let queue: Promise<void> = Promise.resolve();
+  const handleFiles = (files: PickedFile[]): Promise<void> => {
+    queue = queue.then(async () => { for (const f of files) { if (disposed) return; await addOne(f); } }, () => {});
+    return queue;
+  };
   input.addEventListener("change", () => {
     const files = Array.from((input as HTMLInputElement).files ?? []) as PickedFile[];
     input.value = "";

@@ -592,5 +592,7 @@
   "attach.secretTitle": "Ce fichier peut contenir des secrets. L’ajouter quand même ?",
   "attach.secretAdd": "Ajouter quand même",
   "attach.notice": "Le contenu d’un fichier que vous joignez est envoyé au fournisseur de modèle sélectionné.",
-  "attach.noticeOk": "Compris"
+  "attach.noticeOk": "Compris",
+  "attach.needText": "Écrivez un message à envoyer avec votre fichier.",
+  "attach.errWireTooBig": "Le message et ses pièces jointes sont trop volumineux pour être envoyés. Retirez une pièce jointe ou raccourcissez le message."
 }

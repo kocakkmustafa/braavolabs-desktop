@@ -615,5 +615,7 @@
   "attach.secretTitle": "Ten plik może zawierać sekrety. Dodać go mimo to?",
   "attach.secretAdd": "Dodaj mimo to",
   "attach.notice": "Zawartość załączonego pliku jest wysyłana do wybranego dostawcy modelu.",
-  "attach.noticeOk": "Rozumiem"
+  "attach.noticeOk": "Rozumiem",
+  "attach.needText": "Napisz wiadomość, którą wyślesz razem z plikiem.",
+  "attach.errWireTooBig": "Wiadomość z załącznikami jest za duża, by ją wysłać. Usuń załącznik lub skróć wiadomość."
 }

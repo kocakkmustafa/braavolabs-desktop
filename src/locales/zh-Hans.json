@@ -615,5 +615,7 @@
   "attach.secretTitle": "此文件可能包含机密信息，仍要添加吗？",
   "attach.secretAdd": "仍要添加",
   "attach.notice": "您添加的文件内容会发送给所选的模型提供商。",
-  "attach.noticeOk": "知道了"
+  "attach.noticeOk": "知道了",
+  "attach.needText": "请输入要与文件一起发送的消息。",
+  "attach.errWireTooBig": "带附件的消息太大，无法发送。请移除一个附件或缩短消息。"
 }

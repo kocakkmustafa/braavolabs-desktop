@@ -615,5 +615,7 @@
   "attach.secretTitle": "Questo file potrebbe contenere segreti. Aggiungerlo comunque?",
   "attach.secretAdd": "Aggiungi comunque",
   "attach.notice": "Il contenuto di un file allegato viene inviato al fornitore di modelli selezionato.",
-  "attach.noticeOk": "Ho capito"
+  "attach.noticeOk": "Ho capito",
+  "attach.needText": "Scrivi un messaggio da inviare con il file.",
+  "attach.errWireTooBig": "Il messaggio con i suoi allegati è troppo grande per essere inviato. Rimuovi un allegato o accorcia il messaggio."
 }

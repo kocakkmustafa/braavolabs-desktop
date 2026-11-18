@@ -138,7 +138,7 @@ import {
 } from "./brand-motion";
 import { createVoice } from "./voice";
 import { createVoiceChat, isVoiceChatEnabled, markVoiceChatIntroSeen, voiceChatIntroSeen, type VoiceChat } from "./voice-chat";
-import { composeWire, createTray, isAttachmentsEnabled, type AttachmentTray } from "./attachments";
+import { MAX_WIRE_JSON_BYTES, composeWire, createTray, isAttachmentsEnabled, splitWire, wireJsonBytes, type AttachmentTray } from "./attachments";
 import { createAttachUi, renderSentChips, type AttachUi } from "./attachments-view";
 import { renderIntro, renderStrip, stripView, summaryLine, vcIcon, type VcAction } from "./voice-chat-view";
 import { createBrowserPane } from "./browser-pane";
@@ -2007,7 +2007,12 @@ export function renderWorkspace(deps: UiDeps): void {
     activeDaemonConv = loaded.conversation;
     scroll.replaceChildren();
     for (const m of loaded.messages) {
-      if (m.role === "user") scroll.append(el("div", "msg-user", m.content));
+      if (m.role === "user") {
+        // A turn sent with attachments is stored by the daemon with the file text inside: show the words and name/size chips only.
+        const { text: said, files } = splitWire(m.content);
+        scroll.append(el("div", "msg-user", said));
+        if (files.length) scroll.append(renderSentChips(files, t, getLocale()));
+      }
       else renderPlainAnswer(scroll, m.content, t);
     }
     showDaemonModel(loaded.conversation.provider, loaded.conversation.model);
@@ -2235,7 +2240,11 @@ export function renderWorkspace(deps: UiDeps): void {
     if (workspaceDisposed || dispatching) return;
     const runMode = retry?.mode ?? mode;
     const text = retry?.text ?? voiceTurn?.text ?? ta.value.trim();
-    if (!text) return;
+    if (!text) {
+      // A file alone is not a message: say so instead of doing nothing.
+      if (attachTray?.items().length) { hint.textContent = t("attach.needText"); hint.style.display = "block"; }
+      return;
+    }
     if (runMode === "compare" && !companyInput.value.trim()) {
       hint.textContent = t("chat.companyNeeded");
       hint.style.display = "block";
@@ -2261,6 +2270,15 @@ export function renderWorkspace(deps: UiDeps): void {
         return;
       }
     }
+    // BRA-UI-09: only a typed send carries the pending attachments (a voice turn or a retry never does). The tray is
+    // emptied after the checks below, so a refused send keeps the files. The size is measured as it goes on the wire.
+    const pendingFiles = retry || voiceTurn ? [] : attachTray?.items() ?? [];
+    const wire = retry ? text : composeWire(text, pendingFiles);
+    if (pendingFiles.length && wireJsonBytes(wire) > MAX_WIRE_JSON_BYTES) {
+      hint.textContent = t("attach.errWireTooBig");
+      hint.style.display = "block";
+      return;
+    }
     const owner = captureSession(cfg);
     dispatchController?.abort();
     const controller = new AbortController();
@@ -2280,9 +2298,8 @@ export function renderWorkspace(deps: UiDeps): void {
     dispatching = true;
     sendBtn.disabled = true;
     if (!retry && !voiceTurn) ta.value = "";
-    // BRA-UI-09: attachments ride this one send (typed or voice). The chat shows/stores `text`; only the request carries the files.
-    const sentFiles = retry ? [] : attachTray?.take() ?? [];
-    const wire = retry ? text : composeWire(text, sentFiles);
+    // The chat shows/stores `text`; only the request carries the files.
+    const sentFiles = pendingFiles.length ? attachTray?.take() ?? [] : [];
     const ownsMotion = ownsRun;
     const setRunMotion = (state: MotionState, label: string) => {
       if (ownsMotion()) setChatMotion(state, label);

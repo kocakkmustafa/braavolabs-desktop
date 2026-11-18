@@ -592,5 +592,7 @@
   "attach.secretTitle": "Diese Datei kann Geheimnisse enthalten. Trotzdem hinzufügen?",
   "attach.secretAdd": "Trotzdem hinzufügen",
   "attach.notice": "Der Inhalt einer angehängten Datei wird an den ausgewählten Modellanbieter gesendet.",
-  "attach.noticeOk": "Verstanden"
+  "attach.noticeOk": "Verstanden",
+  "attach.needText": "Schreiben Sie eine Nachricht, die mit der Datei gesendet wird.",
+  "attach.errWireTooBig": "Die Nachricht mit ihren Anhängen ist zu groß zum Senden. Entfernen Sie einen Anhang oder kürzen Sie die Nachricht."
 }

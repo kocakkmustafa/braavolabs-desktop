@@ -615,5 +615,7 @@
   "attach.secretTitle": "Berkas ini mungkin berisi rahasia. Tetap tambahkan?",
   "attach.secretAdd": "Tetap tambahkan",
   "attach.notice": "Isi berkas yang Anda lampirkan dikirim ke penyedia model yang dipilih.",
-  "attach.noticeOk": "Mengerti"
+  "attach.noticeOk": "Mengerti",
+  "attach.needText": "Tulis pesan untuk dikirim bersama berkas Anda.",
+  "attach.errWireTooBig": "Pesan beserta lampirannya terlalu besar untuk dikirim. Hapus satu lampiran atau persingkat pesan."
 }
