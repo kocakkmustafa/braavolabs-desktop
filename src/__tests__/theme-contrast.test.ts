@@ -27,6 +27,8 @@ it("eski belirteç adları yeni belirteçlere takma ad olarak bağlı; global ke
   }
   expect(css).toMatch(/button,\s*input,\s*select,\s*textarea\s*\{[^}]*border:\s*0;/);
   expect(css).toContain("outline: 2px solid var(--focus-ring)");
+  expect(css).toMatch(/data-theme="light"\] \{[^}]*--text-dim: var\(--text-2\);[^}]*--steel-400: var\(--text-2\);/);
+  expect(css).not.toMatch(/\.toggle\.on::after \{[^}]*#fff/);
 });
 it("preserves Inspector at narrow widths and allows larger text and motion preference without a GUI claim", () => {
   expect(css).not.toMatch(/\.inspector\s*\{\s*display:\s*none/);

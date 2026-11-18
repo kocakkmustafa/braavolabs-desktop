@@ -132,6 +132,10 @@
   --steel-600: #b5b1ab;
   --ember-dim: #a97b2c;
   --danger-fill: #b8493d;
+  /* açık temada küçük metin kenar çubuğu yüzeyinde 4.5:1 kalsın (text-3 orada 4.4:1) */
+  --text-dim: var(--text-2);
+  --steel-400: var(--text-2);
+  --steel-300: var(--text-2);
 }
 
 
@@ -1662,7 +1666,7 @@ textarea {
 }
 .toggle.on::after {
   transform: translateX(14px);
-  background: #fff;
+  background: var(--primary-ink);
 }
 
 /* App-level reduced motion: the toggle (or the OS) kills every animation. */
