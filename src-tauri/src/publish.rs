@@ -151,6 +151,7 @@ pub fn validate_publish_files(files: &[String]) -> Result<(), PubErr> {
             || f.contains('\n')
             || norm.starts_with('/')
             || norm.starts_with('-')
+            || norm.starts_with(':') // pathspec magic (`:(glob)…`, `:/…`)
             || norm.split('/').any(|s| s == ".." || s == ".git")
             || (norm.len() > 1 && norm.as_bytes()[1] == b':'); // C:\...
         if bad {
@@ -165,19 +166,25 @@ pub fn validate_publish_files(files: &[String]) -> Result<(), PubErr> {
 
 /// True when a `git push` argv carries anything but the one allowed shape. Defence in depth: the argv is
 /// built from fixed pieces plus a validated branch, and still checked here before it runs.
-pub fn push_argv_denied(argv: &[String]) -> bool {
+pub fn push_argv_denied(argv: &[String], expected_url: &str) -> bool {
     let a: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
     for s in &a {
         let l = s.to_ascii_lowercase();
         if l.starts_with("--force") || l == "-f" || l.starts_with("--delete") || l == "-d" || l.starts_with("--mirror")
             || l.starts_with("--prune") || l.starts_with("--receive-pack") || l.starts_with("--exec")
-            || s.starts_with('+') || s.contains(':') || s.starts_with(':')
+            || s.starts_with('+') || s.starts_with(':')
         {
             return true;
         }
     }
-    // exactly: push -u origin <branch>
-    !(a.len() == 4 && a[0] == "push" && a[1] == "-u" && a[2] == "origin" && is_valid_branch(a[3]))
+    // exactly: push <the verified explicit URL> <branch>. Never the `origin` name: its URL, pushurl and any
+    // insteadOf rewrite live in repo config the user's tooling (or a hostile repo) controls.
+    !(a.len() == 3 && a[0] == "push" && a[1] == expected_url && is_valid_branch(a[2]))
+}
+
+/// The one URL a push may go to, built from the approved owner/repo (never from `origin`'s raw string).
+pub fn push_url(owner: &str, repo: &str, https: bool) -> String {
+    if https { format!("https://github.com/{owner}/{repo}.git") } else { format!("git@github.com:{owner}/{repo}.git") }
 }
 
 // ── remote parsing ───────────────────────────────────────────────────────────
@@ -186,9 +193,19 @@ pub fn push_argv_denied(argv: &[String]) -> bool {
 /// Accepts https://[user[:pw]@]github.com/o/r[.git] and git@github.com:o/r[.git] / ssh://git@github.com/o/r.
 pub fn parse_github_remote(url: &str) -> Option<(String, String, bool)> {
     let u = url.trim();
+    if u.chars().any(|c| c.is_whitespace() || c.is_control() || matches!(c, '?' | '#' | '\\')) {
+        return None;
+    }
     let (rest, https) = if let Some(r) = u.strip_prefix("https://") {
-        let hostpath = r.rsplit_once('@').map(|(_, h)| h).unwrap_or(r);
-        (hostpath.strip_prefix("github.com/")?.to_string(), true)
+        // The authority is everything before the FIRST '/'. userinfo is stripped from it alone, and what
+        // is left must be exactly `github.com` (no port, no lookalike): `https://evil.com/x@github.com/o/r`
+        // has authority `evil.com` and is refused.
+        let (authority, path) = r.split_once('/')?;
+        let host = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+        if host != "github.com" {
+            return None;
+        }
+        (path.to_string(), true)
     } else if let Some(r) = u.strip_prefix("git@github.com:") {
         (r.to_string(), false)
     } else if let Some(r) = u.strip_prefix("ssh://git@github.com/") {
@@ -243,10 +260,34 @@ pub struct GitOut {
 
 /// Run `git` with fixed args (no shell), never prompting. `extra_env` carries nothing secret.
 pub fn run_git(cwd: &str, args: &[&str], include: Option<&Path>) -> Result<GitOut, PubErr> {
+    run_git_with(cwd, args, include, &[], false)
+}
+
+#[cfg(windows)]
+const NULL_CONFIG: &str = "NUL";
+#[cfg(not(windows))]
+const NULL_CONFIG: &str = "/dev/null";
+
+/// `hardened` is for the push that carries the token: repo-level config must not be able to redirect the
+/// target, weaken TLS, add a proxy, run a hook or an ssh command, and the system/global config and
+/// proxy environment are not consulted. `extra_env` carries nothing secret.
+pub fn run_git_with(cwd: &str, args: &[&str], include: Option<&Path>, extra_env: &[(&str, &str)], hardened: bool) -> Result<GitOut, PubErr> {
     let mut cmd = Command::new("git");
+    if hardened {
+        for c in ["http.sslVerify=true", "http.proxy=", "core.hooksPath=/dev/null", "core.sshCommand=ssh", "credential.helper=", "http.followRedirects=false"] {
+            cmd.arg("-c").arg(c);
+        }
+        cmd.env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", NULL_CONFIG);
+        for v in ["GIT_SSL_NO_VERIFY", "http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND"] {
+            cmd.env_remove(v);
+        }
+    }
     if let Some(p) = include {
         cmd.arg("-c").arg(format!("include.path={}", p.display()));
         cmd.arg("-c").arg("credential.helper=");
+    }
+    for (k, v) in extra_env {
+        cmd.env(k, v);
     }
     let out = cmd
         .args(args)
@@ -262,6 +303,19 @@ pub fn run_git(cwd: &str, args: &[&str], include: Option<&Path>) -> Result<GitOu
         stdout: String::from_utf8_lossy(&out.stdout).to_string(),
         stderr: String::from_utf8_lossy(&out.stderr).to_string(),
     })
+}
+
+/// True only when git, with repo/global/system config neutralised and then with the repo's own config, resolves the
+/// explicit push URL to itself: a `url.<x>.insteadOf` / `pushInsteadOf` rewrite in the repo would send the push (and
+/// the token) elsewhere, so any difference refuses the push.
+pub fn push_url_unrewritten(cwd: &str, url: &str) -> bool {
+    match run_git_with(cwd, &["ls-remote", "--get-url", url], None, &[], true) {
+        Ok(o) if o.ok && o.stdout.trim() == url => {}
+        _ => return false,
+    }
+    // `ls-remote --get-url` ignores pushInsteadOf, so ANY url.*.insteadOf / pushInsteadOf in the repo's own config
+    // refuses the push (exit 1 = no such key). Global/system config is not read on the hardened push, so it cannot matter.
+    matches!(run_git_with(cwd, &["config", "--get-regexp", r"^url\..*\.(push)?insteadof$"], None, &[], true), Ok(o) if !o.ok && o.stdout.trim().is_empty())
 }
 
 pub fn current_branch(cwd: &str) -> Option<String> {
@@ -339,9 +393,10 @@ pub fn commit_on_new_branch(cwd: &str, branch: &str, title: &str, body: &str, fi
             }
         }
     };
-    let mut add: Vec<&str> = vec!["add", "--"];
+    // Literal pathspecs: a changed file named `:(top)x` or `*.ts` is that file, never pathspec magic or a glob.
+    let mut add: Vec<&str> = vec!["--literal-pathspecs", "add", "--"];
     add.extend(files.iter().map(|s| s.as_str()));
-    match run_git(cwd, &add, None) {
+    match run_git_with(cwd, &add, None, &[("GIT_LITERAL_PATHSPECS", "1")], false) {
         Ok(o) if o.ok => {}
         _ => {
             undo();
@@ -531,20 +586,24 @@ mod tests {
     #[test]
     fn push_argv_only_the_one_shape() {
         let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert!(!push_argv_denied(&a(&["push", "-u", "origin", "braavo/x"])));
+        let url = push_url("o", "r", true);
+        assert_eq!(url, "https://github.com/o/r.git");
+        assert!(!push_argv_denied(&a(&["push", &url, "braavo/x"]), &url));
         for bad in [
-            a(&["push", "--force", "origin", "x"]),
-            a(&["push", "-u", "origin", "+x"]),
-            a(&["push", "-u", "origin", "x:y"]),
-            a(&["push", "-u", "origin", "--delete"]),
-            a(&["push", "--force-with-lease", "-u", "origin", "x"]),
-            a(&["push", "-f", "origin", "x"]),
-            a(&["push", "-u", "origin", ":x"]),
-            a(&["push", "-u", "origin", "x", "y"]),
-            a(&["push", "-u", "other", "x"]),
+            a(&["push", "--force", &url, "x"]),
+            a(&["push", &url, "+x"]),
+            a(&["push", &url, "x:y"]),
+            a(&["push", &url, "--delete"]),
+            a(&["push", "--force-with-lease", &url, "x"]),
+            a(&["push", "-f", &url, "x"]),
+            a(&["push", &url, ":x"]),
+            a(&["push", &url, "x", "y"]),
+            a(&["push", "-u", &url, "x"]),
+            a(&["push", "origin", "x"]),
+            a(&["push", "https://github.com/evil/r.git", "x"]),
             a(&["push", "--mirror"]),
         ] {
-            assert!(push_argv_denied(&bad), "{bad:?}");
+            assert!(push_argv_denied(&bad, &url), "{bad:?}");
         }
     }
 
@@ -561,6 +620,8 @@ mod tests {
         assert_eq!(validate_publish_files(&["/etc/passwd".into()]), Err(PubErr::InvalidText));
         assert_eq!(validate_publish_files(&["-rf".into()]), Err(PubErr::InvalidText));
         assert_eq!(validate_publish_files(&[".git/config".into()]), Err(PubErr::InvalidText));
+        assert_eq!(validate_publish_files(&[":(top)x".into()]), Err(PubErr::InvalidText));
+        assert_eq!(validate_publish_files(&[":/x".into()]), Err(PubErr::InvalidText));
         assert_eq!(validate_publish_files(&["a.ts".into(), ".env".into()]), Err(PubErr::SecretFile));
         assert_eq!(validate_publish_files(&["a.ts".into(), "b/c.ts".into()]), Ok(()));
     }
@@ -572,7 +633,7 @@ mod tests {
         assert_eq!(p("https://user:SECRET@github.com/o/r"), Some(("o".into(), "r".into(), true)));
         assert_eq!(p("git@github.com:o/r.git"), Some(("o".into(), "r".into(), false)));
         assert_eq!(p("ssh://git@github.com/o/r"), Some(("o".into(), "r".into(), false)));
-        for bad in ["https://gitlab.com/o/r", "https://github.com.evil.com/o/r", "https://evil.com/github.com/o/r", "https://github.com/o", "https://github.com/o/r/x", "file:///tmp/x", ""] {
+        for bad in ["https://gitlab.com/o/r", "https://github.com.evil.com/o/r", "https://evil.com/github.com/o/r", "https://evil.com/x@github.com/o/r", "https://evil.com/u:p@github.com/o/r", "https://github.com:8443/o/r", "https://github.com@evil.com/o/r", "https://github.com/o/r?x=1", "https://github.com\\@evil.com/o/r", "https://github.com/o", "https://github.com/o/r/x", "file:///tmp/x", ""] {
             assert_eq!(p(bad), None, "{bad}");
         }
     }
@@ -800,5 +861,59 @@ mod tests {
         assert!(l.stdout.is_empty());
         assert_eq!(std::fs::read_to_string(d.join("a.txt")).unwrap(), "3\n", "the user's edit is kept");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn add_treats_names_literally_so_a_glob_or_magic_name_cannot_widen_the_commit() {
+        let d = tmp("lit");
+        init_repo(&d);
+        std::fs::write(d.join("*.ts"), "star").unwrap();
+        std::fs::write(d.join("other.ts"), "other").unwrap();
+        std::fs::write(d.join("[id].tsx"), "bracket").unwrap();
+        let cwd = d.to_str().unwrap();
+        commit_on_new_branch(cwd, "braavo/lit", "t", "", &["*.ts".to_string(), "[id].tsx".to_string()]).unwrap();
+        let tracked = Command::new("git").args(["ls-files"]).current_dir(&d).output().unwrap();
+        let t = String::from_utf8_lossy(&tracked.stdout).to_string();
+        assert!(t.contains("*.ts") && t.contains("[id].tsx"), "{t}");
+        assert!(!t.contains("other.ts"), "a glob name must not pull in other files: {t}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn push_url_is_refused_when_repo_config_rewrites_it() {
+        let d = tmp("rewrite");
+        init_repo(&d);
+        let cwd = d.to_str().unwrap();
+        let url = push_url("o", "r", true);
+        assert!(push_url_unrewritten(cwd, &url));
+        sh(&d, &["config", "url.https://evil.example/.insteadOf", "https://github.com/"]);
+        assert!(!push_url_unrewritten(cwd, &url), "insteadOf rewrite must be refused");
+        sh(&d, &["config", "--unset", "url.https://evil.example/.insteadOf"]);
+        sh(&d, &["config", "url.https://evil.example/.pushInsteadOf", "https://github.com/"]);
+        assert!(!push_url_unrewritten(cwd, &url), "pushInsteadOf rewrite must be refused");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn hardened_push_ignores_repo_hooks_and_proxy_config() {
+        let root = tmp("hard");
+        let (work, bare) = (root.join("w"), root.join("o.git"));
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&bare).unwrap();
+        sh(&bare, &["init", "-q", "--bare", "-b", "main"]);
+        init_repo(&work);
+        let marker = root.join("hook-ran");
+        let hook = work.join(".git/hooks/pre-push");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch {}\nexit 0\n", marker.display())).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        sh(&work, &["config", "http.proxy", "http://127.0.0.1:9"]);
+        let o = run_git_with(work.to_str().unwrap(), &["push", bare.to_str().unwrap(), "main"], None, &[], true).unwrap();
+        assert!(o.ok, "{}", o.stderr);
+        assert!(!marker.exists(), "pre-push hook must not run on the hardened push");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

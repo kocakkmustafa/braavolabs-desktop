@@ -957,14 +957,17 @@ async fn git_publish_push(app: AppHandle, token: String, cwd: String, branch: St
 }
 
 fn publish_push_blocking(app: AppHandle, token: String, cwd: String, branch: String, ts: u64) -> Result<(), String> {
-    use publish::{PubErr, run_git};
+    use publish::PubErr;
     check_git_cwd(&cwd).map_err(|_| PubErr::Unknown.msg())?;
     if !publish::is_valid_branch(&branch) { return Err(PubErr::InvalidBranch.msg()); }
-    let argv: Vec<String> = ["push", "-u", "origin", branch.as_str()].iter().map(|s| s.to_string()).collect();
-    if publish::push_argv_denied(&argv) { return Err(PubErr::InvalidBranch.msg()); } // force/delete/refspec: never
-    if publish::current_branch(&cwd).as_deref() != Some(branch.as_str()) { return Err(PubErr::WrongBranch.msg()); }
     let (owner, repo, https) = publish::origin_remote(&cwd).ok_or_else(|| PubErr::NotGithub.msg())?;
     let slug = format!("{owner}/{repo}");
+    // The push goes to an explicit URL built from the approved owner/repo, never to the `origin` name.
+    let url = publish::push_url(&owner, &repo, https);
+    let argv: Vec<String> = ["push", url.as_str(), branch.as_str()].iter().map(|s| s.to_string()).collect();
+    if publish::push_argv_denied(&argv, &url) { return Err(PubErr::InvalidBranch.msg()); } // force/delete/refspec/other target: never
+    if !publish::push_url_unrewritten(&cwd, &url) { return Err(PubErr::NotGithub.msg()); } // insteadOf/pushInsteadOf rewrite
+    if publish::current_branch(&cwd).as_deref() != Some(branch.as_str()) { return Err(PubErr::WrongBranch.msg()); }
     let pat = if https {
         let dir = config_dir(&app)?;
         Some(make_backend(&dir).get(GH_PAT_ACCOUNT)?.ok_or_else(|| PubErr::NoPat.msg())?)
@@ -980,7 +983,7 @@ fn publish_push_blocking(app: AppHandle, token: String, cwd: String, branch: Str
         None => None,
     };
     let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-    let out = run_git(&cwd, &args, include.as_ref().map(|i| i.path())).map_err(|e| e.msg())?;
+    let out = publish::run_git_with(&cwd, &args, include.as_ref().map(|i| i.path()), &[], true).map_err(|e| e.msg())?;
     drop(include);
     if out.ok {
         audit_publish(&app, "git.push", "success", &format!("pushed {branch} to {slug}"), ts);
