@@ -2447,3 +2447,32 @@ pre, code, .changes-path, .mcp-args, .key-input { direction: ltr; unicode-bidi: 
 .cp-node:hover { background: var(--surface-2); }
 .cp-node.active { background: var(--surface-sel); }
 .cp-settings-link { flex-direction: row; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+
+/* ── UI-02c kod: sağ Değişiklikler paneli, dosya ağacı, diff renkleri ── */
+.insp-tabs { border-bottom: 0; }
+.insp-tab { color: var(--text-3); text-transform: none; letter-spacing: 0; font-size: var(--fs-small); }
+.insp-tab.active { color: var(--text-1); border-bottom-color: var(--text-1); }
+.insp-tab:hover { color: var(--text-1); }
+.changes-sec { border-top: 0; padding-top: 0; margin-top: 0; gap: var(--space-3); }
+.changes-path { background: var(--surface-2); border: 0; border-radius: var(--r-ctl); color: var(--text-1); }
+.changes-path:focus { outline: 2px solid var(--focus-ring); }
+.changes-summary { font-size: var(--fs-caption); color: var(--text-3); }
+.changes-tree { display: flex; flex-direction: column; gap: var(--space-3); }
+.changes-dir { display: flex; flex-direction: column; gap: var(--space-1); }
+.changes-dir-head { display: flex; align-items: center; gap: var(--space-2); font-size: var(--fs-caption); color: var(--text-3); overflow-wrap: anywhere; }
+.changes-dir .changes-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  margin-inline-start: var(--space-3);
+  border-inline-start: 1px solid var(--surface-sel); /* içerik çizgisi (izinli istisna) */
+  font-size: var(--fs-small);
+  color: var(--text-2);
+}
+.changes-dir .changes-file { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-1); }
+.changes-status { color: var(--text-4); font-size: var(--fs-caption); }
+.changes-counts { flex: none; font-size: var(--fs-caption); }
+.diff-add { color: var(--diff-add); }
+.diff-del { color: var(--diff-del); }
+.changes-error { color: var(--error); font-size: var(--fs-small); }

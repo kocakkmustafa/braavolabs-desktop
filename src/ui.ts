@@ -733,7 +733,7 @@ export function renderWorkspace(deps: UiDeps): void {
   changesRow.append(changesPathInput, changesBtn);
   const changesBody = el("div", "changes-body");
   changesSec.append(changesHead, changesRow, changesBody);
-  codePane.append(changesSec);
+  changesSec.style.display = "none"; // sağ panelin "Değişiklikler" sekmesi
 
   const renderChanges = (views: ChangeView[], error?: string) => {
     changesBody.replaceChildren();
@@ -757,14 +757,33 @@ export function renderWorkspace(deps: UiDeps): void {
         }),
       ),
     );
+    // Dosya ağacı: klasöre göre gruplu; içerik çizgileri serbest kenar (diff renkleri yalnız sayılarda).
+    const dirOf = (path: string) => (path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : ".");
+    const byDir = new Map<string, ChangeView[]>();
     for (const v of views) {
-      const row = el("div", "changes-item");
-      const name = el("span", "changes-file mono", v.file);
-      name.title = v.path; // full path without widening the row
-      row.append(el("span", "changes-status mono", v.status), name);
-      row.append(el("span", `changes-counts mono${v.countless ? " faint" : ""}`, changeCounts(v)));
-      changesBody.append(row);
+      const d = dirOf(v.path);
+      const list = byDir.get(d);
+      if (list) list.push(v); else byDir.set(d, [v]);
     }
+    const tree = el("div", "changes-tree");
+    for (const [dir, files] of [...byDir].sort(([a], [b]) => a.localeCompare(b))) {
+      const group = el("div", "changes-dir");
+      const head = el("div", "changes-dir-head mono");
+      head.append(icon("folder", 14), el("span", undefined, dir));
+      group.append(head);
+      for (const v of files) {
+        const row = el("div", "changes-item");
+        const name = el("span", "changes-file mono", v.file);
+        name.title = v.path; // full path without widening the row
+        const counts = el("span", `changes-counts mono${v.countless ? " faint" : ""}`);
+        if (v.countless) counts.textContent = changeCounts(v);
+        else counts.append(el("span", "diff-add", `+${v.added}`), document.createTextNode(" "), el("span", "diff-del", `−${v.removed}`));
+        row.append(icon("file", 14), el("span", "changes-status mono", v.status), name, counts);
+        group.append(row);
+      }
+      tree.append(group);
+    }
+    changesBody.append(tree);
   };
 
   const loadChanges = async () => {
@@ -1095,12 +1114,14 @@ export function renderWorkspace(deps: UiDeps): void {
   const inspTabDetail = el("button", "insp-tab active", t("gov.inspectorTab"));
   const inspTabActivity = el("button", "insp-tab", t("gov.activity"));
   inspTabDetail.setAttribute("aria-pressed", "true"); inspTabActivity.setAttribute("aria-pressed", "false");
-  inspTabs.append(inspTabDetail, inspTabActivity);
+  const inspTabChanges = el("button", "insp-tab", t("changes.tab"));
+  inspTabChanges.setAttribute("aria-pressed", "false");
+  inspTabs.append(inspTabDetail, inspTabActivity, inspTabChanges);
   const inspectorBody = el("div", "insp-detail");
   inspectorBody.append(el("div", "inspector-empty", t("inspector.empty")));
   const activityBody = el("div", "insp-activity");
   activityBody.style.display = "none";
-  inspector.append(inspTabs, inspectorBody, activityBody);
+  inspector.append(inspTabs, inspectorBody, activityBody, changesSec);
 
   chat.append(codePane);
   chat.append(companyPane);
@@ -1586,7 +1607,7 @@ export function renderWorkspace(deps: UiDeps): void {
     // most sessions never open it.
     if (s === "company") void loadCompany();
     setCompanyPanelActive(s === "company");
-    if (s === "code" && changesPathInput.value.trim()) void loadChanges();
+    if (s === "code") showTab("changes");
   };
   segChatBtn.addEventListener("click", () => applySurface("chat"));
   segCompanyBtn.addEventListener("click", () => applySurface("company"));
@@ -1594,7 +1615,7 @@ export function renderWorkspace(deps: UiDeps): void {
   applySurface(surface);
 
   // --- governance activity view (policy visibility + audit ledger) ---
-  let activeTab: "detail" | "activity" = "detail";
+  let activeTab: "detail" | "activity" | "changes" = "detail";
   const refreshActivity = async () => {
     activityBody.innerHTML = "";
     // Policy visibility — which kinds auto-run vs ask; a constant, not host-trusted.
@@ -1623,18 +1644,23 @@ export function renderWorkspace(deps: UiDeps): void {
     }
     activityBody.append(aud);
   };
-  const showTab = (tab: "detail" | "activity") => {
+  const showTab = (tab: "detail" | "activity" | "changes") => {
     activeTab = tab;
     inspTabDetail.setAttribute("aria-pressed", String(tab === "detail"));
     inspTabActivity.setAttribute("aria-pressed", String(tab === "activity"));
     inspTabDetail.classList.toggle("active", tab === "detail");
     inspTabActivity.classList.toggle("active", tab === "activity");
+    inspTabChanges.setAttribute("aria-pressed", String(tab === "changes"));
+    inspTabChanges.classList.toggle("active", tab === "changes");
+    changesSec.style.display = tab === "changes" ? "flex" : "none";
+    if (tab === "changes" && changesPathInput.value.trim()) void loadChanges();
     inspectorBody.style.display = tab === "detail" ? "block" : "none";
     activityBody.style.display = tab === "activity" ? "block" : "none";
     if (tab === "activity") void refreshActivity();
   };
   inspTabDetail.addEventListener("click", () => showTab("detail"));
   inspTabActivity.addEventListener("click", () => showTab("activity"));
+  inspTabChanges.addEventListener("click", () => showTab("changes"));
   const bumpActivity = () => {
     if (activeTab === "activity") void refreshActivity();
   };
@@ -1890,7 +1916,10 @@ export function renderWorkspace(deps: UiDeps): void {
     ta.dispatchEvent(new Event("input"));
     void run();
   };
-  const seeDetails = () => { showTab("detail"); inspector.scrollIntoView?.({ block: "nearest" }); };
+  const seeDetails = {
+    label: () => (changesPathInput.value.trim() ? t("chat.seeChanges") : t("chat.seeDetails")),
+    open: () => { showTab(changesPathInput.value.trim() ? "changes" : "detail"); },
+  };
 
   const record = (role: SessionRole, text: string, entryMode: Mode = mode) => {
     if (workspaceDisposed || !text) return;
@@ -2484,17 +2513,17 @@ function renderErrorCard(scroll: HTMLElement, message: string, onRetry?: () => v
 }
 
 /** Tek durum kartı: sohbette yalnız bu; ayrıntı sağ panelde (ilke 4). */
-function renderStatusCard(scroll: HTMLElement, t: Translator, detail: string, onSee: () => void): void {
+function renderStatusCard(scroll: HTMLElement, t: Translator, detail: string, see: { label(): string; open(): void }): void {
   const card = el("div", "status-card");
   const state = el("span", "st-state");
   state.append(icon("check", 14), el("span", undefined, t("chat.statusDone")));
   card.append(state);
   if (detail) card.append(el("span", "st-text", detail));
-  const see = el("button", "st-btn", t("chat.seeDetails")) as HTMLButtonElement;
-  see.type = "button";
-  see.addEventListener("click", onSee);
+  const seeBtn = el("button", "st-btn", see.label()) as HTMLButtonElement;
+  seeBtn.type = "button";
+  seeBtn.addEventListener("click", () => see.open());
   const actions = el("div", "st-actions");
-  actions.append(see);
+  actions.append(seeBtn);
   card.append(actions);
   scroll.append(card);
 }

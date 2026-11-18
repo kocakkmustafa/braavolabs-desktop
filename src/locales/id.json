@@ -555,5 +555,7 @@
   "panel.dept.engineering": "Engineering",
   "panel.dept.other": "Other",
   "panel.settingsNote": "Connectors, budget and rules live in Settings.",
-  "panel.openSettings": "Open Settings"
+  "panel.openSettings": "Open Settings",
+  "changes.tab": "Changes",
+  "chat.seeChanges": "See changes"
 }

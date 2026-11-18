@@ -532,5 +532,7 @@
   "panel.dept.engineering": "Mühendislik",
   "panel.dept.other": "Diğer",
   "panel.settingsNote": "Bağlayıcılar, bütçe ve kurallar Ayarlar'da.",
-  "panel.openSettings": "Ayarlar'ı aç"
+  "panel.openSettings": "Ayarlar'ı aç",
+  "changes.tab": "Değişiklikler",
+  "chat.seeChanges": "Değişiklikleri gör"
 }
