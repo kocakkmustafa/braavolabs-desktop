@@ -7,17 +7,28 @@ function luminance(hex: string) {
   return .2126 * r + .7152 * g + .0722 * b;
 }
 const contrast = (a: string, b: string) => (Math.max(luminance(a), luminance(b)) + .05) / (Math.min(luminance(a), luminance(b)) + .05);
-it("keeps normal token text and white primary/danger labels at 4.5:1 in both palettes", () => {
-  const dark = tokens(":root"), light = { ...dark, ...tokens(':root\\[data-theme="light"\\]') };
-  for (const palette of [dark, light]) {
-    for (const fg of ["--text", "--text-muted", "--text-dim", "--steel-400", "--arc-blue-lit", "--ember", "--molten"]) {
-      for (const bg of ["--obsidian", "--obsidian-raised", "--obsidian-inset", "--steel-900", "--steel-800"]) {
-        expect(contrast(palette[fg], palette[bg]), `${fg} / ${bg}: ${palette[fg]} ${palette[bg]}`).toBeGreaterThanOrEqual(4.5);
-      }
+const palettes = () => { const dark = tokens(":root"); return [dark, { ...dark, ...tokens(':root\\[data-theme="light"\\]') }]; };
+it("Ilık Grafit: metin 1-2 her yüzeyde, metin 3 zemin/kartta 4.5:1; metin 4 ve durum renkleri 3:1 (renk + simge + sözcük)", () => {
+  for (const p of palettes()) {
+    for (const bg of ["--bg", "--surface-1", "--surface-card", "--surface-2", "--surface-sel"]) {
+      for (const fg of ["--text-1", "--text-2"]) expect(contrast(p[fg], p[bg]), `${fg}/${bg}`).toBeGreaterThanOrEqual(4.5);
     }
-    expect(contrast("#ffffff", palette["--arc-blue"])).toBeGreaterThanOrEqual(4.5);
-    expect(contrast("#ffffff", palette["--danger-fill"])).toBeGreaterThanOrEqual(4.5);
+    for (const bg of ["--bg", "--surface-card"]) expect(contrast(p["--text-3"], p[bg]), `--text-3/${bg}`).toBeGreaterThanOrEqual(4.5);
+    for (const fg of ["--text-4", "--run", "--approve", "--error", "--done", "--diff-add", "--diff-del", "--focus-ring"]) {
+      for (const bg of ["--bg", "--surface-card"]) expect(contrast(p[fg], p[bg]), `${fg}/${bg}`).toBeGreaterThanOrEqual(3);
+    }
+    expect(contrast(p["--primary-ink"], p["--primary"])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast("#ffffff", p["--danger-fill"])).toBeGreaterThanOrEqual(4.5);
   }
+});
+it("eski belirteç adları yeni belirteçlere takma ad olarak bağlı; global kenarsız denetimler", () => {
+  for (const [legacy, token] of [["--obsidian", "--bg"], ["--arc-blue", "--primary"], ["--ember", "--run"], ["--molten", "--error"], ["--text", "--text-1"]]) {
+    expect(css).toMatch(new RegExp(`${legacy}:\\s*var\\(${token}\\)`));
+  }
+  expect(css).toMatch(/button,\s*input,\s*select,\s*textarea\s*\{[^}]*border:\s*0;/);
+  expect(css).toContain("outline: 2px solid var(--focus-ring)");
+  expect(css).toMatch(/data-theme="light"\] \{[^}]*--text-dim: var\(--text-2\);[^}]*--steel-400: var\(--text-2\);/);
+  expect(css).not.toMatch(/\.toggle\.on::after \{[^}]*#fff/);
 });
 it("preserves Inspector at narrow widths and allows larger text and motion preference without a GUI claim", () => {
   expect(css).not.toMatch(/\.inspector\s*\{\s*display:\s*none/);

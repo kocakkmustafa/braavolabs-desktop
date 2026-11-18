@@ -3,6 +3,8 @@
  * pick a locale, then mount either the login or workspace view. All the heavy
  * lifting is delegated to the tested modules; this file is glue.
  */
+import "@fontsource-variable/geist";
+import "@fontsource-variable/geist-mono";
 import "./styles.css";
 import { resolveTheme } from "./theme";
 import { type Config, DEFAULT_API, setPersist } from "./config";
