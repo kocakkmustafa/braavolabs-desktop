@@ -1918,8 +1918,10 @@ export function renderWorkspace(deps: UiDeps): void {
    */
   const retryLast = (text: string, retryMode: Mode): boolean => {
     if (dispatching || workspaceDisposed || !text) return false;
+    // run() ön denetimlerde (boş şirket, model/çevrimdışı hatası) dağıtıma geçmeden çıkabilir;
+    // dağıtım başlayınca dispatching eşzamanlı olarak true olur, kart yalnız o zaman silinir.
     void run({ text, mode: retryMode });
-    return true;
+    return dispatching as boolean;
   };
   // Hedef kart oluşturulurken bir kez seçilir: etiket ve tıklama hiçbir zaman ayrışmaz.
   const seeDetails = {
@@ -1974,9 +1976,9 @@ export function renderWorkspace(deps: UiDeps): void {
     setRunMotion: (state: MotionState, label: string) => void,
     showAnswerMotion: (answer: string) => void,
   ) => {
-    const fail = (message: string) => {
+    const fail = (message: string, retryable = true) => {
       setRunMotion("error", message);
-      renderErrorCard(scroll, message, () => retryLast(text, "daemon"));
+      renderErrorCard(scroll, message, retryable ? () => retryLast(text, "daemon") : undefined);
     };
     if (!daemon || !daemonOnline) {
       fail(t("chat.daemonOffline"));
@@ -1989,7 +1991,7 @@ export function renderWorkspace(deps: UiDeps): void {
     const detail: ActionDetail = { summary: t("gov.kindDaemonDispatch", { model: modelLabel }) };
     const gate = await gateAction(deps, "local.dispatch", detail);
     if (!ownsRun()) return;
-    if (!gate.ok) { fail(gate.reason); return; }
+    if (!gate.ok) { fail(gate.reason, false); return; } // onay/politika reddi: yeniden dene yok
     const thinking = thinkingRow(t("chat.daemonThinking", { model: modelLabel }));
     scroll.append(thinking);
     scrollToEnd();

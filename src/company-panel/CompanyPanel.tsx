@@ -948,7 +948,7 @@ function Ready() {
       <div {...panelProps("org")}>
         <section className="cp-section">
           <div className="rail-section-label">{t("panel.org")}</div>
-          <OrgChart onPick={() => setTab("agents")} />
+          <OrgChart onPick={() => { setTab("agents"); tabRefs.current.agents?.focus(); }} />
         </section>
       </div>
       <div {...panelProps("work")}>

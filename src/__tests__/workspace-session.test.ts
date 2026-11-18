@@ -91,7 +91,7 @@ function fixture(mode = "cascade") {
     el: element, scrollToEnd() {}, setChatMotion() {}, syncCrumb() {}, refreshSessionList() {}, trackMotion() {},
     createOwnedBrandMotion: () => null, answerMotion: () => "success", compareMotion, compareProgressMotion: () => "thinking",
     renderErrorCard: (_scroll: unknown, message: string, retry?: () => boolean) => { retries.push(retry); renderErrorCard(message); }, renderCascadeAnswer, renderCascadeInspector() {}, renderPlainAnswer, renderCompareAnswer, renderCompareInspector() {}, renderSourceInspector() {}, speakButton: () => null,
-    renderStatusCard: (_s: unknown, _t: unknown, detail: string) => renderStatusCard(detail), changesPathInput, showTab,
+    renderStatusCard: (_s: unknown, _t: unknown, detail: string, see: unknown) => renderStatusCard(detail, see), changesPathInput, showTab,
     bumpActivity() {}, refreshSavings, removeThinking: (row: ReturnType<typeof element>) => row.remove(),
     toCascadeView, toCompareView, cascade, startCompare, pollCompare, cancelCompare,
     resolveOllamaHost: () => "http://localhost:11434", resolveOllamaModel, ollamaChat,
@@ -489,7 +489,7 @@ describe("UI-02 sohbet durum/hata kartları (gerçek kapanışlar)", () => {
     const f = fixture("direct");
     await f.run();
     expect(f.renderStatusCard).toHaveBeenCalledTimes(1);
-    expect(f.renderStatusCard).toHaveBeenCalledWith("synthetic-model");
+    expect(f.renderStatusCard).toHaveBeenCalledWith("synthetic-model", expect.objectContaining({ target: expect.any(Function), open: expect.any(Function) }));
   });
   it("Değişiklikleri gör yalnız çalışma yolu varken Değişiklikler sekmesini açar", () => {
     const f = fixture("cascade");
@@ -531,5 +531,40 @@ describe("UI-02 sohbet durum/hata kartları (gerçek kapanışlar)", () => {
     f.sessionStore.append(session.id, { role: "error", mode: "cascade", text: "eski hata", at: 2 });
     f.load(session.id);
     expect(f.retries[f.retries.length - 1]).toBeUndefined();
+  });
+  it("yeniden dene: daemon çevrimdışıyken dağıtım olmaz, false döner (kart kalır)", async () => {
+    const f = fixture("daemon");
+    f.daemon.sendMessage.mockImplementation(async () => { throw new DaemonError(0, "not-running", "daemon-not-running"); });
+    await f.run();
+    const retry = f.retries[f.retries.length - 1]!;
+    f.readDaemonModel.mockImplementation(() => ({ error: "model yok" }));
+    const calls = f.daemon.sendMessage.mock.calls.length;
+    expect(retry()).toBe(false);
+    expect(f.daemon.sendMessage.mock.calls.length).toBe(calls);
+    expect(f.sendBtn.disabled).toBe(false);
+  });
+  it("yeniden dene: compare'de şirket kimliği boşsa false döner (kart kalır)", async () => {
+    const f = fixture("local");
+    f.ollamaChat.mockImplementationOnce(async () => { throw new Error("gecici"); });
+    await f.run();
+    const retry = f.retries[f.retries.length - 1]!;
+    f.setMode("compare");
+    f.companyInput.value = "";
+    const calls = f.startCompare.mock.calls.length;
+    // kart kendi modunu (local) kullanır; compare'e geçilmiş olması etkilemez → dağıtım olur
+    expect(retry()).toBe(true);
+    await vi.waitFor(() => expect(f.sendBtn.disabled).toBe(false));
+    expect(f.startCompare.mock.calls.length).toBe(calls);
+  });
+  it("yeniden dene: compare kartı şirket kimliği boşken dağıtmaz, false döner", async () => {
+    const f = fixture("compare");
+    f.pollCompare.mockImplementation(async () => { throw new Error("gecici"); });
+    await f.run();
+    const retry = f.retries[f.retries.length - 1];
+    expect(retry).toBeDefined();
+    f.companyInput.value = "";
+    const calls = f.startCompare.mock.calls.length;
+    expect(retry!()).toBe(false);
+    expect(f.startCompare.mock.calls.length).toBe(calls);
   });
 });
