@@ -758,7 +758,10 @@ export function renderWorkspace(deps: UiDeps): void {
       ),
     );
     // Dosya ağacı: klasöre göre gruplu; içerik çizgileri serbest kenar (diff renkleri yalnız sayılarda).
-    const dirOf = (path: string) => (path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : ".");
+    const dirOf = (path: string) => {
+      const clean = path.replace(/^\.?\//, "").replace(/\/+$/, "");
+      return clean.includes("/") ? clean.slice(0, clean.lastIndexOf("/")) : "";
+    };
     const byDir = new Map<string, ChangeView[]>();
     for (const v of views) {
       const d = dirOf(v.path);
@@ -769,7 +772,7 @@ export function renderWorkspace(deps: UiDeps): void {
     for (const [dir, files] of [...byDir].sort(([a], [b]) => a.localeCompare(b))) {
       const group = el("div", "changes-dir");
       const head = el("div", "changes-dir-head mono");
-      head.append(icon("folder", 14), el("span", undefined, dir));
+      head.append(icon("folder", 14), el("span", undefined, dir ? `${dir}/` : t("changes.root")));
       group.append(head);
       for (const v of files) {
         const row = el("div", "changes-item");
@@ -1877,7 +1880,7 @@ export function renderWorkspace(deps: UiDeps): void {
     for (const e of s.entries) {
       if (e.role === "user") scroll.append(el("div", "msg-user", e.text));
       else if (e.role === "assistant") renderPlainAnswer(scroll, e.text, t);
-      else renderErrorCard(scroll, e.text, retryLast);
+      else renderErrorCard(scroll, e.text); // kayıtlı geçmiş: isteği artık bu oturumun işi değil, yeniden dene yok
     }
     refreshSessionList();
     syncCrumb();
@@ -1908,17 +1911,21 @@ export function renderWorkspace(deps: UiDeps): void {
   /** Set by onSteer for exactly one dispatch, so the audit line names the origin. */
   let nextDispatchRemote = false;
 
-  /** Hata kartının "Yeniden dene"si: son gönderilen metni aynen yeniden çalıştırır. */
-  let lastRunText = "";
-  const retryLast = () => {
-    if (dispatching || !lastRunText) return;
-    ta.value = lastRunText;
-    ta.dispatchEvent(new Event("input"));
-    void run();
+  /**
+   * Hata kartının "Yeniden dene"si: kartın KENDİ isteğini ve hata anındaki modu yeniden çalıştırır.
+   * Yazma kutusundaki taslağa dokunmaz, kullanıcı mesajını çoğaltmaz. Başka bir tur sürerken
+   * false döner (kart yerinde kalır).
+   */
+  const retryLast = (text: string, retryMode: Mode): boolean => {
+    if (dispatching || workspaceDisposed || !text) return false;
+    void run({ text, mode: retryMode });
+    return true;
   };
+  // Hedef kart oluşturulurken bir kez seçilir: etiket ve tıklama hiçbir zaman ayrışmaz.
   const seeDetails = {
-    label: () => (changesPathInput.value.trim() ? t("chat.seeChanges") : t("chat.seeDetails")),
-    open: () => { showTab(changesPathInput.value.trim() ? "changes" : "detail"); },
+    target: (): "changes" | "detail" => (changesPathInput.value.trim() ? "changes" : "detail"),
+    label: (target: "changes" | "detail") => t(target === "changes" ? "chat.seeChanges" : "chat.seeDetails"),
+    open: (target: "changes" | "detail") => { showTab(target); },
   };
 
   const record = (role: SessionRole, text: string, entryMode: Mode = mode) => {
@@ -1969,7 +1976,7 @@ export function renderWorkspace(deps: UiDeps): void {
   ) => {
     const fail = (message: string) => {
       setRunMotion("error", message);
-      renderErrorCard(scroll, message, retryLast);
+      renderErrorCard(scroll, message, () => retryLast(text, "daemon"));
     };
     if (!daemon || !daemonOnline) {
       fail(t("chat.daemonOffline"));
@@ -2052,10 +2059,10 @@ export function renderWorkspace(deps: UiDeps): void {
     }
   };
 
-  const run = async () => {
+  const run = async (retry?: { text: string; mode: Mode }) => {
     if (workspaceDisposed || dispatching) return;
-    const runMode = mode;
-    const text = ta.value.trim();
+    const runMode = retry?.mode ?? mode;
+    const text = retry?.text ?? ta.value.trim();
     if (!text) return;
     if (runMode === "compare" && !companyInput.value.trim()) {
       hint.textContent = t("chat.companyNeeded");
@@ -2093,9 +2100,8 @@ export function renderWorkspace(deps: UiDeps): void {
     };
     hint.style.display = "none";
     dispatching = true;
-    lastRunText = text;
     sendBtn.disabled = true;
-    ta.value = "";
+    if (!retry) ta.value = "";
     const ownsMotion = ownsRun;
     const setRunMotion = (state: MotionState, label: string) => {
       if (ownsMotion()) setChatMotion(state, label);
@@ -2121,14 +2127,13 @@ export function renderWorkspace(deps: UiDeps): void {
       return row;
     };
 
-    const userMsg = el("div", "msg-user", text);
-    scroll.append(userMsg);
+    if (!retry) scroll.append(el("div", "msg-user", text));
     scrollToEnd();
 
     try {
       // Inside the try: a storage failure here must not strand sendBtn
       // disabled with the user's text already cleared.
-      if (runMode !== "daemon") recordRun("user", text); // daemon turns are stored by the daemon
+      if (runMode !== "daemon" && !retry) recordRun("user", text); // daemon turns are stored by the daemon
       const origin = nextDispatchRemote ? "companion" : "local";
       nextDispatchRemote = false;
 
@@ -2143,7 +2148,7 @@ export function renderWorkspace(deps: UiDeps): void {
         if (!ownsRun()) return;
         if (!gate.ok) {
           setRunMotion("error", gate.reason);
-          renderErrorCard(scroll, gate.reason);
+          renderErrorCard(scroll, gate.reason); // onay/politika reddi: yeniden denemek anlamsız (kurucu kararı gerekir)
           recordRun("error", gate.reason);
           bumpActivity();
           return;
@@ -2199,10 +2204,10 @@ export function renderWorkspace(deps: UiDeps): void {
             setRunMotion("error", e instanceof OllamaUnreachableError
               ? t("chat.localUnreachable", { host: e.host }) : String(e instanceof Error ? e.message : e));
             if (e instanceof OllamaUnreachableError) {
-              renderErrorCard(scroll, t("chat.localUnreachable", { host: e.host }), retryLast);
+              renderErrorCard(scroll, t("chat.localUnreachable", { host: e.host }), () => retryLast(text, runMode));
               recordRun("error", t("chat.localUnreachable", { host: e.host }));
             } else {
-              renderErrorCard(scroll, String(e instanceof Error ? e.message : e), retryLast);
+              renderErrorCard(scroll, String(e instanceof Error ? e.message : e), () => retryLast(text, runMode));
               recordRun("error", String(e instanceof Error ? e.message : e));
             }
             await deps.gov.settle("local.dispatch", "error", localDetail);
@@ -2238,7 +2243,7 @@ export function renderWorkspace(deps: UiDeps): void {
             if (!ownsRun()) return;
             if (!apiKey) {
               setRunMotion("error", t("chat.noKey", { provider }));
-              renderErrorCard(scroll, t("chat.noKey", { provider }));
+              renderErrorCard(scroll, t("chat.noKey", { provider })); // anahtar eksik: önce Ayarlar, yeniden dene değil
               recordRun("error", t("chat.noKey", { provider }));
               await deps.gov.settle("direct.dispatch", "error", directDetail);
             } else {
@@ -2252,8 +2257,7 @@ export function renderWorkspace(deps: UiDeps): void {
                 removeThinking(thinking);
                 showAnswerMotion(res.content);
                 renderPlainAnswer(scroll, res.content, t);
-                renderStatusCard(scroll, t, "", seeDetails);
-            renderStatusCard(scroll, t, res.model ?? "", seeDetails);
+                renderStatusCard(scroll, t, res.model ?? "", seeDetails);
                 renderSourceInspector(inspectorBody, t("chat.directSource", { provider }), res.model, t);
                 recordRun("assistant", res.content);
                 await deps.gov.settle("direct.dispatch", "success", directDetail);
@@ -2262,7 +2266,7 @@ export function renderWorkspace(deps: UiDeps): void {
                 removeThinking(thinking);
                 const msg = e instanceof DirectApiError ? `${e.status} · ${e.message}` : String(e instanceof Error ? e.message : e);
                 setRunMotion("error", msg);
-                renderErrorCard(scroll, msg, retryLast);
+                renderErrorCard(scroll, msg, () => retryLast(text, runMode));
                 recordRun("error", msg);
                 await deps.gov.settle("direct.dispatch", "error", directDetail);
               }
@@ -2360,7 +2364,7 @@ export function renderWorkspace(deps: UiDeps): void {
       const msg = redactSummary(e instanceof ApiError ? `${e.status} · ${e.message}` : String(e));
       setRunMotion("error", msg);
       recordRun("error", msg);
-      renderErrorCard(scroll, msg, retryLast);
+      renderErrorCard(scroll, msg, () => retryLast(text, runMode));
     } finally {
       for (const row of runThinkingRows) removeThinking(row);
       if (ownsRun()) {
@@ -2490,7 +2494,7 @@ function renderPlainAnswer(scroll: HTMLElement, content: string, t: Translator):
 }
 
 /** Hata kartı (■ + sözcük): dürüst başarısızlık; yeniden dene + iptal. Asla uydurma cevap yok. */
-function renderErrorCard(scroll: HTMLElement, message: string, onRetry?: () => void): void {
+function renderErrorCard(scroll: HTMLElement, message: string, onRetry?: () => boolean): void {
   const t = makeT(getLocale());
   const card = el("div", "error-card");
   card.setAttribute("role", "alert");
@@ -2501,7 +2505,7 @@ function renderErrorCard(scroll: HTMLElement, message: string, onRetry?: () => v
   if (onRetry) {
     const retry = el("button", "st-btn primary", t("chat.retry")) as HTMLButtonElement;
     retry.type = "button";
-    retry.addEventListener("click", () => { card.remove(); onRetry(); });
+    retry.addEventListener("click", () => { if (onRetry()) card.remove(); });
     actions.append(retry);
   }
   const dismiss = el("button", "st-btn", t("chat.dismiss")) as HTMLButtonElement;
@@ -2513,15 +2517,16 @@ function renderErrorCard(scroll: HTMLElement, message: string, onRetry?: () => v
 }
 
 /** Tek durum kartı: sohbette yalnız bu; ayrıntı sağ panelde (ilke 4). */
-function renderStatusCard(scroll: HTMLElement, t: Translator, detail: string, see: { label(): string; open(): void }): void {
+function renderStatusCard(scroll: HTMLElement, t: Translator, detail: string, see: { target(): "changes" | "detail"; label(target: "changes" | "detail"): string; open(target: "changes" | "detail"): void }): void {
   const card = el("div", "status-card");
   const state = el("span", "st-state");
   state.append(icon("check", 14), el("span", undefined, t("chat.statusDone")));
   card.append(state);
   if (detail) card.append(el("span", "st-text", detail));
-  const seeBtn = el("button", "st-btn", see.label()) as HTMLButtonElement;
+  const target = see.target();
+  const seeBtn = el("button", "st-btn", see.label(target)) as HTMLButtonElement;
   seeBtn.type = "button";
-  seeBtn.addEventListener("click", () => see.open());
+  seeBtn.addEventListener("click", () => see.open(target));
   const actions = el("div", "st-actions");
   actions.append(seeBtn);
   card.append(actions);

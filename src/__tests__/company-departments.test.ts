@@ -13,6 +13,10 @@ describe("departman grupları", () => {
     expect(departmentOf(a("tech-lead"))).toBe("engineering");
     expect(departmentOf(a("release-tracker"))).toBe("engineering");
     expect(departmentOf(a("mystery"))).toBe("other");
+    expect(departmentOf(a("social-media-manager"))).toBe("growth");
+    expect(departmentOf(a("marketing-manager"))).toBe("growth");
+    expect(departmentOf(a("devops-lead"))).toBe("other"); // alt dizgi değil, kelime eşleşir
+    expect(departmentOf(a("x", "management"))).toBe("management");
   });
   it("boş grupları atar, sırayı korur", () => {
     const groups = groupByDepartment([a("tech-lead"), a("ceo"), a("cto")]);

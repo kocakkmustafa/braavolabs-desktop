@@ -3,7 +3,7 @@
  * state and daemon calls live in the zustand store; these components only read
  * it and forward intent. Daemon/web-derived text is always rendered as text.
  */
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import type { Translator } from "../i18n";
 import { modelOptions, parseModelRef, providersNeedingModel } from "../daemon-client";
@@ -223,7 +223,7 @@ function HireResult() {
 
 // ── org chart + agent card ───────────────────────────────────────────────────
 
-function OrgChart() {
+function OrgChart({ onPick }: { onPick?: () => void }) {
   const { t, locale, store } = useEnv();
   const rows = usePanel(s => s.panel?.rows ?? NONE);
   const selected = usePanel(s => s.selectedAgentId);
@@ -232,7 +232,7 @@ function OrgChart() {
     <ul className="cp-tree" role="tree" aria-label={t("panel.org")}>
       {rows.map(({ agent, depth }) => (
         <li key={agent.id} role="treeitem" aria-level={depth + 1} aria-selected={selected === agent.id} style={{ paddingInlineStart: `${depth * 18}px` }}>
-          <button className={`cp-node${selected === agent.id ? " active" : ""}`} onClick={() => store.getState().selectAgent(selected === agent.id ? null : agent.id)}>
+          <button className={`cp-node${selected === agent.id ? " active" : ""}`} onClick={() => { store.getState().selectAgent(selected === agent.id ? null : agent.id); if (selected !== agent.id) onPick?.(); }}>
             <span className="cp-node-main">
               <span className="cp-node-name">{agent.name}</span>
               <span className="cp-node-sub mono">
@@ -909,8 +909,21 @@ function Ready() {
   const selected = usePanel(s => s.panel?.agents.find(a => a.id === s.selectedAgentId) ?? null);
   const { t } = useEnv();
   const [tab, setTab] = useState<CompanyTab>("agents");
+  const pending = usePanel(s => s.approvals.length);
+  const tabRefs = useRef<Partial<Record<CompanyTab, HTMLButtonElement | null>>>({});
+  // ARIA sekme kalıbı: ok tuşları / Home / End gezinir ve odağı taşır (otomatik etkinleştirme).
+  const onTabKey = (e: KeyboardEvent<HTMLButtonElement>) => {
+    const i = TABS.indexOf(tab);
+    const rtl = typeof document !== "undefined" && document.documentElement.dir === "rtl";
+    const next = e.key === "ArrowRight" ? i + (rtl ? -1 : 1) : e.key === "ArrowLeft" ? i + (rtl ? 1 : -1) : e.key === "Home" ? 0 : e.key === "End" ? TABS.length - 1 : null;
+    if (next === null) return;
+    e.preventDefault();
+    const target = TABS[(next + TABS.length) % TABS.length];
+    setTab(target);
+    tabRefs.current[target]?.focus();
+  };
   // Her sekme gövdesi DOM'da kalır (hidden): durum ve veri kaybolmaz, sekme yalnız görünümü seçer.
-  const panelProps = (id: CompanyTab) => ({ role: "tabpanel", id: `cp-panel-${id}`, "aria-labelledby": `cp-tab-${id}`, hidden: tab !== id, className: "cp-tabpanel" });
+  const panelProps = (id: CompanyTab) => ({ role: "tabpanel", id: `cp-panel-${id}`, "aria-labelledby": `cp-tab-${id}`, hidden: tab !== id, tabIndex: 0, className: "cp-tabpanel" });
   return (
     <>
       <Header />
@@ -918,9 +931,14 @@ function Ready() {
       {wizardOpen && <HireWizard />}
       <div className="cp-tabs" role="tablist" aria-label={t("panel.tabs")}>
         {TABS.map(id => (
-          <button key={id} role="tab" id={`cp-tab-${id}`} aria-selected={tab === id} aria-controls={`cp-panel-${id}`} className={`cp-tab${tab === id ? " active" : ""}`} onClick={() => setTab(id)}>{t(`panel.tab.${id}`)}</button>
+          <button key={id} ref={el => { tabRefs.current[id] = el; }} role="tab" id={`cp-tab-${id}`} aria-selected={tab === id} aria-controls={`cp-panel-${id}`}
+            tabIndex={tab === id ? 0 : -1} onKeyDown={onTabKey} className={`cp-tab${tab === id ? " active" : ""}`} onClick={() => setTab(id)}>
+            {t(`panel.tab.${id}`)}
+            {id === "work" && pending > 0 && <span className="cp-tab-pending mono"><span aria-hidden="true"> ◆ </span>{pending}<span className="cp-sr"> {t("panel.approvalsPending", { count: pending })}</span></span>}
+          </button>
         ))}
       </div>
+      <div className="cp-sr" role="status" aria-live="polite">{pending > 0 ? t("panel.approvalsPending", { count: pending }) : ""}</div>
       <div {...panelProps("agents")}>
         <div className="cp-grid">
           <AgentGroups />
@@ -930,7 +948,7 @@ function Ready() {
       <div {...panelProps("org")}>
         <section className="cp-section">
           <div className="rail-section-label">{t("panel.org")}</div>
-          <OrgChart />
+          <OrgChart onPick={() => setTab("agents")} />
         </section>
       </div>
       <div {...panelProps("work")}>

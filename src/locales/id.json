@@ -557,5 +557,7 @@
   "panel.settingsNote": "Connectors, budget and rules live in Settings.",
   "panel.openSettings": "Open Settings",
   "changes.tab": "Changes",
-  "chat.seeChanges": "See changes"
+  "chat.seeChanges": "See changes",
+  "changes.root": "Root",
+  "panel.approvalsPending": "{count} approvals waiting"
 }

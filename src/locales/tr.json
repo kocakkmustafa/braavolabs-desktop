@@ -534,5 +534,7 @@
   "panel.settingsNote": "Bağlayıcılar, bütçe ve kurallar Ayarlar'da.",
   "panel.openSettings": "Ayarlar'ı aç",
   "changes.tab": "Değişiklikler",
-  "chat.seeChanges": "Değişiklikleri gör"
+  "chat.seeChanges": "Değişiklikleri gör",
+  "changes.root": "Kök",
+  "panel.approvalsPending": "{count} onay bekliyor"
 }

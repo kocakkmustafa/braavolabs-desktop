@@ -2476,3 +2476,6 @@ pre, code, .changes-path, .mcp-args, .key-input { direction: ltr; unicode-bidi: 
 .diff-add { color: var(--diff-add); }
 .diff-del { color: var(--diff-del); }
 .changes-error { color: var(--error); font-size: var(--fs-small); }
+.cp-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.cp-tab-pending { color: var(--approve); font-size: var(--fs-caption); }
+.cp-tabpanel:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }

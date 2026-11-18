@@ -30,7 +30,7 @@ function local(name: string) {
 const gates = ["gateAction", "gateForToken"].map(name => source.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === name)!.getText(source)).join("\n");
 const compiled = ts.transpileModule(`${gates}\nlet mode='cascade', dispatching=false, chatMotionVersion=0, workspaceDisposed=false, activeSession=null, nextDispatchRemote=false, daemonTurn=null, activeDaemonConv=null, daemonOnline=true;\n${local("dispatchController")}
 ${local("compareOperation")}\n${local("clearCompareOperation")}\n${local("stopDaemonTurn")}\n${local("stopDispatch")}
-${local("cancelCurrentCompare")}\n${local("record")}\n${local("startNewSession")}\n${local("loadSession")}\n${local("daemonErrorText")}\n${local("runDaemonTurn")}\n${local("run")}\n({ run, cancel:cancelCurrentCompare, newChat:startNewSession, load:loadSession, stop:stopDispatch, dispose:()=>{workspaceDisposed=true;clearCompareOperation()}, setMode:(value)=>{mode=value} });`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+${local("cancelCurrentCompare")}\n${local("record")}\n${local("startNewSession")}\n${local("loadSession")}\n${local("daemonErrorText")}\n${local("runDaemonTurn")}\n${local("run")}\n${local("retryLast")}\n${local("seeDetails")}\n({ run, retry:retryLast, seeDetails, cancel:cancelCurrentCompare, newChat:startNewSession, load:loadSession, stop:stopDispatch, dispose:()=>{workspaceDisposed=true;clearCompareOperation()}, setMode:(value)=>{mode=value} });`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function delayed<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -76,6 +76,8 @@ function fixture(mode = "cascade") {
     abort: vi.fn(async () => true),
     cancelStream: vi.fn(async () => true),
   };
+  const renderStatusCard = vi.fn(), showTab = vi.fn(), changesPathInput = { value: "" };
+  const retries: Array<undefined | (() => boolean)> = [];
   const renderErrorCard = vi.fn(), refreshDaemonConversations = vi.fn(async () => {});
   const readDaemonModel = vi.fn((): { provider: string; model: string } | { error: string } => ({ provider: "OLLAMA", model: "synthetic-model" }));
   const showDaemonHint = vi.fn();
@@ -88,8 +90,8 @@ function fixture(mode = "cascade") {
     document: { createTextNode: (text: string) => ({ textContent: text }) }, thinkingMotions: new Map(),
     el: element, scrollToEnd() {}, setChatMotion() {}, syncCrumb() {}, refreshSessionList() {}, trackMotion() {},
     createOwnedBrandMotion: () => null, answerMotion: () => "success", compareMotion, compareProgressMotion: () => "thinking",
-    renderErrorCard: (_scroll: unknown, message: string) => renderErrorCard(message), renderCascadeAnswer, renderCascadeInspector() {}, renderPlainAnswer, renderCompareAnswer, renderCompareInspector() {}, renderSourceInspector() {}, speakButton: () => null,
-    renderStatusCard() {}, retryLast() {}, seeDetails: { label: () => "", open() {} }, lastRunText: "",
+    renderErrorCard: (_scroll: unknown, message: string, retry?: () => boolean) => { retries.push(retry); renderErrorCard(message); }, renderCascadeAnswer, renderCascadeInspector() {}, renderPlainAnswer, renderCompareAnswer, renderCompareInspector() {}, renderSourceInspector() {}, speakButton: () => null,
+    renderStatusCard: (_s: unknown, _t: unknown, detail: string) => renderStatusCard(detail), changesPathInput, showTab,
     bumpActivity() {}, refreshSavings, removeThinking: (row: ReturnType<typeof element>) => row.remove(),
     toCascadeView, toCompareView, cascade, startCompare, pollCompare, cancelCompare,
     resolveOllamaHost: () => "http://localhost:11434", resolveOllamaModel, ollamaChat,
@@ -97,7 +99,7 @@ function fixture(mode = "cascade") {
     OllamaUnreachableError: class extends Error {}, DirectApiError: class extends Error {},
     daemon, DaemonError, readDaemonModel, showDaemonHint, connectDaemon: vi.fn(async () => {}),
     deriveTitle: (text: string) => text, kv: element, historySearch: element(), refreshDaemonConversations,
-  }) as { run(): Promise<void>; cancel(): void; newChat(): void; load(id: string): void; stop(): void; dispose(): void; setMode(mode: string): void };
+  }) as { run(): Promise<void>; retry(text: string, mode: string): boolean; seeDetails: { target(): string; label(target: string): string; open(target: string): void }; cancel(): void; newChat(): void; load(id: string): void; stop(): void; dispose(): void; setMode(mode: string): void };
   ui.setMode(mode);
   const switchOwner = (boundary: "logout" | "B" | "base" | "dispose" | "same-pair") => {
     if (boundary === "dispose") { ui.dispose(); return; }
@@ -108,7 +110,7 @@ function fixture(mode = "cascade") {
       void persist(cfg);
     }
   };
-  return { ...ui, daemon, renderErrorCard, refreshDaemonConversations, readDaemonModel, showDaemonHint, cfg, deps, native, companyInput, compareControls, ta, grant, fetchImpl, cascade, resolveOllamaModel, ollamaChat, directChat, get, startCompare, pollCompare, cancelCompare, cancelBtn, hint, renderCascadeAnswer, renderPlainAnswer, renderCompareAnswer, refreshSavings, sessionStore, sendBtn, switchOwner };
+  return { ...ui, retries, renderStatusCard, showTab, changesPathInput, daemon, renderErrorCard, refreshDaemonConversations, readDaemonModel, showDaemonHint, cfg, deps, native, companyInput, compareControls, ta, grant, fetchImpl, cascade, resolveOllamaModel, ollamaChat, directChat, get, startCompare, pollCompare, cancelCompare, cancelBtn, hint, renderCascadeAnswer, renderPlainAnswer, renderCompareAnswer, refreshSavings, sessionStore, sendBtn, switchOwner };
 }
 
 describe("actual workspace operation ownership", () => {
@@ -479,5 +481,55 @@ describe("daemon chat lane (plan 1.3)", () => {
     await f.run();
     expect(f.renderErrorCard).toHaveBeenCalledWith(key);
     expect(f.sendBtn.disabled).toBe(false);
+  });
+});
+
+describe("UI-02 sohbet durum/hata kartları (gerçek kapanışlar)", () => {
+  it("direct modda tek durum kartı, model adıyla", async () => {
+    const f = fixture("direct");
+    await f.run();
+    expect(f.renderStatusCard).toHaveBeenCalledTimes(1);
+    expect(f.renderStatusCard).toHaveBeenCalledWith("synthetic-model");
+  });
+  it("Değişiklikleri gör yalnız çalışma yolu varken Değişiklikler sekmesini açar", () => {
+    const f = fixture("cascade");
+    expect(f.seeDetails.target()).toBe("detail");
+    expect(f.seeDetails.label("detail")).toBe("chat.seeDetails");
+    f.changesPathInput.value = "/repo";
+    expect(f.seeDetails.target()).toBe("changes");
+    expect(f.seeDetails.label("changes")).toBe("chat.seeChanges");
+    f.seeDetails.open("changes");
+    expect(f.showTab).toHaveBeenCalledWith("changes");
+  });
+  it("yeniden dene: başka tur sürerken false döner ve kartı korur", async () => {
+    const f = fixture("daemon"), response = delayed<any>();
+    f.daemon.sendMessage.mockImplementation(async () => response.promise);
+    const pending = f.run(); await vi.waitFor(() => expect(f.daemon.sendMessage).toHaveBeenCalled());
+    expect(f.retry("baska", "daemon")).toBe(false);
+    response.resolve({ text: "ok", stopReason: "end_turn" }); await pending;
+  });
+  it("yeniden dene: taslağı korur, kartın kendi isteğini ve modunu kullanır, kullanıcı mesajını çoğaltmaz", async () => {
+    const f = fixture("local");
+    f.ollamaChat.mockImplementationOnce(async () => { throw new Error("gecici"); });
+    await f.run();
+    expect(f.renderErrorCard).toHaveBeenCalledTimes(1);
+    const retry = f.retries[f.retries.length - 1]!;
+    f.setMode("cascade"); // kullanıcı o arada başka moda geçti
+    f.ta.value = "yazdigim taslak";
+    expect(retry()).toBe(true);
+    await vi.waitFor(() => expect(f.ollamaChat).toHaveBeenCalledTimes(2));
+    expect((f.ollamaChat.mock.calls[1] as unknown[])[2]).toBe("A-prompt"); // hata anındaki istek, mod local
+    await vi.waitFor(() => expect(f.sendBtn.disabled).toBe(false));
+    expect(f.ta.value).toBe("yazdigim taslak");
+    const entries = f.sessionStore.list()[0].entries;
+    expect(entries.filter(e => e.role === "user")).toHaveLength(1);
+  });
+  it("kayıtlı oturumdaki hata kartında yeniden dene yoktur", () => {
+    const f = fixture("cascade");
+    const session = f.sessionStore.create();
+    f.sessionStore.append(session.id, { role: "user", mode: "cascade", text: "eski", at: 1 });
+    f.sessionStore.append(session.id, { role: "error", mode: "cascade", text: "eski hata", at: 2 });
+    f.load(session.id);
+    expect(f.retries[f.retries.length - 1]).toBeUndefined();
   });
 });

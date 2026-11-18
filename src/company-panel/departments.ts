@@ -8,18 +8,25 @@ export type Department = "management" | "research" | "growth" | "operations" | "
 
 export const DEPARTMENT_ORDER: readonly Department[] = ["management", "research", "growth", "operations", "engineering", "other"];
 
-const RULES: ReadonlyArray<readonly [Department, RegExp]> = [
-  ["management", /(^|[-_ ])(ceo|gm|manager|management|lead-agent)($|[-_ ])/i],
-  ["engineering", /(tech|cto|engineer|dev|release|code|qa)/i],
-  ["research", /(analyst|research|market|customer|voice)/i],
-  ["growth", /(content|social|marketing|growth|seo)/i],
-  ["operations", /(finance|ops|operation|support|legal|hr)/i],
+/** Kelime (tire/boşluk/altçizgi) sınırında tam eşleşme: "marketing-manager" ya da "social-media-manager" yanlış gruba düşmez. */
+const RULES: ReadonlyArray<readonly [Department, ReadonlySet<string>]> = [
+  ["management", new Set(["ceo", "gm", "management"])],
+  ["engineering", new Set(["tech", "cto", "engineer", "engineering", "dev", "developer", "release", "code", "qa"])],
+  ["research", new Set(["analyst", "research", "researcher", "market", "customer", "voice"])],
+  ["growth", new Set(["content", "social", "marketing", "growth", "seo"])],
+  ["operations", new Set(["finance", "ops", "operations", "support", "legal", "hr"])],
 ];
 
+const tokens = (text: string): string[] => text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+
+function match(text: string): Department | null {
+  const words = tokens(text);
+  for (const [dept, set] of RULES) if (words.some(w => set.has(w))) return dept;
+  return null;
+}
+
 export function departmentOf(agent: Pick<AgentView, "role" | "title">): Department {
-  for (const [dept, re] of RULES) if (re.test(agent.role)) return dept;
-  for (const [dept, re] of RULES) if (agent.title && re.test(agent.title)) return dept;
-  return "other";
+  return match(agent.role) ?? (agent.title ? match(agent.title) : null) ?? "other";
 }
 
 export interface DepartmentGroup { department: Department; agents: AgentView[] }
