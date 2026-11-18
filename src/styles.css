@@ -107,7 +107,7 @@
   --run: #a97b2c;
   --approve: #7a64b5;
   --error: #c0574b;
-  --done: #6b6863;
+  --done: #5f5c58; /* UI-07: açık temada rozet/küçük metin 4.5:1 (yüzeyler dahil) */
   --queue: #b5b1ab;
   --diff-add: #2f4f8f;
   --diff-del: #9a3b30;
