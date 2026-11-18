@@ -202,6 +202,11 @@ describe("ui.ts voice wiring (source-level guarantees; the workspace needs a GUI
     expect(ui).toContain("if (!retry && !voiceTurn) ta.value =");
     expect(ui).toContain("voiceChat?.laneFree()");
   });
+  it("A/B: abandoning a turn kills its token; stopDispatch cancels the waiting voice turn", () => {
+    expect(ui).toContain("onAbandon: () => { voiceCurrent = 0; }");
+    const stop = ui.slice(ui.indexOf("const stopDispatch = () => {"), ui.indexOf("activeDispatchStopper = stopDispatch"));
+    expect(stop).toContain("voiceChat?.cancelTurn()");
+  });
   it("daemon answers are handed to voice chat", () => {
     expect(ui).toMatch(/runDaemonTurn\(text, ownsRun, thinkingRow, setRunMotion, showAnswerMotion, voiceAnswer\)/);
     expect(ui).toContain("if (result.text) onAnswer?.(result.text)");

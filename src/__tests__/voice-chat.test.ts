@@ -30,6 +30,8 @@ class FakeRecognition {
 
 const flush = () => new Promise<void>(r => setTimeout(r, 0));
 
+function cancelAfterIdle(t: { chat: { model: { state: string } } }) { expect(t.chat.model.state).toBe("listening"); }
+
 function setup(opts: { speech?: boolean; recognition?: boolean; online?: boolean } = {}) {
   FakeRecognition.all = [];
   const utterances: Array<{ text: string; lang: string; onend: (() => void) | null; onerror: (() => void) | null }> = [];
@@ -43,14 +45,15 @@ function setup(opts: { speech?: boolean; recognition?: boolean; online?: boolean
   let sendResult: "sent" | "busy" | "rejected" = "sent";
   const models: VoiceChatModel[] = [];
   const ended = vi.fn();
+  const abandoned = { n: 0 };
   let online = opts.online ?? true;
   let clock = 1_000;
   const voice = createVoice(env);
   const chat = createVoiceChat({
     voice, locale: () => "tr", online: () => online,
-    send: (t) => { sent.push(t); return sendResult; }, now: () => clock, onChange: (x) => models.push(x), onEnded: ended,
+    send: (t) => { sent.push(t); return sendResult; }, onAbandon: () => { abandoned.n += 1; }, now: () => clock, onChange: (x) => models.push(x), onEnded: ended,
   });
-  return { chat, sent, models, ended, utterances, synth, voice, setSend: (r: "sent" | "busy" | "rejected") => { sendResult = r; }, setOnline: (v: boolean) => { online = v; }, tick: (ms: number) => { clock += ms; } };
+  return { chat, sent, abandoned, models, ended, utterances, synth, voice, setSend: (r: "sent" | "busy" | "rejected") => { sendResult = r; }, setOnline: (v: boolean) => { online = v; }, tick: (ms: number) => { clock += ms; } };
 }
 
 describe("voice chat state machine (BRA-UI-08)", () => {
@@ -303,6 +306,94 @@ describe("voice chat state machine (BRA-UI-08)", () => {
     t.chat.reply("Merhaba! Nasıl yardımcı olabilirim?");
     expect(t.chat.model.state).toBe("speaking");
     expect(t.utterances[0].text).toBe("Merhaba! Nasıl yardımcı olabilirim?");
+  });
+
+  it("A: Bitir mid-turn, restart, new sentence, then the OLD run's answer arrives: it is never read as the new answer; the waiting sentence is dropped on purpose", async () => {
+    const t = setup();
+    t.chat.start(); FakeRecognition.last.say("eski soru");
+    expect(t.chat.model.state).toBe("thinking");
+    t.chat.end(); // old run keeps going, but loses its owner
+    expect(t.abandoned.n).toBeGreaterThan(0);
+    t.chat.start();
+    await flush();
+    t.setSend("busy"); // the old run still occupies the lane
+    FakeRecognition.last.say("yeni soru");
+    expect(t.chat.model).toMatchObject({ state: "thinking", busy: true });
+    t.chat.reply("ESKI SORUNUN YANITI"); // late answer of the abandoned run
+    expect(t.utterances).toHaveLength(0);
+    expect(t.chat.model.state).toBe("thinking");
+    t.setSend("sent");
+    t.chat.laneFree(); // old run finished: the new sentence goes out
+    expect(t.sent).toEqual(["eski soru", "yeni soru", "yeni soru"]);
+    t.chat.reply("yeni yanıt");
+    expect(t.utterances.map(u => u.text)).toEqual(["yeni yanıt"]);
+  });
+
+  it("A: a sentence still waiting for the lane is dropped by Bitir and by dismiss, and never sent later", async () => {
+    for (const leave of ["end", "dismiss"] as const) {
+      const t = setup();
+      t.chat.start(); t.setSend("busy");
+      FakeRecognition.last.say("bekleyen");
+      t.setSend("sent");
+      t.chat[leave]();
+      t.chat.laneFree();
+      expect(t.sent, leave).toEqual(["bekleyen"]);
+      await flush();
+    }
+  });
+
+  it("A: Vazgeç abandons the run (onAbandon) so its answer cannot be read later", () => {
+    const t = setup();
+    t.chat.start(); FakeRecognition.last.say("a");
+    const before = t.abandoned.n;
+    t.chat.cancelTurn();
+    expect(t.abandoned.n).toBe(before + 1);
+    t.chat.reply("geç yanıt");
+    expect(t.utterances).toHaveLength(0);
+  });
+
+  it("B: workspace change / stop while a sentence waits: cancelTurn drops it and voice chat is back to listening (not stuck)", () => {
+    const t = setup();
+    t.chat.start(); t.setSend("busy");
+    FakeRecognition.last.say("bekleyen");
+    expect(t.chat.model).toMatchObject({ state: "thinking", busy: true });
+    t.chat.cancelTurn(); // what stopDispatch() now calls
+    expect(t.chat.model).toMatchObject({ state: "listening", busy: false });
+    t.setSend("sent");
+    t.chat.laneFree();
+    expect(t.sent).toEqual(["bekleyen"]);
+    cancelAfterIdle(t);
+  });
+
+  it("C: composer microphone stop does not cancel voice chat's queued start or its running session", async () => {
+    const t = setup();
+    const dictEnded = vi.fn();
+    t.voice.dictate("tr", "", { onText: vi.fn(), onEnd: dictEnded }); // composer dictation (owner: dictation)
+    t.voice.stopDictation(); // wave pressed: composer dictation closes
+    t.chat.start(); // voice chat queues its start
+    t.voice.stopDictation(); // composer mic pressed again (voice.listening is true): must not wipe the queued start
+    await flush();
+    expect(dictEnded).toHaveBeenCalledTimes(1);
+    expect(FakeRecognition.all).toHaveLength(2);
+    expect(FakeRecognition.last.started).toBe(1);
+    expect(t.chat.model.state).toBe("listening");
+    t.voice.stopDictation(); // also must not stop a running voice-chat session
+    await flush();
+    expect(FakeRecognition.last.aborted + 0).toBe(0);
+    FakeRecognition.last.say("hâlâ dinliyor");
+    expect(t.sent).toEqual(["hâlâ dinliyor"]);
+  });
+
+  it("C: Bitir aborts voice chat's own queued start and session, but not a composer dictation", async () => {
+    const t = setup();
+    t.voice.dictate("tr", "", { onText: vi.fn(), onEnd: vi.fn() }, { owner: "voicechat" });
+    t.voice.dictate("tr", "", { onText: vi.fn(), onEnd: vi.fn() }); // second request while one is active and not closing: refused
+    expect(FakeRecognition.all).toHaveLength(1);
+    t.voice.abortDictation("dictation"); // wrong owner: nothing happens
+    expect(FakeRecognition.last.aborted).toBe(0);
+    t.voice.abortDictation();
+    expect(FakeRecognition.last.aborted).toBe(1);
+    await flush();
   });
 
   it("never reaches the network: only the injected send is called", () => {

@@ -1079,6 +1079,8 @@ export function renderWorkspace(deps: UiDeps): void {
     clearCompareOperation(); dispatching = false; sendBtn.disabled = false;
     for (const row of thinkingMotions.keys()) removeThinking(row);
     setChatMotion("idle", t("chat.stopped"));
+    // The old run's finally will not free voice chat's lane (it no longer owns the workspace): drop a waiting sentence and listen.
+    voiceChat?.cancelTurn();
   };
   activeDispatchStopper = stopDispatch;
   const cancelCurrentCompare = () => {
@@ -1162,6 +1164,8 @@ export function renderWorkspace(deps: UiDeps): void {
         if (!dispatching) { voiceCurrent = 0; return "rejected"; }
         return "sent";
       },
+      // The run voice chat was waiting for is orphaned: its token dies, so a late answer is never read as the new question's.
+      onAbandon: () => { voiceCurrent = 0; },
       onChange: (model) => {
         if (workspaceDisposed) return;
         const view = stripView(model, t);

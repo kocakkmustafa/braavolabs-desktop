@@ -42,6 +42,8 @@ export interface VoiceChatDeps {
   onChange(model: Readonly<VoiceChatModel>): void;
   /** Voice chat ended after at least one turn. */
   onEnded?(summary: VoiceChatSummary): void;
+  /** Bitir / dismiss / Vazgeç / reset: the chat run voice chat was waiting for no longer has an owner (its answer must not be read). */
+  onAbandon?(): void;
 }
 
 /** Empty or silent turns in a row before voice chat closes itself. */
@@ -114,11 +116,11 @@ export function createVoiceChat(deps: VoiceChatDeps) {
 
   const listen = () => {
     const g = ++gen;
-    set({ state: "listening", error: null, paused: false, heard: "" });
+    set({ state: "listening", error: null, paused: false, busy: false, heard: "" });
     const started = deps.voice.dictate(deps.locale(), "", {
       onText: (text) => { if (g === gen) set({ heard: text }); },
       onEnd: (error) => { if (g === gen) heardEnd(error); },
-    }, { continuous: false });
+    }, { continuous: false, owner: "voicechat" });
     if (!started && g === gen) fail("unsupported");
   };
 
@@ -164,6 +166,8 @@ export function createVoiceChat(deps: VoiceChatDeps) {
 
   const end = () => {
     gen++;
+    queued = ""; // deliberate: a sentence still waiting for the lane is dropped when the user ends voice chat
+    deps.onAbandon?.();
     deps.voice.stopSpeaking();
     deps.voice.abortDictation();
     const seconds = Math.max(0, Math.round((now() - startedAt) / 1000));
@@ -193,6 +197,8 @@ export function createVoiceChat(deps: VoiceChatDeps) {
     /** "Yazarak devam et" / "Sohbete dön": leave voice chat without a summary strip. */
     dismiss(): void {
       gen++;
+      queued = "";
+      deps.onAbandon?.();
       deps.voice.stopSpeaking(); deps.voice.abortDictation();
       set({ state: "idle", error: null, paused: false, heard: "", reply: "", busy: false });
     },
@@ -207,14 +213,15 @@ export function createVoiceChat(deps: VoiceChatDeps) {
     },
 
     /** "Vazgeç" while thinking: ignore the pending answer and listen again. */
-    cancelTurn(): void { if (m.state === "thinking") { queued = ""; listen(); } },
+    cancelTurn(): void { if (m.state === "thinking") { queued = ""; deps.onAbandon?.(); listen(); } },
 
     /** The chat lane freed up: send the sentence that was waiting. */
     laneFree(): void { if (m.state === "thinking" && queued) { const text = queued; queued = ""; dispatch(text); } },
 
     /** The chat produced an answer for the turn voice chat sent. */
     reply(markdown: string): void {
-      if (m.state !== "thinking") return;
+      // Not thinking, or thinking but our own sentence is still waiting: this answer belongs to an older run.
+      if (m.state !== "thinking" || m.busy) return;
       const text = speakable(markdown);
       if (!text) return listen(); // code/diff only: nothing to read
       speakReply(text);
