@@ -89,6 +89,7 @@ function fixture(mode = "cascade") {
     el: element, scrollToEnd() {}, setChatMotion() {}, syncCrumb() {}, refreshSessionList() {}, trackMotion() {},
     createOwnedBrandMotion: () => null, answerMotion: () => "success", compareMotion, compareProgressMotion: () => "thinking",
     renderErrorCard: (_scroll: unknown, message: string) => renderErrorCard(message), renderCascadeAnswer, renderCascadeInspector() {}, renderPlainAnswer, renderCompareAnswer, renderCompareInspector() {}, renderSourceInspector() {}, speakButton: () => null,
+    renderStatusCard() {}, retryLast() {}, seeDetails() {}, lastRunText: "",
     bumpActivity() {}, refreshSavings, removeThinking: (row: ReturnType<typeof element>) => row.remove(),
     toCascadeView, toCompareView, cascade, startCompare, pollCompare, cancelCompare,
     resolveOllamaHost: () => "http://localhost:11434", resolveOllamaModel, ollamaChat,

@@ -290,6 +290,12 @@ const ICONS = {
   settings: ["M21 4h-7", "M10 4H3", "M21 12h-9", "M8 12H3", "M21 20h-5", "M12 20H3", "M14 2v4", "M8 10v4", "M16 18v4"],
   logout: ["M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4", "m16 17 5-5-5-5", "M21 12H9"],
   mic: ["M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z", "M19 10v2a7 7 0 0 1-14 0v-2", "M12 19v3"],
+  check: ["M20 6 9 17l-5-5"],
+  diamond: ["M12 2.5 21.5 12 12 21.5 2.5 12Z"],
+  stop: ["M5 5h14v14H5z"],
+  retry: ["M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8", "M21 3v5h-5", "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16", "M8 16H3v5"],
+  file: ["M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z", "M14 2v4a2 2 0 0 0 2 2h4"],
+  folder: ["M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"],
   activity: ["M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"],
 } as const;
 const icon = (name: keyof typeof ICONS, size = 16): SVGSVGElement => {
@@ -1062,6 +1068,27 @@ export function renderWorkspace(deps: UiDeps): void {
   composer.append(storageNotice, hint, topRow, compareControls.element, bottomRow);
   chat.append(chatPresence, scroll, composer);
 
+  // Boş sohbet (D5): karşılama + 3 sade öneri. Mesaj gelince kendiliğinden kaybolur.
+  const emptyState = el("div", "chat-empty");
+  const emptyMark = valarIcon(48);
+  emptyMark.classList.add("ce-mark");
+  const emptyGrid = el("div", "ce-grid");
+  for (const k of ["a", "b", "c"] as const) {
+    const card = el("button", "ce-card") as HTMLButtonElement;
+    card.type = "button";
+    card.append(el("span", "ce-t", t(`chat.suggest.${k}.title`)), el("span", "ce-d", t(`chat.suggest.${k}.body`)));
+    card.addEventListener("click", () => { ta.value = t(`chat.suggest.${k}.prompt`); ta.dispatchEvent(new Event("input")); ta.focus(); });
+    emptyGrid.append(card);
+  }
+  emptyState.append(emptyMark, el("h2", undefined, t("chat.emptyTitle")), el("p", undefined, t("chat.emptyBody")), emptyGrid);
+  chat.insertBefore(emptyState, composer);
+  const syncEmpty = () => {
+    const empty = scroll.childElementCount === 0 && surface === "chat";
+    emptyState.classList.toggle("show", empty);
+    scroll.classList.toggle("is-empty", empty);
+  };
+  new MutationObserver(syncEmpty).observe(scroll, { childList: true });
+
   // --- right inspector (Inspector | Activity tabs) ---
   const inspector = el("aside", "inspector");
   const inspTabs = el("div", "insp-tabs");
@@ -1543,6 +1570,7 @@ export function renderWorkspace(deps: UiDeps): void {
     chatPresence.style.display = s === "chat" ? "" : "none";
     chatMascot.setVisible(s === "chat");
     for (const motion of thinkingMotions.values()) motion.setVisible(s === "chat");
+    syncEmpty();
     codePane.style.display = s === "code" ? "" : "none";
     companyPane.style.display = s === "company" ? "" : "none";
     crumb.textContent =
@@ -1820,7 +1848,7 @@ export function renderWorkspace(deps: UiDeps): void {
     for (const e of s.entries) {
       if (e.role === "user") scroll.append(el("div", "msg-user", e.text));
       else if (e.role === "assistant") renderPlainAnswer(scroll, e.text, t);
-      else renderErrorCard(scroll, e.text);
+      else renderErrorCard(scroll, e.text, retryLast);
     }
     refreshSessionList();
     syncCrumb();
@@ -1850,6 +1878,16 @@ export function renderWorkspace(deps: UiDeps): void {
   let dispatching = false;
   /** Set by onSteer for exactly one dispatch, so the audit line names the origin. */
   let nextDispatchRemote = false;
+
+  /** Hata kartının "Yeniden dene"si: son gönderilen metni aynen yeniden çalıştırır. */
+  let lastRunText = "";
+  const retryLast = () => {
+    if (dispatching || !lastRunText) return;
+    ta.value = lastRunText;
+    ta.dispatchEvent(new Event("input"));
+    void run();
+  };
+  const seeDetails = () => { showTab("detail"); inspector.scrollIntoView?.({ block: "nearest" }); };
 
   const record = (role: SessionRole, text: string, entryMode: Mode = mode) => {
     if (workspaceDisposed || !text) return;
@@ -1899,7 +1937,7 @@ export function renderWorkspace(deps: UiDeps): void {
   ) => {
     const fail = (message: string) => {
       setRunMotion("error", message);
-      renderErrorCard(scroll, message);
+      renderErrorCard(scroll, message, retryLast);
     };
     if (!daemon || !daemonOnline) {
       fail(t("chat.daemonOffline"));
@@ -1961,6 +1999,7 @@ export function renderWorkspace(deps: UiDeps): void {
       } else {
         if (!cardShown) renderPlainAnswer(scroll, "", t);
         showAnswerMotion(result.text);
+        if (result.text) renderStatusCard(scroll, t, `${choice.provider}/${choice.model}`, seeDetails);
         await deps.gov.settle("local.dispatch", "success", detail);
       }
     } catch (e) {
@@ -2022,6 +2061,7 @@ export function renderWorkspace(deps: UiDeps): void {
     };
     hint.style.display = "none";
     dispatching = true;
+    lastRunText = text;
     sendBtn.disabled = true;
     ta.value = "";
     const ownsMotion = ownsRun;
@@ -2088,6 +2128,7 @@ export function renderWorkspace(deps: UiDeps): void {
         const view = toCascadeView(raw);
         showAnswerMotion(view.answer);
         renderCascadeAnswer(scroll, view, t);
+        if (view.answer) renderStatusCard(scroll, t, view.totalCostUsd ? `${view.provider} · ${view.model}` : "", seeDetails);
         renderCascadeInspector(inspectorBody, view, t);
         recordRun("assistant", view.answer);
         await deps.gov.settle("server.dispatch", "success", {
@@ -2116,6 +2157,7 @@ export function renderWorkspace(deps: UiDeps): void {
             removeThinking(thinking);
             showAnswerMotion(res.content);
             renderPlainAnswer(scroll, res.content, t);
+            renderStatusCard(scroll, t, res.model ?? "", seeDetails);
             renderSourceInspector(inspectorBody, t("chat.localSource"), res.model, t);
             recordRun("assistant", res.content);
             await deps.gov.settle("local.dispatch", "success", localDetail);
@@ -2125,10 +2167,10 @@ export function renderWorkspace(deps: UiDeps): void {
             setRunMotion("error", e instanceof OllamaUnreachableError
               ? t("chat.localUnreachable", { host: e.host }) : String(e instanceof Error ? e.message : e));
             if (e instanceof OllamaUnreachableError) {
-              renderErrorCard(scroll, t("chat.localUnreachable", { host: e.host }));
+              renderErrorCard(scroll, t("chat.localUnreachable", { host: e.host }), retryLast);
               recordRun("error", t("chat.localUnreachable", { host: e.host }));
             } else {
-              renderErrorCard(scroll, String(e instanceof Error ? e.message : e));
+              renderErrorCard(scroll, String(e instanceof Error ? e.message : e), retryLast);
               recordRun("error", String(e instanceof Error ? e.message : e));
             }
             await deps.gov.settle("local.dispatch", "error", localDetail);
@@ -2178,6 +2220,8 @@ export function renderWorkspace(deps: UiDeps): void {
                 removeThinking(thinking);
                 showAnswerMotion(res.content);
                 renderPlainAnswer(scroll, res.content, t);
+                renderStatusCard(scroll, t, "", seeDetails);
+            renderStatusCard(scroll, t, res.model ?? "", seeDetails);
                 renderSourceInspector(inspectorBody, t("chat.directSource", { provider }), res.model, t);
                 recordRun("assistant", res.content);
                 await deps.gov.settle("direct.dispatch", "success", directDetail);
@@ -2186,7 +2230,7 @@ export function renderWorkspace(deps: UiDeps): void {
                 removeThinking(thinking);
                 const msg = e instanceof DirectApiError ? `${e.status} · ${e.message}` : String(e instanceof Error ? e.message : e);
                 setRunMotion("error", msg);
-                renderErrorCard(scroll, msg);
+                renderErrorCard(scroll, msg, retryLast);
                 recordRun("error", msg);
                 await deps.gov.settle("direct.dispatch", "error", directDetail);
               }
@@ -2268,6 +2312,7 @@ export function renderWorkspace(deps: UiDeps): void {
         setRunMotion(resultMotion, resultMotion === "success" ? t("chat.finalAnswer")
           : resultMotion === "error" ? view.error || t("chat.empty") : t("app.tagline"));
         renderCompareAnswer(scroll, view, t);
+        if (view.hasResult && view.status === "COMPLETED") renderStatusCard(scroll, t, "", seeDetails);
         renderCompareInspector(inspectorBody, view, t);
         const succeeded = resultMotion === "success";
         recordRun(succeeded ? "assistant" : "error", succeeded
@@ -2283,10 +2328,7 @@ export function renderWorkspace(deps: UiDeps): void {
       const msg = redactSummary(e instanceof ApiError ? `${e.status} · ${e.message}` : String(e));
       setRunMotion("error", msg);
       recordRun("error", msg);
-      const errCard = el("div", "msg-final");
-      errCard.style.borderLeftColor = "var(--molten)";
-      errCard.append(el("div", "msg-label", t("common.error")), document.createTextNode(msg));
-      scroll.append(errCard);
+      renderErrorCard(scroll, msg, retryLast);
     } finally {
       for (const row of runThinkingRows) removeThinking(row);
       if (ownsRun()) {
@@ -2414,12 +2456,42 @@ function renderPlainAnswer(scroll: HTMLElement, content: string, t: Translator):
   scroll.append(card);
 }
 
-/** Molten-rimmed error card (honest failure, never a fabricated answer). */
-function renderErrorCard(scroll: HTMLElement, message: string): void {
+/** Hata kartı (■ + sözcük): dürüst başarısızlık; yeniden dene + iptal. Asla uydurma cevap yok. */
+function renderErrorCard(scroll: HTMLElement, message: string, onRetry?: () => void): void {
   const t = makeT(getLocale());
-  const card = el("div", "msg-final");
-  card.style.borderLeftColor = "var(--molten)";
-  card.append(el("div", "msg-label", t("common.error")), document.createTextNode(message));
+  const card = el("div", "error-card");
+  card.setAttribute("role", "alert");
+  const state = el("span", "st-state");
+  state.append(icon("stop", 14), el("span", undefined, t("common.error")));
+  card.append(state, el("span", "st-text", message));
+  const actions = el("div", "st-actions");
+  if (onRetry) {
+    const retry = el("button", "st-btn primary", t("chat.retry")) as HTMLButtonElement;
+    retry.type = "button";
+    retry.addEventListener("click", () => { card.remove(); onRetry(); });
+    actions.append(retry);
+  }
+  const dismiss = el("button", "st-btn", t("chat.dismiss")) as HTMLButtonElement;
+  dismiss.type = "button";
+  dismiss.addEventListener("click", () => card.remove());
+  actions.append(dismiss);
+  card.append(actions);
+  scroll.append(card);
+}
+
+/** Tek durum kartı: sohbette yalnız bu; ayrıntı sağ panelde (ilke 4). */
+function renderStatusCard(scroll: HTMLElement, t: Translator, detail: string, onSee: () => void): void {
+  const card = el("div", "status-card");
+  const state = el("span", "st-state");
+  state.append(icon("check", 14), el("span", undefined, t("chat.statusDone")));
+  card.append(state);
+  if (detail) card.append(el("span", "st-text", detail));
+  const see = el("button", "st-btn", t("chat.seeDetails")) as HTMLButtonElement;
+  see.type = "button";
+  see.addEventListener("click", onSee);
+  const actions = el("div", "st-actions");
+  actions.append(see);
+  card.append(actions);
   scroll.append(card);
 }
 
