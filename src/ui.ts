@@ -137,6 +137,8 @@ import {
   type BrandMotion, type MotionState,
 } from "./brand-motion";
 import { createVoice } from "./voice";
+import { createVoiceChat, isVoiceChatEnabled, markVoiceChatIntroSeen, voiceChatIntroSeen, type VoiceChat } from "./voice-chat";
+import { renderIntro, renderStrip, stripView, summaryLine, vcIcon, type VcAction } from "./voice-chat-view";
 import { createBrowserPane } from "./browser-pane";
 import { createComputerPane } from "./computer-pane";
 
@@ -1110,9 +1112,77 @@ export function renderWorkspace(deps: UiDeps): void {
       if (started) { micBtn.setAttribute("aria-pressed", "true"); micBtn.setAttribute("aria-label", t("chat.voiceStop")); ta.focus(); }
     });
   }
-  bottomRow.append(ta, enterHint, ...(micBtn ? [micBtn] : []), cancelBtn, sendBtn);
+  // BRA-UI-08: voice chat, behind a default-OFF flag (bv.flags.voiceChat = "1"). Flag off: nothing below is created.
+  let voiceChat: VoiceChat | null = null;
+  let voiceTurn = false;
+  let waveBtn: HTMLButtonElement | null = null;
+  let vcHost: HTMLElement | null = null;
+  if (isVoiceChatEnabled()) {
+    waveBtn = el("button", "vc-wave-btn");
+    waveBtn.type = "button";
+    waveBtn.title = t("voiceChat.button");
+    waveBtn.setAttribute("aria-label", t("voiceChat.button"));
+    waveBtn.setAttribute("aria-pressed", "false");
+    waveBtn.append(vcIcon("wave", 16));
+    const strip = el("div", "vc-strip");
+    strip.hidden = true;
+    vcHost = el("div", "vc-host");
+    vcHost.append(strip);
+    let intro: HTMLElement | null = null;
+    const dismissIntro = () => { intro?.remove(); intro = null; };
+    const onAction = (id: VcAction) => {
+      const vc = voiceChat;
+      if (!vc) return;
+      if (id === "end") vc.end();
+      else if (id === "cancel") { stopDispatch(); vc.cancelTurn(); }
+      else if (id === "pause" || id === "resume") vc.togglePause();
+      else if (id === "interrupt") vc.interrupt();
+      else if (id === "typeInstead" || id === "backToChat") { vc.dismiss(); ta.focus(); }
+      else if (id === "retry" || id === "replay") vc.retry();
+      else if (id === "close") vc.closeError();
+      else if (id === "restart") vc.start();
+    };
+    voiceChat = createVoiceChat({
+      voice,
+      locale: getLocale,
+      online: () => globalThis.navigator?.onLine !== false,
+      send: (text) => {
+        voiceTurn = true;
+        ta.value = text;
+        void run();
+        // run() bails out before dispatching on a validation hint or a busy lane: keep listening.
+        if (!dispatching) { voiceTurn = false; ta.value = ""; queueMicrotask(() => voiceChat?.turnEnded()); }
+      },
+      onChange: (model) => {
+        if (workspaceDisposed) return;
+        const view = stripView(model, t);
+        const strip = vcHost!.querySelector<HTMLElement>(".vc-strip")!;
+        renderStrip(strip, view, t, onAction);
+        waveBtn!.setAttribute("aria-pressed", String(voiceChat?.active ?? false));
+        if (view && !intro && !voiceChatIntroSeen() && model.state === "listening") {
+          intro = renderIntro(t, dismissIntro);
+          vcHost!.insertBefore(intro, strip);
+          markVoiceChatIntroSeen();
+        }
+      },
+      onEnded: ({ turns, seconds }) => {
+        if (workspaceDisposed) return;
+        scroll.append(el("div", "vc-summary", summaryLine(t, turns, seconds)));
+        scrollToEnd();
+      },
+    });
+    waveBtn.addEventListener("click", () => {
+      const vc = voiceChat;
+      if (!vc) return;
+      if (vc.active) { vc.end(); return; }
+      if (voice.listening) voice.stopDictation();
+      voice.stopSpeaking();
+      vc.start();
+    });
+  }
+  bottomRow.append(ta, enterHint, ...(micBtn ? [micBtn] : []), ...(waveBtn ? [waveBtn] : []), cancelBtn, sendBtn);
 
-  composer.append(storageNotice, hint, topRow, compareControls.element, bottomRow);
+  composer.append(storageNotice, hint, ...(vcHost ? [vcHost] : []), topRow, compareControls.element, bottomRow);
   chat.append(chatPresence, scroll, composer);
 
   // Boş sohbet (D5): karşılama + 3 sade öneri. Mesaj gelince kendiliğinden kaybolur.
@@ -1456,7 +1526,8 @@ export function renderWorkspace(deps: UiDeps): void {
   });
   // Sheet-local Esc handler; registered once per workspace render.
   const onWorkspaceKey = (e: KeyboardEvent) => {
-    if (e.key === "Escape" && settingsOpen) setSettings(false);
+    if (e.key === "Escape" && voiceChat?.active) voiceChat.end();
+    else if (e.key === "Escape" && settingsOpen) setSettings(false);
     else if (e.key === "Escape" && nowOpen) { setNow(false); nowBtn.focus(); }
   };
   window.addEventListener("keydown", onWorkspaceKey);
@@ -2169,6 +2240,7 @@ export function renderWorkspace(deps: UiDeps): void {
     const motionVersion = ++chatMotionVersion;
     const ownsRun = () => !workspaceDisposed && isCurrentSession(cfg, owner) && motionVersion === chatMotionVersion;
     const recordRun = (role: SessionRole, text: string) => {
+      if (voiceTurn && role === "assistant" && ownsRun()) { voiceTurn = false; voiceChat?.reply(text); }
       if (ownsRun()) record(role, text, runMode);
     };
     hint.style.display = "none";
@@ -2439,6 +2511,8 @@ export function renderWorkspace(deps: UiDeps): void {
       recordRun("error", msg);
       renderErrorCard(scroll, msg, () => retryLast(text, runMode));
     } finally {
+      // Voice chat: a turn that ended without an answer (error card, cancel) goes back to listening.
+      if (voiceTurn) { voiceTurn = false; voiceChat?.turnEnded(); }
       for (const row of runThinkingRows) removeThinking(row);
       if (ownsRun()) {
         clearCompareOperation();
@@ -2548,6 +2622,7 @@ export function renderWorkspace(deps: UiDeps): void {
     if (activeDispatchStopper === stopDispatch) activeDispatchStopper = null;
     void deps.gov.invalidate().catch(() => {});
     workspaceDisposed = true;
+    voiceChat?.dismiss();
     globalThis.removeEventListener?.("bv:open-settings", onOpenSettings);
     companyPanel?.unmount();
     companyPanel = null;
