@@ -100,7 +100,7 @@
   --approve-soft: rgba(122, 100, 181, 0.14);
   --text-1: #1f1e1c;
   --text-2: #4a4845;
-  --text-3: #6b6863;
+  --text-3: #5f5c58; /* UI-07: #6b6863 → 4.5:1 kenar çubuğu/ikincil yüzeyde */
   --text-4: #85827c;
   --primary: #1f1e1c;
   --primary-ink: #faf9f7;
@@ -2233,7 +2233,7 @@ pre, code, .changes-path, .mcp-args, .key-input { direction: ltr; unicode-bidi: 
 .cp-meter > span { background: var(--text-3); }
 .cp-meter-warn > span { background: var(--run); }
 .cp-meter-over > span { background: var(--error); }
-.cp-badge { border: 0; background: var(--surface-2); border-radius: var(--r-chip); color: var(--done); font-size: var(--fs-caption); padding: 2px var(--space-2); }
+.cp-badge { border: 0; background: var(--surface-1); border-radius: var(--r-chip); color: var(--done); font-size: var(--fs-caption); padding: 2px var(--space-2); }
 .cp-badge-running { color: var(--run); border: 0; }
 .cp-badge-error { color: var(--error); border: 0; }
 .cp-badge-paused { color: var(--text-3); border: 0; }

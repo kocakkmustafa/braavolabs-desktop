@@ -13,9 +13,9 @@ it("Ilık Grafit: metin 1-2 her yüzeyde, metin 3 zemin/kartta 4.5:1; metin 4 ve
     for (const bg of ["--bg", "--surface-1", "--surface-card", "--surface-2", "--surface-sel"]) {
       for (const fg of ["--text-1", "--text-2"]) expect(contrast(p[fg], p[bg]), `${fg}/${bg}`).toBeGreaterThanOrEqual(4.5);
     }
-    for (const bg of ["--bg", "--surface-card"]) expect(contrast(p["--text-3"], p[bg]), `--text-3/${bg}`).toBeGreaterThanOrEqual(4.5);
+    for (const bg of ["--bg", "--surface-1", "--surface-card", "--surface-2"]) expect(contrast(p["--text-3"], p[bg]), `--text-3/${bg}`).toBeGreaterThanOrEqual(4.5);
     for (const fg of ["--text-4", "--run", "--approve", "--error", "--done", "--diff-add", "--diff-del", "--focus-ring"]) {
-      for (const bg of ["--bg", "--surface-card"]) expect(contrast(p[fg], p[bg]), `${fg}/${bg}`).toBeGreaterThanOrEqual(3);
+      for (const bg of ["--bg", "--surface-1", "--surface-card"]) expect(contrast(p[fg], p[bg]), `${fg}/${bg}`).toBeGreaterThanOrEqual(3);
     }
     expect(contrast(p["--primary-ink"], p["--primary"])).toBeGreaterThanOrEqual(4.5);
     expect(contrast("#ffffff", p["--danger-fill"])).toBeGreaterThanOrEqual(4.5);
