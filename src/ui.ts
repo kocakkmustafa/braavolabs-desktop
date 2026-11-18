@@ -138,6 +138,8 @@ import {
 } from "./brand-motion";
 import { createVoice } from "./voice";
 import { createVoiceChat, isVoiceChatEnabled, markVoiceChatIntroSeen, voiceChatIntroSeen, type VoiceChat } from "./voice-chat";
+import { composeWire, createTray, isAttachmentsEnabled, splitWire, wireExceeds, type AttachmentTray } from "./attachments";
+import { createAttachUi, renderSentChips, type AttachUi } from "./attachments-view";
 import { renderIntro, renderStrip, stripView, summaryLine, vcIcon, type VcAction } from "./voice-chat-view";
 import { createBrowserPane } from "./browser-pane";
 import { createComputerPane } from "./computer-pane";
@@ -1193,9 +1195,16 @@ export function renderWorkspace(deps: UiDeps): void {
       vc.start();
     });
   }
-  bottomRow.append(ta, enterHint, ...(micBtn ? [micBtn] : []), ...(waveBtn ? [waveBtn] : []), cancelBtn, sendBtn);
+  // BRA-UI-09: "+" menu and text-file attachments, behind a default-OFF flag (bv.flags.attachments = "1"). Flag off: nothing below is created.
+  let attachTray: AttachmentTray | null = null;
+  let attachUi: AttachUi | null = null;
+  if (isAttachmentsEnabled()) {
+    attachTray = createTray();
+    attachUi = createAttachUi({ t, tray: attachTray, locale: getLocale });
+  }
+  bottomRow.append(...(attachUi ? [attachUi.anchor] : []), ta, enterHint, ...(micBtn ? [micBtn] : []), ...(waveBtn ? [waveBtn] : []), cancelBtn, sendBtn);
 
-  composer.append(storageNotice, hint, ...(vcHost ? [vcHost] : []), topRow, compareControls.element, bottomRow);
+  composer.append(storageNotice, hint, ...(vcHost ? [vcHost] : []), ...(attachUi ? [attachUi.noteHost] : []), topRow, compareControls.element, ...(attachUi ? [attachUi.chipsHost] : []), bottomRow);
   chat.append(chatPresence, scroll, composer);
 
   // Boş sohbet (D5): karşılama + 3 sade öneri. Mesaj gelince kendiliğinden kaybolur.
@@ -1998,7 +2007,12 @@ export function renderWorkspace(deps: UiDeps): void {
     activeDaemonConv = loaded.conversation;
     scroll.replaceChildren();
     for (const m of loaded.messages) {
-      if (m.role === "user") scroll.append(el("div", "msg-user", m.content));
+      if (m.role === "user") {
+        // A turn sent with attachments is stored by the daemon with the file text inside: show the words and name/size chips only.
+        const { text: said, files } = splitWire(m.content);
+        scroll.append(el("div", "msg-user", said));
+        if (files.length) scroll.append(renderSentChips(files, t, getLocale()));
+      }
       else renderPlainAnswer(scroll, m.content, t);
     }
     showDaemonModel(loaded.conversation.provider, loaded.conversation.model);
@@ -2226,7 +2240,11 @@ export function renderWorkspace(deps: UiDeps): void {
     if (workspaceDisposed || dispatching) return;
     const runMode = retry?.mode ?? mode;
     const text = retry?.text ?? voiceTurn?.text ?? ta.value.trim();
-    if (!text) return;
+    if (!text) {
+      // A file alone is not a message: say so instead of doing nothing.
+      if (attachTray?.items().length) { hint.textContent = t("attach.needText"); hint.style.display = "block"; }
+      return;
+    }
     if (runMode === "compare" && !companyInput.value.trim()) {
       hint.textContent = t("chat.companyNeeded");
       hint.style.display = "block";
@@ -2252,6 +2270,15 @@ export function renderWorkspace(deps: UiDeps): void {
         return;
       }
     }
+    // BRA-UI-09: only a typed send carries the pending attachments (a voice turn or a retry never does). The tray is
+    // emptied after the checks below, so a refused send keeps the files. The size is measured as it goes on the wire.
+    const pendingFiles = retry || voiceTurn ? [] : attachTray?.items() ?? [];
+    const wire = retry ? text : composeWire(text, pendingFiles);
+    if (pendingFiles.length && wireExceeds(wire, runMode === "daemon")) {
+      hint.textContent = t("attach.errWireTooBig");
+      hint.style.display = "block";
+      return;
+    }
     const owner = captureSession(cfg);
     dispatchController?.abort();
     const controller = new AbortController();
@@ -2271,6 +2298,8 @@ export function renderWorkspace(deps: UiDeps): void {
     dispatching = true;
     sendBtn.disabled = true;
     if (!retry && !voiceTurn) ta.value = "";
+    // The chat shows/stores `text`; only the request carries the files.
+    const sentFiles = pendingFiles.length ? attachTray?.take() ?? [] : [];
     const ownsMotion = ownsRun;
     const setRunMotion = (state: MotionState, label: string) => {
       if (ownsMotion()) setChatMotion(state, label);
@@ -2296,7 +2325,10 @@ export function renderWorkspace(deps: UiDeps): void {
       return row;
     };
 
-    if (!retry) scroll.append(el("div", "msg-user", text));
+    if (!retry) {
+      scroll.append(el("div", "msg-user", text));
+      if (sentFiles.length) scroll.append(renderSentChips(sentFiles, t, getLocale()));
+    }
     scrollToEnd();
 
     try {
@@ -2328,7 +2360,7 @@ export function renderWorkspace(deps: UiDeps): void {
         const thinking = thinkingRow(t("chat.thinking", { n: 1 }));
         scroll.append(thinking);
         scrollToEnd();
-        const raw = await cascade(cfg, { prompt: text }, { signal: controller.signal });
+        const raw = await cascade(cfg, { prompt: wire }, { signal: controller.signal });
         if (!ownsRun()) return;
         removeThinking(thinking);
         const view = toCascadeView(raw);
@@ -2358,7 +2390,7 @@ export function renderWorkspace(deps: UiDeps): void {
           try {
             const model = await resolveOllamaModel(host, localModelInput.value.trim() || undefined, { signal: controller.signal });
             if (!ownsRun()) return;
-            const res = await ollamaChat(host, model, text, { signal: controller.signal });
+            const res = await ollamaChat(host, model, wire, { signal: controller.signal });
             if (!ownsRun()) return;
             removeThinking(thinking);
             showAnswerMotion(res.content);
@@ -2373,10 +2405,10 @@ export function renderWorkspace(deps: UiDeps): void {
             setRunMotion("error", e instanceof OllamaUnreachableError
               ? t("chat.localUnreachable", { host: e.host }) : String(e instanceof Error ? e.message : e));
             if (e instanceof OllamaUnreachableError) {
-              renderErrorCard(scroll, t("chat.localUnreachable", { host: e.host }), () => retryLast(text, runMode));
+              renderErrorCard(scroll, t("chat.localUnreachable", { host: e.host }), () => retryLast(wire, runMode));
               recordRun("error", t("chat.localUnreachable", { host: e.host }));
             } else {
-              renderErrorCard(scroll, String(e instanceof Error ? e.message : e), () => retryLast(text, runMode));
+              renderErrorCard(scroll, String(e instanceof Error ? e.message : e), () => retryLast(wire, runMode));
               recordRun("error", String(e instanceof Error ? e.message : e));
             }
             await deps.gov.settle("local.dispatch", "error", localDetail);
@@ -2421,7 +2453,7 @@ export function renderWorkspace(deps: UiDeps): void {
               scroll.append(thinking);
               scrollToEnd();
               try {
-                const res = await directChat(provider, apiKey, model, text, { signal: controller.signal });
+                const res = await directChat(provider, apiKey, model, wire, { signal: controller.signal });
                 if (!ownsRun()) return;
                 removeThinking(thinking);
                 showAnswerMotion(res.content);
@@ -2435,7 +2467,7 @@ export function renderWorkspace(deps: UiDeps): void {
                 removeThinking(thinking);
                 const msg = e instanceof DirectApiError ? `${e.status} · ${e.message}` : String(e instanceof Error ? e.message : e);
                 setRunMotion("error", msg);
-                renderErrorCard(scroll, msg, () => retryLast(text, runMode));
+                renderErrorCard(scroll, msg, () => retryLast(wire, runMode));
                 recordRun("error", msg);
                 await deps.gov.settle("direct.dispatch", "error", directDetail);
               }
@@ -2444,10 +2476,10 @@ export function renderWorkspace(deps: UiDeps): void {
         }
         if (ownsRun()) bumpActivity();
       } else if (runMode === "daemon") {
-        await runDaemonTurn(text, ownsRun, thinkingRow, setRunMotion, showAnswerMotion, voiceAnswer);
+        await runDaemonTurn(wire, ownsRun, thinkingRow, setRunMotion, showAnswerMotion, voiceAnswer);
         if (ownsRun()) bumpActivity();
       } else {
-        const stub = await startCompare(cfg, { companyId: runCompanyId, query: text,
+        const stub = await startCompare(cfg, { companyId: runCompanyId, query: wire,
           ...(runSelections !== undefined ? { selections: runSelections } : {}) }, { signal: controller.signal });
         if (!ownsRun()) return;
         let finishCancellation!: (result: { status: "CANCELLED"; error: string }) => void;
@@ -2533,7 +2565,7 @@ export function renderWorkspace(deps: UiDeps): void {
       const msg = redactSummary(e instanceof ApiError ? `${e.status} · ${e.message}` : String(e));
       setRunMotion("error", msg);
       recordRun("error", msg);
-      renderErrorCard(scroll, msg, () => retryLast(text, runMode));
+      renderErrorCard(scroll, msg, () => retryLast(wire, runMode));
     } finally {
       // Voice chat: a turn that ended without an answer (error card, cancel) goes back to listening.
       if (voiceLive()) { voiceCurrent = 0; voiceChat?.turnEnded(); }
@@ -2648,6 +2680,8 @@ export function renderWorkspace(deps: UiDeps): void {
     void deps.gov.invalidate().catch(() => {});
     workspaceDisposed = true;
     voiceChat?.dismiss();
+    attachUi?.dispose();
+    attachTray?.take();
     globalThis.removeEventListener?.("bv:open-settings", onOpenSettings);
     companyPanel?.unmount();
     companyPanel = null;

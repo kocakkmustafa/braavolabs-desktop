@@ -10,6 +10,7 @@ import { createMemoryStore, createConfigPersister } from "../store";
 import { createSessionStore } from "../sessions";
 import { createTauriGovernance } from "../governance";
 import { toCascadeView, toCompareView } from "../render";
+import { composeWire, createTray, splitWire, wireExceeds } from "../attachments";
 import { compareMotion } from "../brand-motion";
 import { DaemonError } from "../daemon-client";
 
@@ -81,6 +82,8 @@ function fixture(mode = "cascade") {
   const renderErrorCard = vi.fn(), refreshDaemonConversations = vi.fn(async () => {});
   const readDaemonModel = vi.fn((): { provider: string; model: string } | { error: string } => ({ provider: "OLLAMA", model: "synthetic-model" }));
   const showDaemonHint = vi.fn();
+  // BRA-UI-09: the real tray and composeWire; the sent-chip row is a spy (DOM only).
+  const attachTray = createTray(), renderSentChips = vi.fn(() => element());
   const ui = runInNewContext(compiled, {
     ...client, deps, cfg, sessionStore, t: deps.t,
     ta, companyInput, compareControls,
@@ -98,6 +101,7 @@ function fixture(mode = "cascade") {
     isDirectProvider: () => true, resolveDirectModel: () => "synthetic-model", directChat,
     OllamaUnreachableError: class extends Error {}, DirectApiError: class extends Error {},
     daemon, DaemonError, readDaemonModel, showDaemonHint, connectDaemon: vi.fn(async () => {}),
+    attachTray, composeWire, wireExceeds, renderSentChips, getLocale: () => "en",
     deriveTitle: (text: string) => text, kv: element, historySearch: element(), refreshDaemonConversations,
   }) as { run(): Promise<void>; retry(text: string, mode: string): boolean; seeDetails: { target(): string; label(target: string): string; open(target: string): void }; cancel(): void; newChat(): void; load(id: string): void; stop(): void; dispose(): void; setMode(mode: string): void };
   ui.setMode(mode);
@@ -110,7 +114,7 @@ function fixture(mode = "cascade") {
       void persist(cfg);
     }
   };
-  return { ...ui, retries, renderStatusCard, showTab, changesPathInput, daemon, renderErrorCard, refreshDaemonConversations, readDaemonModel, showDaemonHint, cfg, deps, native, companyInput, compareControls, ta, grant, fetchImpl, cascade, resolveOllamaModel, ollamaChat, directChat, get, startCompare, pollCompare, cancelCompare, cancelBtn, hint, renderCascadeAnswer, renderPlainAnswer, renderCompareAnswer, refreshSavings, sessionStore, sendBtn, switchOwner };
+  return { ...ui, attachTray, renderSentChips, retries, renderStatusCard, showTab, changesPathInput, daemon, renderErrorCard, refreshDaemonConversations, readDaemonModel, showDaemonHint, cfg, deps, native, companyInput, compareControls, ta, grant, fetchImpl, cascade, resolveOllamaModel, ollamaChat, directChat, get, startCompare, pollCompare, cancelCompare, cancelBtn, hint, renderCascadeAnswer, renderPlainAnswer, renderCompareAnswer, refreshSavings, sessionStore, sendBtn, switchOwner };
 }
 
 describe("actual workspace operation ownership", () => {
@@ -523,6 +527,75 @@ describe("UI-02 sohbet durum/hata kartları (gerçek kapanışlar)", () => {
     expect(f.ta.value).toBe("yazdigim taslak");
     const entries = f.sessionStore.list()[0].entries;
     expect(entries.filter(e => e.role === "user")).toHaveLength(1);
+  });
+  it("BRA-UI-09: ek, gerçek run() kapanışında tek istekle gider; sohbet kaydı yalnız yazılan metni tutar; yeniden dene eki korur", async () => {
+    const f = fixture("local");
+    f.attachTray.add({ id: 1, name: "satis.csv", size: 7, content: "a,b\n1,2" });
+    f.ollamaChat.mockImplementationOnce(async () => { throw new Error("gecici"); });
+    await f.run();
+    const wire = (f.ollamaChat.mock.calls[0] as unknown[])[2] as string;
+    expect(wire).toContain("a,b\n1,2");
+    expect(splitWire(wire)).toEqual({ text: "A-prompt", files: [{ name: "satis.csv", size: 7 }] });
+    expect(f.attachTray.items()).toHaveLength(0); // gönderimle boşaldı
+    expect(f.renderSentChips).toHaveBeenCalledTimes(1);
+    expect((f.renderSentChips.mock.calls[0] as unknown[])[0]).toEqual([expect.objectContaining({ name: "satis.csv" })]);
+    expect(f.sessionStore.list()[0].entries.filter(e => e.role === "user").map(e => e.text)).toEqual(["A-prompt"]); // içerik kaydedilmez
+    const retry = f.retries[f.retries.length - 1]!;
+    expect(retry()).toBe(true);
+    await vi.waitFor(() => expect(f.ollamaChat).toHaveBeenCalledTimes(2));
+    expect((f.ollamaChat.mock.calls[1] as unknown[])[2]).toBe(wire); // aynı istek, ek dahil
+    await vi.waitFor(() => expect(f.sendBtn.disabled).toBe(false));
+    expect(f.renderSentChips).toHaveBeenCalledTimes(1); // yeniden denemede balon/çip çoğalmaz
+  });
+  it("BRA-UI-09: sesli tur bekleyen eki götürmez; yazılı gönderim götürür", async () => {
+    const f = fixture("local");
+    f.attachTray.add({ id: 1, name: "a.txt", size: 1, content: "ICERIK" });
+    await (f.run as unknown as (retry?: unknown, voice?: { text: string; token: number }) => Promise<void>)(undefined, { text: "sesle sordum", token: 1 });
+    expect((f.ollamaChat.mock.calls[0] as unknown[])[2]).toBe("sesle sordum");
+    expect(f.attachTray.items()).toHaveLength(1);
+    await f.run();
+    expect((f.ollamaChat.mock.calls[1] as unknown[])[2]).toContain("ICERIK");
+    expect(f.attachTray.items()).toHaveLength(0);
+  });
+  it("BRA-UI-09: ek varken boş metin ipucu verir ve gitmez; tel boyutu aşılırsa açık hata verir ve ek silinmez", async () => {
+    const f = fixture("local");
+    f.attachTray.add({ id: 1, name: "a.txt", size: 1, content: "x" });
+    f.ta.value = "";
+    await f.run();
+    expect(f.ollamaChat).not.toHaveBeenCalled();
+    expect(f.hint).toMatchObject({ textContent: "attach.needText", style: { display: "block" } });
+    f.ta.value = "A-prompt";
+    f.attachTray.take();
+    f.attachTray.add({ id: 2, name: "big.txt", size: 100, content: "\"\n".repeat(80_000) }); // 160k chars, 320k bytes escaped
+    await f.run();
+    expect(f.ollamaChat).not.toHaveBeenCalled();
+    expect(f.hint).toMatchObject({ textContent: "attach.errWireTooBig", style: { display: "block" } });
+    expect(f.attachTray.items()).toHaveLength(1);
+    expect(f.sendBtn.disabled).toBe(false);
+  });
+  it("BRA-UI-09: daemon kipinde wire 100.000 karakteri aşarsa reddedilir, ek tepside kalır; aynı içerik local kipte gider", async () => {
+    const big = { id: 1, name: "big.txt", size: 100, content: "x".repeat(100_000) };
+    const d = fixture("daemon");
+    d.attachTray.add(big);
+    await d.run();
+    expect(d.daemon.sendMessage).not.toHaveBeenCalled();
+    expect(d.daemon.createConversation).not.toHaveBeenCalled();
+    expect(d.hint).toMatchObject({ textContent: "attach.errWireTooBig", style: { display: "block" } });
+    expect(d.attachTray.items()).toHaveLength(1);
+    expect(d.sendBtn.disabled).toBe(false);
+    const l = fixture("local");
+    l.attachTray.add(big);
+    await l.run();
+    expect(l.ollamaChat).toHaveBeenCalledTimes(1);
+    expect(l.attachTray.items()).toHaveLength(0);
+  });
+  it("BRA-UI-09: reddedilen gönderim (ön denetim) ekleri tutar", async () => {
+    const f = fixture("compare");
+    f.companyInput.value = "";
+    f.attachTray.add({ id: 1, name: "a.txt", size: 1, content: "x" });
+    await f.run();
+    expect(f.startCompare).not.toHaveBeenCalled();
+    expect(f.attachTray.items()).toHaveLength(1);
   });
   it("kayıtlı oturumdaki hata kartında yeniden dene yoktur", () => {
     const f = fixture("cascade");

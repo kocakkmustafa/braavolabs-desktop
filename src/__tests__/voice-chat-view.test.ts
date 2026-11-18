@@ -208,7 +208,7 @@ describe("ui.ts voice wiring (source-level guarantees; the workspace needs a GUI
     expect(stop).toContain("voiceChat?.cancelTurn()");
   });
   it("daemon answers are handed to voice chat", () => {
-    expect(ui).toMatch(/runDaemonTurn\(text, ownsRun, thinkingRow, setRunMotion, showAnswerMotion, voiceAnswer\)/);
+    expect(ui).toMatch(/runDaemonTurn\(wire, ownsRun, thinkingRow, setRunMotion, showAnswerMotion, voiceAnswer\)/);
     expect(ui).toContain("if (result.text) onAnswer?.(result.text)");
   });
   it("voice turns are tracked by token, so a cancelled turn's finally cannot end a newer turn", () => {
