@@ -172,13 +172,6 @@ textarea {
   gap: 18px;
   overflow-y: auto;
 }
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  font-weight: 650;
-  letter-spacing: 0.2px;
-}
 .brand-dot {
   width: 10px;
   height: 10px;
@@ -198,16 +191,6 @@ textarea {
   gap: 8px;
   font-size: 0.8125rem;
   color: var(--text-2);
-}
-.conn-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--queue);
-}
-.conn.online .conn-dot {
-  background: var(--text-1);
-  box-shadow: 0 0 0 3px var(--surface-sel);
 }
 .rail-btn {
   width: 100%;
@@ -582,7 +565,6 @@ textarea {
   overflow-y: auto;
 }
 
-/* ember "thinking" spinner */
 .thinking {
   align-self: flex-start;
   display: flex;
@@ -591,19 +573,6 @@ textarea {
   color: var(--run);
   font-family: var(--font-mono);
   font-size: 0.8125rem;
-}
-.spinner {
-  width: 13px;
-  height: 13px;
-  border-radius: 50%;
-  border: 2px solid var(--run);
-  border-top-color: var(--run);
-  animation: spin 0.8s linear infinite;
-}
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 .saved-footer {
   align-self: flex-start;
@@ -1438,11 +1407,6 @@ textarea {
 .sheet-sec:last-child {
   border-bottom: none;
 }
-.sheet-sec-label {
-  font-size: 0.59375rem;
-  letter-spacing: 0.14em;
-  color: var(--text-2);
-}
 .set-row {
   display: flex;
   align-items: center;
@@ -2154,7 +2118,6 @@ pre, code, .changes-path, .mcp-args, .key-input { direction: ltr; unicode-bidi: 
   font-size: var(--fs-small);
   min-height: var(--space-6);
 }
-.spinner { border-color: var(--queue); border-top-color: var(--run); }
 .saved-footer { color: var(--text-4); font-size: var(--fs-caption); }
 .chip { color: var(--text-2); }
 .chip::before { background: var(--queue); }
@@ -2516,7 +2479,6 @@ pre, code, .changes-path, .mcp-args, .key-input { direction: ltr; unicode-bidi: 
 .pal-list { overflow-y: auto; margin-top: var(--space-2); display: flex; flex-direction: column; gap: 2px; }
 .pal-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); min-height: var(--h-ctl-lg); padding: 0 var(--space-3); border-radius: var(--r-ctl); color: var(--text-2); font-size: var(--fs-body); cursor: pointer; }
 .pal-row.active { background: var(--surface-sel); color: var(--text-1); }
-.pal-kbd { color: var(--text-4); font-size: var(--fs-caption); }
 .pal-empty { padding: var(--space-4); color: var(--text-3); font-size: var(--fs-small); }
 .pal-empty[hidden] { display: none; }
 .offline-banner { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-4); background: var(--error-soft); color: var(--text-1); font-size: var(--fs-small); }
