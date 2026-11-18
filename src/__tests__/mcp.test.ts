@@ -381,9 +381,9 @@ describe("result view helpers", () => {
     expect(summarizeCallResult({ content: [{ type: "text", text: "boom" }], isError: true })).toEqual({ isError: true, text: "boom" });
   });
 
-  it("resultBorderColor is molten on error, steel on success — and NEVER green", () => {
-    expect(resultBorderColor(true)).toBe("var(--molten)");
-    expect(resultBorderColor(false)).toBe("var(--steel-600)");
+  it("resultBorderColor is error on error, surface-sel on success — and NEVER green", () => {
+    expect(resultBorderColor(true)).toBe("var(--error)");
+    expect(resultBorderColor(false)).toBe("var(--surface-sel)");
     expect(resultBorderColor(true)).not.toMatch(/green/i);
     expect(resultBorderColor(false)).not.toMatch(/green/i);
   });

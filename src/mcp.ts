@@ -354,7 +354,7 @@ export function summarizeCallResult(res: McpCallResult): { isError: boolean; tex
  * green (the obsidian palette has no green token to reach for).
  */
 export function resultBorderColor(isError: boolean): string {
-  return isError ? "var(--molten)" : "var(--steel-600)";
+  return isError ? "var(--error)" : "var(--surface-sel)";
 }
 
 // ── the bridge (memory dev/test · Tauri host) ─────────────────────────────────
