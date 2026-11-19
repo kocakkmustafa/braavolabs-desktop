@@ -40,6 +40,23 @@ describe("flag (criterion 1)", () => {
   });
 });
 
+describe("UI-10b'ye kadar kapalı (project kararı)", () => {
+  it("default is OFF and no code path, build file or config switches the flag on or makes it default-on", () => {
+    expect(isPublishEnabled({ getItem: () => null })).toBe(false);
+    expect(read("../publish.ts")).toContain("UI-10b'ye kadar kapalı");
+    expect(read("../publish.ts")).toMatch(/\.getItem\(PUBLISH_FLAG_KEY\) === "1"/);
+    const files = [...readdirSync(new URL("..", import.meta.url)).filter(n => /\.(ts|tsx|css)$/.test(n)).map(n => `../${n}`),
+      "../../index.html", "../../vite.config.ts", "../../package.json", "../../src-tauri/tauri.conf.json"];
+    for (const f of files) {
+      const src = read(f);
+      expect(src, f).not.toMatch(/(setItem|localStorage\[)[^;\n]*(PUBLISH_FLAG_KEY|bv\.flags\.publish)/);
+      expect(src, f).not.toMatch(/bv\.flags\.publish["']?\s*[:=]\s*["']?1/);
+      if (!f.endsWith("publish.ts")) expect(src, f).not.toContain("bv.flags.publish");
+    }
+    expect(read("../publish.ts")).not.toMatch(/PUBLISH_FLAG_KEY[^;\n]*(\?\?|\|\|)\s*["']1["']/);
+  });
+});
+
 describe("draft validation (criterion 2)", () => {
   it("accepts good branch names and rejects ref-injection shapes", () => {
     for (const ok of ["braavo/satis-ozeti", "feat/a_b.c", "a/b/c"]) expect(isValidBranch(ok), ok).toBe(true);

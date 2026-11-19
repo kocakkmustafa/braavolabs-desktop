@@ -981,11 +981,12 @@ fn publish_push_blocking(app: AppHandle, token: String, cwd: String, branch: Str
         }
         None => None,
     };
-    // An empty hooks dir in the app's own config dir: core.hooksPath points here for the token push.
-    let hooks = config_dir(&app)?.join("empty-hooks");
-    fs::create_dir_all(&hooks).map_err(|_| PubErr::Unknown.msg())?;
-    // Config re-check + push happen inside ONE call (publish::guarded_push), right before git runs.
-    let out = publish::guarded_push(&cwd, &url, &branch, include.as_ref().map(|i| i.path()), &hooks).map_err(|e| e.msg())?;
+    // Config re-check, push (fresh empty 0700 hooks dir, deleted after) and a post-push config re-check: ONE call.
+    let tmp_root = config_dir(&app)?.join("tmp");
+    let out = publish::guarded_push(&cwd, &url, &branch, include.as_ref().map(|i| i.path()), &tmp_root).map_err(|e| {
+        audit_publish(&app, "git.push", "error", e.code(), ts);
+        e.msg()
+    })?;
     drop(include);
     if out.ok {
         audit_publish(&app, "git.push", "success", &format!("pushed {branch} to {slug}"), ts);

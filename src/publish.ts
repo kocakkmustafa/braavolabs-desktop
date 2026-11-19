@@ -9,6 +9,8 @@
 import type { ActionDetail, Governance } from "./governance";
 import { changeSummary, type ChangeView } from "./changes";
 
+// UI-10b'ye kadar kapalı: bu bayrak BRA-UI-10b (PAT yalnız PR REST'te, push kullanıcının git kimliğiyle) merge edilene dek
+// hiçbir yapıda açılmaz ve varsayılanı açılmaz. Kodda bu anahtara "1" yazan bir yol yoktur (publish.test.ts kilitler).
 export const PUBLISH_FLAG_KEY = "bv.flags.publish";
 export const MAX_BRANCH = 100;
 export const MAX_TITLE = 200;
