@@ -689,6 +689,8 @@
   "publish.err.invalid": "Il nome del branch o il testo non è valido. Non è stato inviato nulla.",
   "publish.err.unknown": "Qualcosa è andato storto. Controlla nell’elenco delle modifiche cosa è stato fatto e riprova.",
   "publish.err.unsafeConfig": "Le impostazioni Git di questo repository potrebbero deviare o indebolire l’invio (proxy, altro indirizzo o hook). Non è stato inviato nulla. Rimuovi queste impostazioni dal repository e riprova.",
+  "publish.err.gitAuth": "Git non è riuscito ad accedere a GitHub per il caricamento, oppure il tuo account Git non può scrivere in questo repository. Configura l’accesso di Git (il gestore di credenziali Git o una chiave SSH) e riprova. La chiave di accesso collegata qui serve solo ad aprire la PR e non risolve il problema. Non è stato unito nulla.",
+  "publish.err.noPat": "Il ramo è stato caricato. Per aprire la PR mi serve la tua chiave di accesso GitHub. Collegala e riprova.",
   "publish.err.changesChanged": "I file modificati non sono più quelli che hai confermato. Non è stato inviato nulla. Controlla di nuovo le modifiche e ricomincia.",
   "settings.page.about": "Informazioni",
   "about.version": "Versione",

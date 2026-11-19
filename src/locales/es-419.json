@@ -666,6 +666,8 @@
   "publish.err.invalid": "El nombre de la rama o el texto no es válido. No se envió nada.",
   "publish.err.unknown": "Algo salió mal. Revisa en la lista de cambios qué se hizo e inténtalo de nuevo.",
   "publish.err.unsafeConfig": "La configuración de Git de este repositorio podría redirigir o debilitar el envío (un proxy, otra dirección o un hook). No se envió nada. Quita esos ajustes del repositorio e inténtalo de nuevo.",
+  "publish.err.gitAuth": "Git no pudo iniciar sesión en GitHub para la subida, o tu cuenta de Git no puede escribir en este repositorio. Configura tu inicio de sesión de Git (el administrador de credenciales de Git o una clave SSH) y vuelve a intentarlo. La clave de acceso conectada aquí solo sirve para abrir el PR y no soluciona esto. No se fusionó nada.",
+  "publish.err.noPat": "La rama ya está subida. Para abrir el PR necesito tu clave de acceso de GitHub. Conéctala y vuelve a intentarlo.",
   "publish.err.changesChanged": "Los archivos cambiados ya no son los que confirmaste. No se envió nada. Revisa de nuevo los cambios y empieza otra vez.",
   "settings.page.about": "Acerca de",
   "about.version": "Versión",

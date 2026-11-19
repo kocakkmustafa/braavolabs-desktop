@@ -9,8 +9,8 @@
 import type { ActionDetail, Governance } from "./governance";
 import { changeSummary, toChangeViews, type ChangeView } from "./changes";
 
-// UI-10b'ye kadar kapalı: bu bayrak BRA-UI-10b (PAT yalnız PR REST'te, push kullanıcının git kimliğiyle) merge edilene dek
-// hiçbir yapıda açılmaz ve varsayılanı açılmaz. Kodda bu anahtara "1" yazan bir yol yoktur (publish.test.ts kilitler).
+// UI-10b merge edildi; açma kurucu kararı: bu bayrak hiçbir yapıda açılmaz ve varsayılanı açılmaz (açmak kurucu işidir, ayrı).
+// Kodda bu anahtara "1" yazan bir yol yoktur (publish.test.ts kilitler).
 export const PUBLISH_FLAG_KEY = "bv.flags.publish";
 export const MAX_BRANCH = 100;
 export const MAX_TITLE = 200;
@@ -71,8 +71,8 @@ export function publishSummary(views: ChangeView[]): PublishSummary {
 export type PublishErrorCode =
   | "invalidBranch" | "invalidText" | "nothingToPublish" | "tooMany" | "secretFile" | "notGithub" | "noPat" | "keychainUnavailable"
   | "branchExists" | "identity" | "commitFailed" | "wrongBranch" | "pushRejected" | "noWriteAccess" | "unauthorized" | "notFound"
-  | "rateLimit" | "network" | "conflict" | "unsafeConfig" | "changesChanged" | "cancelled" | "unknown";
-const CODES: readonly string[] = ["invalidBranch", "invalidText", "nothingToPublish", "tooMany", "secretFile", "notGithub", "noPat", "keychainUnavailable", "branchExists", "identity", "commitFailed", "wrongBranch", "pushRejected", "noWriteAccess", "unauthorized", "notFound", "rateLimit", "network", "conflict", "unsafeConfig", "changesChanged", "cancelled", "unknown"];
+  | "rateLimit" | "network" | "conflict" | "unsafeConfig" | "gitAuth" | "changesChanged" | "cancelled" | "unknown";
+const CODES: readonly string[] = ["invalidBranch", "invalidText", "nothingToPublish", "tooMany", "secretFile", "notGithub", "noPat", "keychainUnavailable", "branchExists", "identity", "commitFailed", "wrongBranch", "pushRejected", "noWriteAccess", "unauthorized", "notFound", "rateLimit", "network", "conflict", "unsafeConfig", "gitAuth", "changesChanged", "cancelled", "unknown"];
 
 /** `publish:<code>` from the host becomes a known code; anything else (including free text) becomes "unknown". The text itself is dropped. */
 export function errorCode(e: unknown): PublishErrorCode {
@@ -144,6 +144,9 @@ export async function runPublish(deps: RunDeps, input: RunInput): Promise<Publis
       } else if (s === "push") {
         await gated(deps, "git.push", { summary: "git push", cwd, branch, repo }, token => deps.invoke("git_publish_push", { token, cwd, branch, ts: Date.now() }));
       } else {
+        // Not connected: say so BEFORE the approval dialog, so no approval is spent on a step that cannot run.
+        const st = (await deps.invoke("github_pat_status").catch(() => null)) as { connected?: boolean } | null;
+        if (st && st.connected === false) throw new Error("publish:noPat");
         const pr = (await gated(deps, "github.pr", { summary: "open pull request", cwd, branch, base: info.base, repo, title, body, draft: draft.draft }, token =>
           deps.invoke("github_open_pr", { token, cwd, branch, base: info.base, title, body, draft: draft.draft, ts: Date.now() }))) as { number?: unknown; url?: unknown };
         deps.onStep?.(s, "done");

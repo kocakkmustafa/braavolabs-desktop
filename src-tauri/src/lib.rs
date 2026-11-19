@@ -973,27 +973,14 @@ fn publish_push_blocking(app: AppHandle, token: String, cwd: String, branch: Str
     let argv: Vec<String> = ["push", "--no-verify", url.as_str(), branch.as_str()].iter().map(|s| s.to_string()).collect();
     if publish::push_argv_denied(&argv, &url) { return Err(PubErr::InvalidBranch.msg()); } // force/delete/refspec/other target: never
     if publish::current_branch(&cwd).as_deref() != Some(branch.as_str()) { return Err(PubErr::WrongBranch.msg()); }
-    let pat = if https {
-        let dir = config_dir(&app)?;
-        Some(make_backend(&dir).get(GH_PAT_ACCOUNT)?.ok_or_else(|| PubErr::NoPat.msg())?)
-    } else { None };
     let detail = ActionDetail { cwd: Some(cwd.clone()), branch: Some(branch.clone()), repo: Some(slug.clone()), ..Default::default() };
     spend_publish_token(&app, &token, "git.push", &detail, ts, &format!("git push {branch} to {slug}"))?;
-    let include = match &pat {
-        Some(p) => {
-            let dir = config_dir(&app)?.join("tmp");
-            fs::create_dir_all(&dir).map_err(|_| PubErr::Unknown.msg())?;
-            Some(publish::AuthInclude::create(&dir, p, &mint_id("push", now_ms())).map_err(|e| e.msg())?)
-        }
-        None => None,
-    };
     // Config re-check, push (fresh empty 0700 hooks dir, deleted after) and a post-push config re-check: ONE call.
     let tmp_root = config_dir(&app)?.join("tmp");
-    let out = publish::guarded_push(&cwd, &url, &branch, include.as_ref().map(|i| i.path()), &tmp_root).map_err(|e| {
+    let out = publish::guarded_push(&cwd, &url, &branch, &tmp_root).map_err(|e| {
         audit_publish(&app, "git.push", "error", e.code(), ts);
         e.msg()
     })?;
-    drop(include);
     publish::sweep_stale(&tmp_root, std::time::Duration::from_secs(120));
     if out.ok {
         audit_publish(&app, "git.push", "success", &format!("pushed {branch} to {slug}"), ts);

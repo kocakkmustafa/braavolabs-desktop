@@ -40,10 +40,10 @@ describe("flag (criterion 1)", () => {
   });
 });
 
-describe("UI-10b'ye kadar kapalı (project kararı)", () => {
+describe("UI-10b merge edildi; açma kurucu kararı (bayrak varsayılan KAPALI)", () => {
   it("default is OFF and no code path, build file or config switches the flag on or makes it default-on", () => {
     expect(isPublishEnabled({ getItem: () => null })).toBe(false);
-    expect(read("../publish.ts")).toContain("UI-10b'ye kadar kapalı");
+    expect(read("../publish.ts")).toContain("UI-10b merge edildi; açma kurucu kararı");
     expect(read("../publish.ts")).toMatch(/\.getItem\(PUBLISH_FLAG_KEY\) === "1"/);
     const files = [...readdirSync(new URL("..", import.meta.url)).filter(n => /\.(ts|tsx|css)$/.test(n)).map(n => `../${n}`),
       "../../index.html", "../../vite.config.ts", "../../package.json", "../../src-tauri/tauri.conf.json"];
@@ -120,8 +120,8 @@ describe("approval gate (criterion 3)", () => {
     const h = host();
     const r = await run(createMemoryGovernance(), h.invoke);
     expect(r).toEqual({ ok: true, number: 42, url: "https://github.com/aisirketim/satis-paneli/pull/42", sha: "abc1234" });
-    expect(h.calls.map(c => c.cmd)).toEqual(["git_publish_commit", "git_publish_push", "github_open_pr"]);
-    const tokens = h.calls.map(c => c.args.token);
+    expect(h.calls.map(c => c.cmd)).toEqual(["git_publish_commit", "git_publish_push", "github_pat_status", "github_open_pr"]);
+    const tokens = h.calls.filter(c => c.cmd !== "github_pat_status").map(c => c.args.token);
     expect(new Set(tokens).size).toBe(3);
     expect(tokens.every(t => typeof t === "string" && t.length > 0)).toBe(true);
   });
@@ -134,7 +134,7 @@ describe("approval gate (criterion 3)", () => {
     const h2 = host();
     const r2 = await run(gov, h2.invoke, { from: "push" });
     expect(r2.ok).toBe(true);
-    expect(h2.calls.map(c => c.cmd)).toEqual(["git_publish_push", "github_open_pr"]);
+    expect(h2.calls.map(c => c.cmd)).toEqual(["git_publish_push", "github_pat_status", "github_open_pr"]);
   });
   it("refuses a PR link that is not a github.com page", async () => {
     const invoke = async (cmd: string): Promise<unknown> => (cmd === "git_changed_files" ? [{ path: "a.ts", status: "M" }] : cmd === "github_open_pr" ? { number: 1, url: "https://evil.example/x" } : "sha");
@@ -191,7 +191,7 @@ describe("file list order and freshness (reviewer HIGH/MEDIUM)", () => {
     const h = host(undefined, hostRaw);
     const r = await run(createMemoryGovernance(), h.invoke, { files: toChangeViews(hostRaw).map(v => v.path) });
     expect(r.ok).toBe(true);
-    expect(h.calls.map(c => c.cmd)).toEqual(["git_publish_commit", "git_publish_push", "github_open_pr"]);
+    expect(h.calls.map(c => c.cmd)).toEqual(["git_publish_commit", "git_publish_push", "github_pat_status", "github_open_pr"]);
   });
   it("stops with an explicit changesChanged (not unknown) when the list changed after confirmation, before any approval", async () => {
     const h = host(undefined, [...hostRaw, { path: "extra.ts", status: "??" }]);
@@ -212,12 +212,29 @@ describe("secrets and errors (criteria 4, 5, 6)", () => {
     }
   });
   it("renders a message for every code with no token wording, in all fourteen languages", () => {
-    const codes = ["pushRejected", "network", "noWriteAccess", "unauthorized", "notFound", "rateLimit", "conflict", "branchExists", "identity", "commitFailed", "wrongBranch", "nothingToPublish", "tooMany", "cancelled", "keychain", "invalid", "unknown", "unsafeConfig", "changesChanged"];
+    const codes = ["pushRejected", "network", "noWriteAccess", "unauthorized", "notFound", "rateLimit", "conflict", "branchExists", "identity", "commitFailed", "wrongBranch", "nothingToPublish", "tooMany", "cancelled", "keychain", "invalid", "unknown", "unsafeConfig", "changesChanged", "gitAuth", "noPat"];
     for (const l of LOCALES) for (const c of codes) {
       const m = MESSAGES[l][`publish.err.${c}`];
       expect(m, `${l}:${c}`).toBeTruthy();
       expect(m).not.toMatch(/ghp_|github_pat_|Authorization|Bearer/);
     }
+  });
+  it("push sign-in failures say the Git identity is the fix and that the PR key does not solve it; the key prompt is for the PR step only", () => {
+    expect(errorCode(new Error("publish:gitAuth"))).toBe("gitAuth");
+    const view = read("../publish-view.ts");
+    expect(view).toContain('"publish.err.gitAuth"');
+    expect(view).toContain('"publish.err.noPat"');
+    expect(view).toMatch(/KEY_CODES\.has\(code\) && \(fail\?\.step \?\? step\) === "pr"/);
+    expect(view).not.toContain("github_pat_status"); // no key is asked for before the push
+    for (const l of LOCALES) expect(MESSAGES[l]["publish.err.gitAuth"].length, l).toBeGreaterThan(40);
+  });
+  it("asks for the key before the PR approval when GitHub is not connected, after the push", async () => {
+    const calls: string[] = [];
+    const gov = { request: async () => { calls.push("request"); return { actionId: "a", token: "t" }; }, approve: async () => ({ token: "t" }) } as unknown as Governance;
+    const invoke = async (cmd: string) => { calls.push(cmd); if (cmd === "github_pat_status") return { connected: false }; if (cmd === "git_changed_files") return []; return "ok"; };
+    const r = await runPublish({ invoke, gov } as never, { cwd: "/w", info, draft, files: [], from: "pr" });
+    expect(r).toMatchObject({ ok: false, step: "pr", code: "noPat" });
+    expect(calls).toEqual(["github_pat_status"]);
   });
   it("never logs, stores or fetches: no console, storage, fetch, XHR or WebSocket in the publish modules", () => {
     for (const f of ["../publish.ts", "../publish-view.ts"]) {

@@ -55,7 +55,9 @@ function errorKey(code: PublishErrorCode): string {
     case "pushRejected": return "publish.err.pushRejected";
     case "network": return "publish.err.network";
     case "noWriteAccess": return "publish.err.noWriteAccess";
-    case "unauthorized": case "noPat": return "publish.err.unauthorized";
+    case "unauthorized": return "publish.err.unauthorized";
+    case "noPat": return "publish.err.noPat";
+    case "gitAuth": return "publish.err.gitAuth";
     case "notFound": return "publish.err.notFound";
     case "rateLimit": return "publish.err.rateLimit";
     case "conflict": return "publish.err.conflict";
@@ -74,6 +76,7 @@ function errorKey(code: PublishErrorCode): string {
     default: return "publish.err.unknown";
   }
 }
+/** The access key only plays a part in the PR step (the push signs in with the user's own Git identity), so key actions are offered there only. */
 const KEY_CODES: ReadonlySet<PublishErrorCode> = new Set(["unauthorized", "noWriteAccess", "noPat", "notFound"]);
 
 export function createPublishUi(deps: PublishUiDeps): PublishUi {
@@ -185,10 +188,8 @@ export function createPublishUi(deps: PublishUiDeps): PublishUi {
     titleIn.focus();
   }
 
-  async function proceed() {
-    let connected = false;
-    try { connected = ((await deps.invoke("github_pat_status")) as { connected?: boolean })?.connected === true; } catch { connected = false; }
-    if (!connected) return connectDialog(() => confirmDialog());
+  function proceed() {
+    // The access key is not needed until the PR step (after the push, which uses the user's own Git identity), so it is not asked for here.
     confirmDialog();
   }
 
@@ -313,7 +314,7 @@ export function createPublishUi(deps: PublishUiDeps): PublishUi {
     card.append(status("err", t("publish.errLabel")), make("p", "pb-text", t(errorKey(code))));
     const actions = make("div", "pb-actions");
     actions.append(btn("set-btn", t("publish.close"), () => { close(); refreshList(); }));
-    if (KEY_CODES.has(code)) actions.append(btn("set-btn", t("publish.keyUpdate"), () => connectDialog(() => void start(fail?.step ?? step))));
+    if (KEY_CODES.has(code) && (fail?.step ?? step) === "pr") actions.append(btn("set-btn", t("publish.keyUpdate"), () => connectDialog(() => void start(fail?.step ?? step))));
     if (retry && step === "commit" && code !== "cancelled" && code !== "identity") actions.append(btn("set-btn", t("publish.changeBranch"), () => showPrepare(deps.views())));
     // A changed file list needs a fresh look at the changes, not a blind retry of the same list.
     if (retry) actions.append(btn("set-btn primary", t("publish.retry"), () => void (code === "changesChanged" ? open() : start(fail?.step ?? step))));

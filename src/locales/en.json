@@ -666,6 +666,8 @@
   "publish.err.invalid": "The branch name or text is not valid. Nothing was sent.",
   "publish.err.unknown": "Something went wrong. Check what was done in the changes list, then try again.",
   "publish.err.unsafeConfig": "This repository's Git settings could redirect or weaken the upload (a proxy, another address or a hook). Nothing was sent. Remove those settings from the repository, then try again.",
+  "publish.err.gitAuth": "Git could not sign in to GitHub for the upload, or your Git account cannot write to this repository. Set up your Git sign-in (the Git credential manager or an SSH key), then try again. The access key connected here is only used to open the PR and does not fix this. Nothing was merged.",
+  "publish.err.noPat": "The branch is uploaded. To open the PR I need your GitHub access key. Connect it, then try again.",
   "publish.err.changesChanged": "The changed files are no longer the ones you confirmed. Nothing was sent. Look at the changes again, then start over.",
   "settings.page.about": "About",
   "about.version": "Version",

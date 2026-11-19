@@ -689,6 +689,8 @@
   "publish.err.invalid": "Nazwa gałęzi lub tekst jest nieprawidłowy. Nic nie wysłano.",
   "publish.err.unknown": "Coś poszło nie tak. Sprawdź na liście zmian, co zostało zrobione, i spróbuj ponownie.",
   "publish.err.unsafeConfig": "Ustawienia Git tego repozytorium mogłyby przekierować lub osłabić wysyłkę (proxy, inny adres lub hook). Nic nie wysłano. Usuń te ustawienia z repozytorium i spróbuj ponownie.",
+  "publish.err.gitAuth": "Git nie mógł zalogować się do GitHuba na potrzeby wysyłki albo Twoje konto Git nie ma prawa zapisu w tym repozytorium. Skonfiguruj logowanie Git (menedżer poświadczeń Git lub klucz SSH) i spróbuj ponownie. Klucz dostępu podłączony tutaj służy tylko do otwarcia PR i tego nie naprawi. Nic nie zostało scalone.",
+  "publish.err.noPat": "Gałąź została wysłana. Aby otworzyć PR, potrzebuję Twojego klucza dostępu do GitHuba. Podłącz go i spróbuj ponownie.",
   "publish.err.changesChanged": "Zmienione pliki nie są już tymi, które potwierdzono. Nic nie wysłano. Sprawdź zmiany jeszcze raz i zacznij od nowa.",
   "settings.page.about": "O aplikacji",
   "about.version": "Wersja",
