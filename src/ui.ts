@@ -142,6 +142,10 @@ import { createPublishUi, type PublishUi } from "./publish-view";
 import { isPublishEnabled } from "./publish";
 import { composeWire, createTray, isAttachmentsEnabled, splitWire, wireExceeds, type AttachmentTray } from "./attachments";
 import { createAttachUi, renderSentChips, type AttachUi } from "./attachments-view";
+import { version as APP_VERSION } from "../package.json";
+import { isSetupDone, isSetupEnabled } from "./setup";
+import { mountSetup } from "./setup-view";
+import { buildAbout, mountUpdate } from "./update-view";
 import { renderIntro, renderStrip, stripView, summaryLine, vcIcon, type VcAction } from "./voice-chat-view";
 import { createBrowserPane } from "./browser-pane";
 import { createComputerPane } from "./computer-pane";
@@ -311,6 +315,7 @@ const ICONS = {
   shield: ["M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"],
   phone: ["M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Z", "M12 18h.01"],
   lock: ["M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Z", "M7 11V7a5 5 0 0 1 10 0v4"],
+  info: ["M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z", "M12 16v-4", "M12 8h.01"],
   activity: ["M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"],
 } as const;
 const icon = (name: keyof typeof ICONS, size = 16): SVGSVGElement => {
@@ -1264,9 +1269,17 @@ export function renderWorkspace(deps: UiDeps): void {
   chat.append(companyPane);
 
   shell.append(rail, chat, inspector);
+  // BRA-UI-11: new-version banner, behind a default-OFF flag (bv.flags.updateBanner = "1"). Flag off: no banner, no request.
+  const update = mountUpdate({ t, version: APP_VERSION, invoke: tauriInvoke });
   const win = el("div", "win");
-  win.append(titlebar, shell);
+  win.append(titlebar, ...(update ? [update.banner] : []), shell);
   root.append(win);
+  // BRA-UI-11: first-run setup, behind a default-OFF flag (bv.flags.setup = "1"). Flag off: nothing below is created.
+  let setupUi: ReturnType<typeof mountSetup> | null = null;
+  if (isSetupEnabled() && !isSetupDone()) {
+    const setup = setupUi = mountSetup({ t, invoke: tauriInvoke, vault: deps.vault, providers: DIRECT_PROVIDERS, nav: globalThis.navigator as never, contain: containDialog });
+    root.append(setup.element);
+  }
 
   // --- settings sheet (design v3) ---
   // One modal for everything configurable: keys, MCP servers, governance
@@ -1490,6 +1503,8 @@ export function renderWorkspace(deps: UiDeps): void {
 
   // Sol sayfa listesi + sağ sayfa paneli (Ilık Grafit D13–D24). Yalnız koda karşılığı
   // olan sayfalar var; her mevcut ayar tam olarak bir sayfada durur.
+  // BRA-UI-11: About (version). The update check inside it exists only while bv.flags.updateBanner = "1".
+  const secAbout = update ? update.about() : buildAbout({ t, version: APP_VERSION, invoke: tauriInvoke }, null, () => "");
   const pageContent: Record<SettingsPageId, { icon: keyof typeof ICONS; sections: HTMLElement[] }> = {
     appearance: { icon: "sun", sections: [secAppearance] },
     keys: { icon: "key", sections: [secModels] },
@@ -1497,6 +1512,7 @@ export function renderWorkspace(deps: UiDeps): void {
     approvals: { icon: "shield", sections: [secGov] },
     companion: { icon: "phone", sections: [secComp] },
     privacy: { icon: "lock", sections: [secPrivacy] },
+    about: { icon: "info", sections: [secAbout] },
   };
   const sheetMain = el("div", "sheet-main");
   const pageNav = el("div", "set-nav");
@@ -2696,6 +2712,8 @@ export function renderWorkspace(deps: UiDeps): void {
     if (activeDispatchStopper === stopDispatch) activeDispatchStopper = null;
     void deps.gov.invalidate().catch(() => {});
     workspaceDisposed = true;
+    update?.dispose();
+    setupUi?.dispose();
     voiceChat?.dismiss();
     attachUi?.dispose();
     attachTray?.take();

@@ -4,9 +4,9 @@
  * Bütçe, Abonelik, Bildirimler, Profil ve Şirket › Genel sayfaları için henüz
  * bir ayar yok — sahte kontrol yerine gizli bırakıldı (ayrı bilet).
  */
-export type SettingsPageId = "appearance" | "keys" | "connectors" | "approvals" | "companion" | "privacy";
+export type SettingsPageId = "appearance" | "keys" | "connectors" | "approvals" | "companion" | "privacy" | "about";
 
-export const SETTINGS_PAGE_IDS: readonly SettingsPageId[] = ["appearance", "keys", "connectors", "approvals", "companion", "privacy"];
+export const SETTINGS_PAGE_IDS: readonly SettingsPageId[] = ["appearance", "keys", "connectors", "approvals", "companion", "privacy", "about"];
 
 /**
  * Sayfa listesinde klavye gezintisi. Dikey liste (varsayılan): yukarı/aşağı. Yatay liste (dar pencere):
