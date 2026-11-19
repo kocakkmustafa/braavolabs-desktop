@@ -256,6 +256,8 @@ pub fn pat_shape_ok(pat: &str) -> bool {
 
 pub struct GitOut {
     pub ok: bool,
+    /// Exit code (`None` when killed by a signal). `git config` exit 1 means "no such key"; anything else is a read error.
+    pub code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
 }
@@ -274,6 +276,12 @@ const NULL_CONFIG: &str = "/dev/null";
 /// verification off. No token is involved: the push authenticates with the user's own git identity (credential helper or
 /// SSH), so the user's global config is read as usual. `extra_env` carries nothing secret.
 pub fn run_git_with(cwd: &str, args: &[&str], extra_env: &[(&str, &str)], hardened: Option<&Path>) -> Result<GitOut, PubErr> {
+    run_git_full(cwd, args, extra_env, hardened, None)
+}
+
+/// Like `run_git_with`, with an optional overall deadline: past it the child is killed and the result is `Network` (a push that
+/// stops answering must not hang the app). Output is drained on threads so a full pipe cannot stall the child.
+pub fn run_git_full(cwd: &str, args: &[&str], extra_env: &[(&str, &str)], hardened: Option<&Path>, timeout: Option<std::time::Duration>) -> Result<GitOut, PubErr> {
     let mut cmd = Command::new("git");
     if let Some(hooks) = hardened {
         for c in ["http.sslVerify=true", "http.https://github.com/.sslVerify=true", "http.followRedirects=false"] {
@@ -285,19 +293,50 @@ pub fn run_git_with(cwd: &str, args: &[&str], extra_env: &[(&str, &str)], harden
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
-    let out = cmd
+    let mut child = cmd
         .args(args)
         .current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "never")
         .env("GIT_EDITOR", "true")
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|_| PubErr::Unknown)?;
+    fn drain<R: Read + Send + 'static>(r: Option<R>) -> std::sync::mpsc::Receiver<Vec<u8>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut b = Vec::new();
+            if let Some(mut r) = r {
+                let _ = r.read_to_end(&mut b);
+            }
+            let _ = tx.send(b);
+        });
+        rx
+    }
+    let (out_rx, err_rx) = (drain(child.stdout.take()), drain(child.stderr.take()));
+    let deadline = timeout.map(|t| std::time::Instant::now() + t);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) => {
+                if deadline.map_or(false, |d| std::time::Instant::now() >= d) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(PubErr::Network); // readers are left to end on their own (a grandchild may hold the pipe)
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(_) => return Err(PubErr::Unknown),
+        }
+    };
+    let grab = |rx: std::sync::mpsc::Receiver<Vec<u8>>| rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap_or_default();
     Ok(GitOut {
-        ok: out.status.success(),
-        stdout: String::from_utf8_lossy(&out.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+        ok: status.success(),
+        code: status.code(),
+        stdout: String::from_utf8_lossy(&grab(out_rx)).to_string(),
+        stderr: String::from_utf8_lossy(&grab(err_rx)).to_string(),
     })
 }
 
@@ -333,12 +372,12 @@ pub fn push_config_clean(cwd: &str, expected: &(String, String)) -> bool {
     // No `-c` pins here (they would show up in the listing themselves).
     let re = r"^(http\.|url\.|include\.|includeif\.|credential\.|protocol\.|core\.(sshcommand|hookspath|gitproxy|askpass|fsmonitor|editor))";
     let env = [("GIT_CONFIG_NOSYSTEM", "1"), ("GIT_CONFIG_GLOBAL", NULL_CONFIG)];
-    if !matches!(run_git_with(cwd, &["config", "--get-regexp", re], &env, None), Ok(o) if !o.ok && o.stdout.trim().is_empty()) {
+    if !matches!(run_git_with(cwd, &["config", "--get-regexp", re], &env, None), Ok(o) if !o.ok && o.code == Some(1) && o.stdout.trim().is_empty()) {
         return false;
     }
     match run_git_with(cwd, &["config", "--get-regexp", r"^remote\."], &env, None) {
         Ok(o) if o.ok => remote_keys_ok(&o.stdout, expected),
-        Ok(o) => o.stdout.trim().is_empty(), // exit 1: no remote keys at all
+        Ok(o) => o.code == Some(1) && o.stdout.trim().is_empty(), // exit 1 only: no remote keys at all (128 = unreadable config, not clean)
         Err(_) => false,
     }
 }
@@ -386,11 +425,23 @@ impl Drop for TempHooks {
 /// dir under `tmp_root`, deleted afterwards), then re-check that the config did not change during the push. No token is
 /// involved: authentication is the user's own git identity (credential helper or SSH), never prompted for (`GIT_TERMINAL_PROMPT=0`).
 pub fn guarded_push(cwd: &str, url: &str, branch: &str, tmp_root: &Path) -> Result<GitOut, PubErr> {
-    guarded_push_inner(cwd, url, branch, tmp_root, true)
+    guarded_push_inner(cwd, url, branch, tmp_root, true, PUSH_TIMEOUT)
+}
+
+/// Overall limit for one push; past it the child is killed and the step fails as `Network`.
+pub const PUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// ssh must never wait for a passphrase or a host-key question (no terminal): `BatchMode=yes` plus a connect timeout, unless the
+/// user set their own ssh command (`GIT_SSH_COMMAND`, `GIT_SSH`, global `core.sshCommand`). Then theirs stays and only the overall
+/// timeout bounds the push.
+fn ssh_batch_env(cwd: &str) -> Vec<(&'static str, String)> {
+    let own = std::env::var_os("GIT_SSH_COMMAND").is_some() || std::env::var_os("GIT_SSH").is_some()
+        || matches!(run_git(cwd, &["config", "--get", "core.sshCommand"]), Ok(o) if o.ok && !o.stdout.trim().is_empty());
+    if own { vec![] } else { vec![("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=15".to_string())] }
 }
 
 /// `verify_target` is false only in tests that push to a local bare repository (not a github.com URL).
-fn guarded_push_inner(cwd: &str, url: &str, branch: &str, tmp_root: &Path, verify_target: bool) -> Result<GitOut, PubErr> {
+fn guarded_push_inner(cwd: &str, url: &str, branch: &str, tmp_root: &Path, verify_target: bool, timeout: std::time::Duration) -> Result<GitOut, PubErr> {
     let argv: Vec<String> = ["push", "--no-verify", url, branch].iter().map(|s| s.to_string()).collect();
     if argv[3] != branch || !is_valid_branch(branch) || argv.iter().any(|a| a.starts_with('+') || a.starts_with("--force") || a == "--delete") {
         return Err(PubErr::InvalidBranch);
@@ -401,8 +452,11 @@ fn guarded_push_inner(cwd: &str, url: &str, branch: &str, tmp_root: &Path, verif
     }
     let hooks = TempHooks::create(tmp_root)?;
     let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-    let out = run_git_with(cwd, &args, &[], Some(&hooks.0))?;
+    let ssh = ssh_batch_env(cwd);
+    let env: Vec<(&str, &str)> = ssh.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let out = run_git_full(cwd, &args, &env, Some(&hooks.0), Some(timeout));
     drop(hooks);
+    let out = out?;
     if !push_config_clean(cwd, &expected) {
         return Err(PubErr::UnsafeConfig);
     }
@@ -495,17 +549,19 @@ pub fn classify_push_failure(stderr: &str) -> PubErr {
     let lines: Vec<String> = stderr
         .lines()
         .map(|l| l.trim().to_ascii_lowercase())
-        .filter(|l| l.starts_with("remote:") || l.starts_with("fatal:") || l.starts_with("error:") || l.starts_with("! ["))
+        .filter(|l| l.starts_with("remote:") || l.starts_with("fatal:") || l.starts_with("error:") || l.starts_with("! [") || l.starts_with("ssh:")
+            || l.contains("permission denied (publickey") || l.contains("host key verification failed"))
         .collect();
     let any = |f: &dyn Fn(&str) -> bool| lines.iter().any(|l| f(l));
     let has = |w: &str| any(&|l: &str| l.contains(w));
     let code = |c: &str| any(&|l: &str| has_status_code(l, c));
-    if has("could not resolve host") || any(&|l: &str| l.contains("unable to access") && (l.contains("timed out") || l.contains("resolve") || l.contains("connect"))) || has("network is unreachable") || has("connection refused") {
+    if has("could not resolve host") || any(&|l: &str| l.contains("unable to access") && (l.contains("timed out") || l.contains("resolve") || l.contains("connect"))) || has("network is unreachable") || has("connection refused")
+        || has("could not resolve hostname") || has("no route to host") || any(&|l: &str| l.contains("connect to host") && (l.contains("timed out") || l.contains("refused") || l.contains("unreachable") || l.contains("no route"))) {
         PubErr::Network
     } else if has("could not read username") || has("could not read password") || has("terminal prompts disabled") || has("no such device or address")
-        || has("permission denied (publickey") || has("host key verification failed") || has("could not read from remote repository")
+        || has("permission denied (publickey") || has("host key verification failed")
         || code("401") || code("403") || code("404") || has("bad credentials") || has("authentication failed") || has("invalid username or password")
-        || has("permission to") || has("permission denied") || has("write access") || has("repository not found")
+        || has("permission to") || has("write access") || has("repository not found")
     {
         // The push signs in with the user's own git identity, never with the app's access key: a missing or refused identity, a
         // wrong account or a repository this account cannot see all need the same fix, in Git.
@@ -1079,6 +1135,58 @@ mod tests {
     }
 
     #[test]
+    fn classification_separates_network_from_git_auth_from_local_errors() {
+        assert_eq!(classify_push_failure("ssh: connect to host github.com port 22: Connection timed out\nfatal: Could not read from remote repository."), PubErr::Network);
+        assert_eq!(classify_push_failure("ssh: Could not resolve hostname github.com: Name or service not known\nfatal: Could not read from remote repository."), PubErr::Network);
+        assert_eq!(classify_push_failure("ssh: connect to host github.com port 22: No route to host"), PubErr::Network);
+        assert_eq!(classify_push_failure("ssh: connect to host github.com port 22: Connection refused"), PubErr::Network);
+        assert_eq!(classify_push_failure("fatal: Could not read from remote repository."), PubErr::Unknown, "alone it says nothing about identity");
+        assert_eq!(classify_push_failure("git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository."), PubErr::GitAuth);
+        assert_eq!(classify_push_failure("error: unable to create file x: Permission denied"), PubErr::Unknown, "a local file error is not an identity problem");
+    }
+
+    #[test]
+    fn a_push_that_never_answers_is_killed_at_the_deadline() {
+        // a loopback server that accepts and stays silent
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let _srv = std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for _ in 0..2 {
+                if let Ok((c, _)) = listener.accept() { held.push(c); }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        });
+        let root = tmp("hang");
+        let d = root.join("w");
+        std::fs::create_dir_all(&d).unwrap();
+        init_repo(&d);
+        sh(&d, &["checkout", "-q", "-b", "braavo/h"]);
+        let url = format!("http://127.0.0.1:{port}/o/r.git");
+        let t0 = std::time::Instant::now();
+        let r = run_git_full(d.to_str().unwrap(), &["push", "--no-verify", &url, "braavo/h"], &[("GIT_CONFIG_NOSYSTEM", "1"), ("GIT_CONFIG_GLOBAL", NULL_CONFIG), ("NO_PROXY", "127.0.0.1"), ("no_proxy", "127.0.0.1")], None, Some(std::time::Duration::from_secs(2)));
+        assert_eq!(r.err(), Some(PubErr::Network));
+        assert!(t0.elapsed() < std::time::Duration::from_secs(15));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_unreadable_config_is_not_clean() {
+        let root = tmp("badcfg");
+        let d = root.join("w");
+        std::fs::create_dir_all(&d).unwrap();
+        init_repo(&d);
+        sh(&d, &["remote", "add", "origin", "https://github.com/o/r.git"]);
+        let cwd = d.to_str().unwrap();
+        assert!(push_config_clean(cwd, &exp()));
+        let cfg = d.join(".git").join("config");
+        let good = std::fs::read_to_string(&cfg).unwrap();
+        std::fs::write(&cfg, format!("{good}[broken\n")).unwrap(); // git config exits 128 on a malformed file
+        assert!(!push_config_clean(cwd, &exp()), "exit 128 is a read error, never 'clean'");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn a_push_without_git_credentials_fails_fast_and_is_classified_as_git_auth() {
         // A loopback http "remote" that always answers 401: git must not prompt (GIT_TERMINAL_PROMPT=0) and must not hang.
         use std::io::{Read as _, Write as _};
@@ -1100,7 +1208,7 @@ mod tests {
         sh(&d, &["checkout", "-q", "-b", "braavo/n"]);
         let url = format!("http://127.0.0.1:{port}/o/r.git");
         let t0 = std::time::Instant::now();
-        let o = run_git_with(d.to_str().unwrap(), &["push", "--no-verify", &url, "braavo/n"], &[("GIT_CONFIG_NOSYSTEM", "1"), ("GIT_CONFIG_GLOBAL", NULL_CONFIG)], None).unwrap();
+        let o = run_git_with(d.to_str().unwrap(), &["push", "--no-verify", &url, "braavo/n"], &[("GIT_CONFIG_NOSYSTEM", "1"), ("GIT_CONFIG_GLOBAL", NULL_CONFIG), ("NO_PROXY", "127.0.0.1"), ("no_proxy", "127.0.0.1")], None).unwrap();
         assert!(!o.ok);
         assert!(t0.elapsed() < std::time::Duration::from_secs(20), "no prompt, no hang");
         assert_eq!(classify_push_failure(&o.stderr), PubErr::GitAuth, "{}", o.stderr);
@@ -1129,14 +1237,14 @@ mod tests {
         let tmp_root = root.join("tmp");
         let (cwd, url) = (work.to_str().unwrap(), bare.to_str().unwrap());
         sh(&work, &["config", "credential.helper", "!echo pwned"]);
-        assert_eq!(guarded_push_inner(cwd, url, "braavo/g", &tmp_root, false).err(), Some(PubErr::UnsafeConfig), "a repo-level credential helper refuses the push");
+        assert_eq!(guarded_push_inner(cwd, url, "braavo/g", &tmp_root, false, PUSH_TIMEOUT).err(), Some(PubErr::UnsafeConfig), "a repo-level credential helper refuses the push");
         sh(&work, &["config", "--unset", "credential.helper"]);
         sh(&work, &["config", "http.proxy", "http://127.0.0.1:9"]);
-        assert_eq!(guarded_push_inner(cwd, url, "braavo/g", &tmp_root, false).err(), Some(PubErr::UnsafeConfig));
+        assert_eq!(guarded_push_inner(cwd, url, "braavo/g", &tmp_root, false, PUSH_TIMEOUT).err(), Some(PubErr::UnsafeConfig));
         sh(&work, &["config", "--unset", "http.proxy"]);
-        assert_eq!(guarded_push_inner(cwd, url, "+x:y", &tmp_root, false).err(), Some(PubErr::InvalidBranch));
+        assert_eq!(guarded_push_inner(cwd, url, "+x:y", &tmp_root, false, PUSH_TIMEOUT).err(), Some(PubErr::InvalidBranch));
         assert_eq!(guarded_push(cwd, url, "braavo/g", &tmp_root).err(), Some(PubErr::UnsafeConfig), "a target that is not the approved github.com repository is never pushed to");
-        let o = guarded_push_inner(cwd, url, "braavo/g", &tmp_root, false).unwrap();
+        let o = guarded_push_inner(cwd, url, "braavo/g", &tmp_root, false, PUSH_TIMEOUT).unwrap();
         assert!(o.ok, "{}", o.stderr);
         assert!(!marker.exists(), "the repo's pre-push hook must not run on the push");
         assert_eq!(std::fs::read_dir(&tmp_root).unwrap().count(), 0, "the per-push hooks dir is deleted afterwards");

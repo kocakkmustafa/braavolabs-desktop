@@ -144,6 +144,9 @@ export async function runPublish(deps: RunDeps, input: RunInput): Promise<Publis
       } else if (s === "push") {
         await gated(deps, "git.push", { summary: "git push", cwd, branch, repo }, token => deps.invoke("git_publish_push", { token, cwd, branch, ts: Date.now() }));
       } else {
+        // Not connected: say so BEFORE the approval dialog, so no approval is spent on a step that cannot run.
+        const st = (await deps.invoke("github_pat_status").catch(() => null)) as { connected?: boolean } | null;
+        if (st && st.connected === false) throw new Error("publish:noPat");
         const pr = (await gated(deps, "github.pr", { summary: "open pull request", cwd, branch, base: info.base, repo, title, body, draft: draft.draft }, token =>
           deps.invoke("github_open_pr", { token, cwd, branch, base: info.base, title, body, draft: draft.draft, ts: Date.now() }))) as { number?: unknown; url?: unknown };
         deps.onStep?.(s, "done");
