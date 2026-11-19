@@ -2629,3 +2629,48 @@ pre, code, .changes-path, .mcp-args, .key-input { direction: ltr; unicode-bidi: 
 .pb-wait .pb-glyph { color: var(--queue); }
 .pb-modal { display: flex; flex-direction: column; gap: var(--space-3); text-align: start; }
 .pb-modal .approve-title, .pb-modal .approve-body { text-align: start; margin: 0; }
+
+/* BRA-UI-11: first-run setup, new-version banner, About. Colour only touches the glyph; words carry the status. */
+.setup-backdrop { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; background: var(--bg); padding: var(--space-6); overflow: auto; }
+.setup-card { width: 100%; max-width: 640px; display: flex; flex-direction: column; align-items: stretch; gap: var(--space-3); color: var(--text-1); }
+.setup-steps { display: flex; flex-wrap: wrap; gap: var(--space-2); justify-content: center; margin-bottom: var(--space-4); }
+.setup-step { display: inline-flex; align-items: center; gap: var(--space-2); min-height: var(--h-ctl); padding: 0 var(--space-3); border-radius: var(--r-ctl); font-size: var(--fs-small); color: var(--text-3); }
+.setup-step.cur { background: var(--surface-2); color: var(--text-1); font-weight: 500; }
+.setup-step.done { color: var(--text-2); }
+.setup-glyph, .update-glyph { font-size: 0.75rem; line-height: 1; }
+.setup-title { margin: 0; font-size: var(--fs-display); font-weight: 600; text-align: center; }
+.setup-sub { margin: 0 0 var(--space-3); font-size: var(--fs-body); color: var(--text-2); text-align: center; }
+.setup-list, .setup-fields { display: flex; flex-direction: column; gap: var(--space-2); }
+.setup-row { display: flex; align-items: center; gap: var(--space-3); min-height: 60px; padding: var(--space-3); border-radius: var(--r-card); background: var(--surface-card); }
+.setup-row-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.setup-row-text b { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); font-weight: 600; font-size: var(--fs-body); }
+.setup-row-desc { font-size: var(--fs-small); color: var(--text-sub); }
+.setup-row-acts { display: flex; gap: var(--space-2); flex-shrink: 0; }
+.setup-tag, .update-tag { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-small); font-weight: 400; color: var(--text-2); }
+.tone-done .setup-glyph, .tone-done .update-glyph { color: var(--done); }
+.tone-wait .setup-glyph, .tone-wait .update-glyph { color: var(--queue); }
+.tone-err .setup-glyph, .tone-err .update-glyph { color: var(--error); }
+.setup-btn { min-height: var(--h-ctl); padding: 0 var(--space-3); border-radius: var(--r-ctl); border: 0; background: var(--surface-2); color: var(--text-1); font: inherit; font-size: var(--fs-small); cursor: pointer; }
+.setup-btn:hover { background: var(--surface-sel); }
+.setup-btn.primary { background: var(--primary); color: var(--primary-ink); font-weight: 500; }
+.setup-btn.ghost { background: transparent; color: var(--text-2); }
+.setup-btn:disabled { opacity: 0.5; cursor: default; }
+.setup-btn:focus-visible, .setup-input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.setup-foot { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-4); }
+.setup-foot-note { margin-right: auto; font-size: var(--fs-small); color: var(--text-sub); }
+.setup-foot-start { margin-right: auto; }
+.setup-field { display: flex; flex-direction: column; gap: var(--space-1); }
+.setup-label { font-size: var(--fs-caption); color: var(--text-sub); }
+.setup-input { min-height: var(--h-ctl-lg); padding: 0 var(--space-3); border-radius: var(--r-ctl); border: 0; background: var(--surface-card); color: var(--text-1); font: inherit; font-size: var(--fs-body); }
+.setup-privacy { margin: 0; font-size: var(--fs-small); color: var(--text-sub); }
+.setup-err { margin: 0; min-height: 1em; font-size: var(--fs-small); color: var(--error); }
+.update-banner { display: flex; align-items: center; gap: var(--space-3); margin: 0 var(--space-4) var(--space-1); padding: 6px 6px 6px var(--space-3); border-radius: var(--r-card); background: var(--surface-card); color: var(--text-1); font-size: var(--fs-body); flex-shrink: 0; }
+.update-banner[hidden] { display: none; }
+.update-banner-text { flex: 1; min-width: 0; }
+.update-banner-acts { display: flex; gap: var(--space-1); flex-shrink: 0; }
+.about-name { margin: 0 0 var(--space-3); font-size: var(--fs-title); font-weight: 600; }
+.about-list { display: flex; flex-direction: column; border-radius: var(--r-card); background: var(--surface-card); padding: var(--space-1) var(--space-2); }
+.about-row { display: flex; align-items: center; gap: var(--space-3); min-height: 48px; padding: 0 var(--space-2); font-size: var(--fs-body); }
+.about-label { width: 130px; flex-shrink: 0; font-size: var(--fs-small); color: var(--text-sub); }
+.about-value { flex: 1; min-width: 0; display: flex; align-items: center; gap: var(--space-2); }
+.about-note { margin: var(--space-3) 0 0; font-size: var(--fs-small); color: var(--text-sub); }

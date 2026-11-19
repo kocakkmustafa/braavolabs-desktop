@@ -189,7 +189,7 @@ export function mountSetup(deps: SetupDeps): SetupUi {
       list.append(row);
     }
     const foot = make("div", "setup-foot");
-    foot.append(make("span", "setup-foot-note", computerReady(rows()) ? "" : t("setup.ready.footNote")));
+    foot.append(make("span", "setup-foot-note", computerReady(rows()) ? "" : t("setup.perm.footWait")));
     if (idx > 0) foot.append(btn(t("setup.back"), "ghost", () => go(idx - 1)));
     foot.append(btn(t("setup.finish"), "primary", () => { markSetupDone(deps.storage); close(); }));
     return [make("h1", "setup-title", t("setup.ready.title")), make("p", "setup-sub", t("setup.ready.sub")), list, foot];
