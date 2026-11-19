@@ -40,10 +40,10 @@ describe("flag (criterion 1)", () => {
   });
 });
 
-describe("UI-10b'ye kadar kapalı (project kararı)", () => {
+describe("UI-10b merge edildi; açma kurucu kararı (bayrak varsayılan KAPALI)", () => {
   it("default is OFF and no code path, build file or config switches the flag on or makes it default-on", () => {
     expect(isPublishEnabled({ getItem: () => null })).toBe(false);
-    expect(read("../publish.ts")).toContain("UI-10b'ye kadar kapalı");
+    expect(read("../publish.ts")).toContain("UI-10b merge edildi; açma kurucu kararı");
     expect(read("../publish.ts")).toMatch(/\.getItem\(PUBLISH_FLAG_KEY\) === "1"/);
     const files = [...readdirSync(new URL("..", import.meta.url)).filter(n => /\.(ts|tsx|css)$/.test(n)).map(n => `../${n}`),
       "../../index.html", "../../vite.config.ts", "../../package.json", "../../src-tauri/tauri.conf.json"];
@@ -212,12 +212,21 @@ describe("secrets and errors (criteria 4, 5, 6)", () => {
     }
   });
   it("renders a message for every code with no token wording, in all fourteen languages", () => {
-    const codes = ["pushRejected", "network", "noWriteAccess", "unauthorized", "notFound", "rateLimit", "conflict", "branchExists", "identity", "commitFailed", "wrongBranch", "nothingToPublish", "tooMany", "cancelled", "keychain", "invalid", "unknown", "unsafeConfig", "changesChanged"];
+    const codes = ["pushRejected", "network", "noWriteAccess", "unauthorized", "notFound", "rateLimit", "conflict", "branchExists", "identity", "commitFailed", "wrongBranch", "nothingToPublish", "tooMany", "cancelled", "keychain", "invalid", "unknown", "unsafeConfig", "changesChanged", "gitAuth", "noPat"];
     for (const l of LOCALES) for (const c of codes) {
       const m = MESSAGES[l][`publish.err.${c}`];
       expect(m, `${l}:${c}`).toBeTruthy();
       expect(m).not.toMatch(/ghp_|github_pat_|Authorization|Bearer/);
     }
+  });
+  it("push sign-in failures say the Git identity is the fix and that the PR key does not solve it; the key prompt is for the PR step only", () => {
+    expect(errorCode(new Error("publish:gitAuth"))).toBe("gitAuth");
+    const view = read("../publish-view.ts");
+    expect(view).toContain('"publish.err.gitAuth"');
+    expect(view).toContain('"publish.err.noPat"');
+    expect(view).toMatch(/KEY_CODES\.has\(code\) && \(fail\?\.step \?\? step\) === "pr"/);
+    expect(view).not.toContain("github_pat_status"); // no key is asked for before the push
+    for (const l of LOCALES) expect(MESSAGES[l]["publish.err.gitAuth"].length, l).toBeGreaterThan(40);
   });
   it("never logs, stores or fetches: no console, storage, fetch, XHR or WebSocket in the publish modules", () => {
     for (const f of ["../publish.ts", "../publish-view.ts"]) {

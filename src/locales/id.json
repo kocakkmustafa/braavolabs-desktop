@@ -689,5 +689,7 @@
   "publish.err.invalid": "Nama branch atau teks tidak valid. Tidak ada yang dikirim.",
   "publish.err.unknown": "Terjadi kesalahan. Periksa di daftar perubahan apa yang sudah dilakukan, lalu coba lagi.",
   "publish.err.unsafeConfig": "Pengaturan Git repositori ini dapat mengalihkan atau melemahkan pengiriman (proxy, alamat lain, atau hook). Tidak ada yang dikirim. Hapus pengaturan itu dari repositori lalu coba lagi.",
+  "publish.err.gitAuth": "Git tidak bisa masuk ke GitHub untuk pengunggahan, atau akun Git Anda tidak boleh menulis ke repositori ini. Siapkan login Git Anda (pengelola kredensial Git atau kunci SSH), lalu coba lagi. Kunci akses yang dihubungkan di sini hanya untuk membuka PR dan tidak memperbaiki ini. Tidak ada yang digabungkan.",
+  "publish.err.noPat": "Branch sudah diunggah. Untuk membuka PR, saya butuh kunci akses GitHub Anda. Hubungkan, lalu coba lagi.",
   "publish.err.changesChanged": "File yang berubah tidak lagi sama dengan yang Anda konfirmasi. Tidak ada yang dikirim. Lihat perubahan lagi, lalu mulai dari awal."
 }

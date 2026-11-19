@@ -689,5 +689,7 @@
   "publish.err.invalid": "分支名称或文本无效。未发送任何内容。",
   "publish.err.unknown": "出了点问题。请在更改列表中查看已完成的内容，然后重试。",
   "publish.err.unsafeConfig": "此仓库的 Git 设置可能改变或削弱上传（代理、其他地址或钩子）。未发送任何内容。请从仓库中移除这些设置后重试。",
+  "publish.err.gitAuth": "Git 无法登录 GitHub 完成上传，或你的 Git 账户没有此仓库的写入权限。请先设置 Git 登录（Git 凭据管理器或 SSH 密钥），然后重试。此处连接的访问密钥只用于创建 PR，解决不了这个问题。未合并任何内容。",
+  "publish.err.noPat": "分支已上传。创建 PR 需要你的 GitHub 访问密钥。请先连接，然后重试。",
   "publish.err.changesChanged": "已更改的文件与您确认的不再一致。未发送任何内容。请重新查看更改后重新开始。"
 }

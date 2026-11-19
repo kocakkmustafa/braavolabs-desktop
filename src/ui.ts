@@ -766,7 +766,7 @@ export function renderWorkspace(deps: UiDeps): void {
   changesSec.append(changesHead, changesRow, changesBody);
   changesSec.style.display = "none"; // sağ panelin "Değişiklikler" sekmesi
 
-  // BRA-UI-10: "Yayına hazırla", behind a default-OFF local flag (PUBLISH_FLAG_KEY in publish.ts; UI-10b'ye kadar kapalı). Flag off: nothing below is created.
+  // BRA-UI-10: "Yayına hazırla", behind a default-OFF local flag (PUBLISH_FLAG_KEY in publish.ts; UI-10b merge edildi; açma kurucu kararı). Flag off: nothing below is created.
   let lastViews: ChangeView[] = [];
   let publishUi: PublishUi | null = null;
   if (isPublishEnabled()) {

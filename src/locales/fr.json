@@ -666,5 +666,7 @@
   "publish.err.invalid": "Le nom de la branche ou le texte n’est pas valide. Rien n’a été envoyé.",
   "publish.err.unknown": "Un problème est survenu. Regardez dans la liste des modifications ce qui a été fait, puis réessayez.",
   "publish.err.unsafeConfig": "Les réglages Git de ce dépôt pourraient détourner ou affaiblir l’envoi (proxy, autre adresse ou hook). Rien n’a été envoyé. Retirez ces réglages du dépôt, puis réessayez.",
+  "publish.err.gitAuth": "Git n’a pas pu se connecter à GitHub pour l’envoi, ou votre compte Git n’a pas le droit d’écrire dans ce dépôt. Configurez votre connexion Git (le gestionnaire d’identifiants Git ou une clé SSH), puis réessayez. La clé d’accès connectée ici sert uniquement à ouvrir la PR et ne règle pas ce problème. Rien n’a été fusionné.",
+  "publish.err.noPat": "La branche est envoyée. Pour ouvrir la PR, il me faut votre clé d’accès GitHub. Connectez-la, puis réessayez.",
   "publish.err.changesChanged": "Les fichiers modifiés ne sont plus ceux que vous avez confirmés. Rien n’a été envoyé. Revoyez les modifications, puis recommencez."
 }
