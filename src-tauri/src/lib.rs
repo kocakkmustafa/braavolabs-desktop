@@ -3912,7 +3912,7 @@ mod governance_tests {
         let dir = std::env::temp_dir().join(format!("bv-order-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let g = |a: &[&str]| { let o = std::process::Command::new("git").args(a).current_dir(&dir).env("GIT_CONFIG_GLOBAL", "/dev/null").output().unwrap(); assert!(o.status.success()); };
+        let g = |a: &[&str]| { let o = std::process::Command::new("git").args(a).current_dir(&dir).env("GIT_CONFIG_GLOBAL", if cfg!(windows) { "NUL" } else { "/dev/null" }).output().unwrap(); assert!(o.status.success()); };
         g(&["init", "-q", "-b", "main"]); g(&["config", "user.email", "t@e.test"]); g(&["config", "user.name", "T"]);
         for f in ["b.ts", "m.ts", "z.ts"] { fs::write(dir.join(f), "1\n").unwrap(); }
         g(&["add", "."]); g(&["commit", "-q", "-m", "i"]);

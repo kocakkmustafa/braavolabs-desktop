@@ -951,7 +951,7 @@ mod tests {
     }
 
     fn sh(cwd: &Path, args: &[&str]) {
-        let o = Command::new("git").args(args).current_dir(cwd).env("GIT_CONFIG_GLOBAL", "/dev/null").output().unwrap();
+        let o = Command::new("git").args(args).current_dir(cwd).env("GIT_CONFIG_GLOBAL", NULL_CONFIG).output().unwrap();
         assert!(o.status.success(), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
     }
     fn tmp(tag: &str) -> std::path::PathBuf {
@@ -1001,6 +1001,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[cfg(unix)] // the hook is a /bin/sh script made executable with chmod
     #[test]
     fn failed_commit_goes_back_to_the_previous_branch_and_drops_the_new_one() {
         let d = tmp("undo");
@@ -1026,15 +1027,18 @@ mod tests {
     fn add_treats_names_literally_so_a_glob_or_magic_name_cannot_widen_the_commit() {
         let d = tmp("lit");
         init_repo(&d);
-        std::fs::write(d.join("*.ts"), "star").unwrap();
-        std::fs::write(d.join("other.ts"), "other").unwrap();
-        std::fs::write(d.join("[id].tsx"), "bracket").unwrap();
+        // `[ab].txt` is a valid file name on every OS but a glob that would match a.txt and b.txt if it were not literal.
+        std::fs::write(d.join("[ab].txt"), "bracket").unwrap();
+        std::fs::write(d.join("a.txt"), "a-changed").unwrap();
+        std::fs::write(d.join("b.txt"), "b").unwrap();
         let cwd = d.to_str().unwrap();
-        commit_on_new_branch(cwd, "braavo/lit", "t", "", &["*.ts".to_string(), "[id].tsx".to_string()]).unwrap();
+        commit_on_new_branch(cwd, "braavo/lit", "t", "", &["[ab].txt".to_string()]).unwrap();
         let tracked = Command::new("git").args(["ls-files"]).current_dir(&d).output().unwrap();
         let t = String::from_utf8_lossy(&tracked.stdout).to_string();
-        assert!(t.contains("*.ts") && t.contains("[id].tsx"), "{t}");
-        assert!(!t.contains("other.ts"), "a glob name must not pull in other files: {t}");
+        assert!(t.contains("[ab].txt"), "{t}");
+        assert!(!t.lines().any(|l| l == "b.txt"), "a glob name must not pull in other files: {t}");
+        let st = Command::new("git").args(["status", "--porcelain"]).current_dir(&d).output().unwrap();
+        assert!(String::from_utf8_lossy(&st.stdout).contains("a.txt"), "a.txt stays uncommitted");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -1079,6 +1083,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[cfg(unix)] // the hook is a /bin/sh script made executable with chmod
     #[test]
     fn guarded_push_checks_and_pushes_in_one_call_with_a_fresh_hooks_dir() {
         let root = tmp("guard");
@@ -1173,16 +1178,22 @@ mod tests {
         commit_on_new_branch(&root, "braavo/sub", "t", "", &["pkg/x.ts".to_string()]).unwrap();
         // detached HEAD + failing commit goes back to the same commit and drops the new branch
         sh(&d, &["checkout", "-q", "--detach", "main"]);
-        let hook = d.join(".git/hooks/pre-commit");
-        std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        // a failing hook is a /bin/sh script: unix only; elsewhere an invalid identity makes the commit fail the same way
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            let hook = d.join(".git/hooks/pre-commit");
+            std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
             std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            sh(&d, &["config", "user.useConfigOnly", "true"]);
+            sh(&d, &["config", "--unset", "user.email"]);
         }
         std::fs::write(d.join("a.txt"), "changed\n").unwrap();
         let before = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&d).output().unwrap().stdout;
-        assert_eq!(commit_on_new_branch(d.to_str().unwrap(), "braavo/det", "t", "", &["a.txt".to_string()]), Err(PubErr::CommitFailed));
+        assert!(commit_on_new_branch(d.to_str().unwrap(), "braavo/det", "t", "", &["a.txt".to_string()]).is_err());
         assert_eq!(Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&d).output().unwrap().stdout, before);
         assert_eq!(current_branch(d.to_str().unwrap()), None, "still detached");
         let l = Command::new("git").args(["branch", "--list", "braavo/det"]).current_dir(&d).output().unwrap();
