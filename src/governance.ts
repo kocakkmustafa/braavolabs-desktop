@@ -31,6 +31,7 @@
 
 import { isSpawnVendor } from "./spawn";
 import { BLOCKED_KEYS, blockedReason, normalizeKeys } from "./computer";
+import { isValidBranch } from "./publish";
 
 type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 
@@ -91,6 +92,13 @@ export const ACTION_KINDS = [
   // scroll (one approval each). Blocked apps and launcher keys are hard-denied.
   "computer.read",
   "computer.interact",
+  // BRA-UI-10 "Yayına hazırla": every step is its own approval, bound to its exact branch/repo/files/title.
+  // git.commit = new local branch + commit of the changed files; git.push = `push -u origin <branch>` (never
+  // force/delete/refspec); github.pr = one POST to api.github.com with the user's own token. All require approval;
+  // an invalid branch name is denied. No merge action exists.
+  "git.commit",
+  "git.push",
+  "github.pr",
 ] as const;
 export type ActionKind = (typeof ACTION_KINDS)[number];
 
@@ -159,6 +167,14 @@ export interface ActionDetail {
   app?: string;
   x?: number;
   y?: number;
+  /** git.commit / git.push / github.pr: exact branch, PR base, repository slug, title, description, files, draft flag. Bound into the token. */
+  branch?: string;
+  base?: string;
+  repo?: string;
+  title?: string;
+  body?: string;
+  files?: string[];
+  draft?: boolean;
 }
 
 /** True when a path tries to escape its base via a `..` segment (defense-in-depth). */
@@ -312,6 +328,9 @@ export function classifyAction(
     if (detail.interactKind === "key" && BLOCKED_KEYS.includes(normalizeKeys(detail.value ?? ""))) {
       return { decision: "deny", reason: "launcher or log-out key combination blocked" };
     }
+  }
+  if ((kind === "git.commit" || kind === "git.push" || kind === "github.pr") && !(detail.branch && isValidBranch(detail.branch))) {
+    return { decision: "deny", reason: "invalid branch name blocked" };
   }
   // 2. Explicit auto-allow (read-only / local-keyless only).
   if (AUTO_ALLOW.has(kind)) {
@@ -478,6 +497,13 @@ function bindingKey(kind: string, detail: ActionDetail): string {
     d.app ?? null,
     d.x ?? null,
     d.y ?? null,
+    d.branch ?? null,
+    d.base ?? null,
+    d.repo ?? null,
+    d.title ?? null,
+    d.body ?? null,
+    d.files ?? null,
+    d.draft ?? null,
   ]);
 }
 

@@ -76,6 +76,8 @@ mod daemon;
 // Plan 5.8: governed computer control (screen + mouse + keyboard in allowed apps, macOS).
 // Policy, session limits and the CGEvent/screencapture host; the commands are below.
 mod computer;
+// BRA-UI-10: "Yayına hazırla" — fixed-argv commit/push and the PR call; see publish.rs.
+mod publish;
 
 /// Token bundle mirrored to the CLI's config field names ({token, refreshToken})
 /// so the two clients share one mental model. Serialized as camelCase so the
@@ -675,6 +677,11 @@ fn classify(kind: &str, argv: &[String], path: Option<&str>) -> (&'static str, &
     if kind == "browser.navigate" && !browser::is_safe_http_url(path) {
         return ("deny", "non-http(s) navigation blocked");
     }
+    // Publish kinds act on a branch name that ends up in git argv / a refspec / a PR head: an invalid
+    // one (option, refspec, `+`, `..`, injection characters) is never approvable. `path` carries the branch.
+    if matches!(kind, "git.commit" | "git.push" | "github.pr") && !path.map_or(false, publish::is_valid_branch) {
+        return ("deny", "invalid branch name blocked");
+    }
     // 2. Explicit auto-allow set (read-only / local-keyless only).
     if kind == "probe.detect" || kind == "local.dispatch" {
         return ("auto-allow", "read-only / local-keyless");
@@ -713,6 +720,9 @@ fn classify(kind: &str, argv: &[String], path: Option<&str>) -> (&'static str, &
             | "browser.eval"
             | "computer.read"
             | "computer.interact"
+            | "git.commit"
+            | "git.push"
+            | "github.pr"
     );
     if known {
         ("require-approval", "side-effecting action")
@@ -746,26 +756,36 @@ struct GitChange {
 /// list, not a report, and an unbounded payload would freeze the webview.
 const GIT_MAX_ENTRIES: usize = 200;
 
-#[tauri::command]
-fn git_changed_files(cwd: String) -> Result<Vec<GitChange>, String> {
-    let path = std::path::Path::new(&cwd);
+fn check_git_cwd(cwd: &str) -> Result<(), String> {
+    let path = std::path::Path::new(cwd);
     if !path.is_absolute() {
         return Err("cwd must be an absolute path".into());
     }
-    if is_traversal(&cwd) {
+    if is_traversal(cwd) {
         return Err("cwd must not contain a `..` segment".into());
     }
-    if sandbox::is_sensitive_dir(&cwd) {
+    if sandbox::is_sensitive_dir(cwd) {
         return Err("cwd is in a system/secrets directory".into());
     }
     if !path.is_dir() {
         return Err("cwd is not a directory".into());
     }
+    Ok(())
+}
+
+#[tauri::command]
+fn git_changed_files(cwd: String) -> Result<Vec<GitChange>, String> {
+    changed_files_in(&cwd)
+}
+
+/// Shared by `git_changed_files` (read-only list) and the publish commands: the ONLY paths `git add` may receive.
+fn changed_files_in(cwd: &str) -> Result<Vec<GitChange>, String> {
+    check_git_cwd(cwd)?;
 
     let run = |args: &[&str]| -> Result<String, String> {
         let out = std::process::Command::new("git")
             .args(args)
-            .current_dir(&cwd)
+            .current_dir(cwd)
             .output()
             .map_err(|e| format!("git not available: {e}"))?;
         if !out.status.success() {
@@ -779,7 +799,7 @@ fn git_changed_files(cwd: String) -> Result<Vec<GitChange>, String> {
 
     // Status first: it is the set of paths that changed at all (including
     // untracked ones, which have no numstat line).
-    let status_out = run(&["status", "--porcelain=v1", "--untracked-files=all"])?;
+    let status_out = run(&["-c", "core.quotepath=off", "status", "--porcelain=v1", "--untracked-files=all"])?;
     let mut changes: Vec<GitChange> = Vec::new();
     for line in status_out.lines().take(GIT_MAX_ENTRIES) {
         if line.len() < 4 {
@@ -816,6 +836,206 @@ fn git_changed_files(cwd: String) -> Result<Vec<GitChange>, String> {
     }
 
     Ok(changes)
+}
+
+// ── "Yayına hazırla" host commands (BRA-UI-10) ─────────────────────────────────
+//
+// Three governed actions (git.commit, git.push, github.pr), each: validate (deny never burns a token) →
+// spend the one-time token bound to the EXACT fields → run fixed argv / one HTTPS call. The PAT is read
+// here only; the webview can set, clear and ask "is one stored", never read it. Errors are `publish:<code>`.
+
+const GH_PAT_ACCOUNT: &str = "github.pat";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishInfo {
+    branch: Option<String>,
+    /// "owner/repo" of origin (credentials in the URL are dropped by the parser), None when not a github.com remote.
+    repo: Option<String>,
+    base: String,
+}
+
+/// Read-only: what the hand-over screen needs to name the target. No gate (mirrors git_changed_files).
+#[tauri::command]
+fn git_publish_info(cwd: String) -> Result<PublishInfo, String> {
+    check_git_cwd(&cwd)?;
+    Ok(PublishInfo {
+        branch: publish::current_branch(&cwd),
+        repo: publish::origin_remote(&cwd).map(|(o, r, _)| format!("{o}/{r}")),
+        base: publish::default_base(&cwd),
+    })
+}
+
+fn store_pat(backend: &dyn SecretBackend, pat: &str) -> Result<(), publish::PubErr> {
+    if !publish::pat_shape_ok(pat) {
+        return Err(publish::PubErr::InvalidText);
+    }
+    // Fail-closed: the key goes to the OS keychain or nowhere (never the 0600-file fallback).
+    if !backend.secure() {
+        return Err(publish::PubErr::KeychainUnavailable);
+    }
+    backend.set(GH_PAT_ACCOUNT, pat.trim()).map_err(|_| publish::PubErr::KeychainUnavailable)
+}
+
+#[tauri::command]
+fn github_pat_set(app: AppHandle, gov: State<'_, Governance>, pat: String) -> Result<(), String> {
+    gov.0.lock().map_err(|_| "gate poisoned")?.invalidate_all();
+    let dir = config_dir(&app)?;
+    store_pat(make_backend(&dir).as_ref(), &pat).map_err(|e| e.msg())
+}
+
+#[tauri::command]
+fn github_pat_clear(app: AppHandle, gov: State<'_, Governance>) -> Result<(), String> {
+    gov.0.lock().map_err(|_| "gate poisoned")?.invalidate_all();
+    let dir = config_dir(&app)?;
+    make_backend(&dir).delete(GH_PAT_ACCOUNT)
+}
+
+/// Whether a token is stored, and whether the store is the OS keychain. Never the value.
+#[tauri::command]
+fn github_pat_status(app: AppHandle) -> Result<serde_json::Value, String> {
+    let dir = config_dir(&app)?;
+    let be = make_backend(&dir);
+    let connected = be.get(GH_PAT_ACCOUNT)?.is_some();
+    Ok(serde_json::json!({ "connected": connected, "secure": be.secure() }))
+}
+
+fn spend_publish_token(app: &AppHandle, token: &str, kind: &str, detail: &ActionDetail, ts: u64, audit: &str) -> Result<(), String> {
+    let gov = app.state::<Governance>();
+    let mut gate = gov.0.lock().map_err(|_| "gate poisoned")?;
+    if try_consume_token(&mut gate, token, kind, &detail.binding(kind)) {
+        audit_append(app, &mut gate, kind, "-", "consumed", audit, ts);
+        Ok(())
+    } else {
+        audit_append(app, &mut gate, kind, "-", "replay-rejected", kind, ts);
+        Err("invalid or already-spent token".into())
+    }
+}
+
+fn audit_publish(app: &AppHandle, kind: &str, outcome: &str, summary: &str, ts: u64) {
+    let gov = app.state::<Governance>();
+    let locked = gov.0.lock();
+    if let Ok(mut gate) = locked {
+        audit_append(app, &mut gate, kind, "-", outcome, summary, ts);
+    }
+}
+
+#[tauri::command]
+async fn git_publish_commit(app: AppHandle, token: String, cwd: String, branch: String, title: String, body: String, ts: Option<u64>) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || publish_commit_blocking(app, token, cwd, branch, title, body, ts.unwrap_or(0)))
+        .await
+        .map_err(|_| publish::PubErr::Unknown.msg())?
+}
+
+fn publish_commit_blocking(app: AppHandle, token: String, cwd: String, branch: String, title: String, body: String, ts: u64) -> Result<String, String> {
+    use publish::PubErr;
+    // 1. Validate BEFORE the token is spent: a refusal never burns an approval.
+    check_git_cwd(&cwd).map_err(|_| PubErr::Unknown.msg())?;
+    if !publish::is_valid_branch(&branch) { return Err(PubErr::InvalidBranch.msg()); }
+    if !publish::valid_title(&title) || !publish::valid_body(&body) { return Err(PubErr::InvalidText.msg()); }
+    // `git status` paths are relative to the repository ROOT, so everything below runs there, never in a subfolder.
+    let root = publish::repo_root(&cwd).ok_or_else(|| PubErr::Unknown.msg())?;
+    if sandbox::is_sensitive_dir(&root) { return Err(PubErr::Unknown.msg()); }
+    let changes = changed_files_in(&root).map_err(|_| PubErr::Unknown.msg())?;
+    if changes.len() >= GIT_MAX_ENTRIES { return Err(PubErr::TooMany.msg()); }
+    // Canonical byte order, the same rule the UI uses: the token is bound to this exact list.
+    let files = publish::canonical_files(changes.into_iter().map(|c| c.path).collect());
+    publish::validate_publish_files(&files).map_err(|e| e.msg())?; // empty / traversal / secret-looking
+    // 2. Spend the token bound to exactly these fields. A refusal here almost always means the list changed after it was approved.
+    let detail = ActionDetail { cwd: Some(cwd.clone()), branch: Some(branch.clone()), title: Some(title.clone()), body: Some(body.clone()), files: Some(files.clone()), ..Default::default() };
+    spend_publish_token(&app, &token, "git.commit", &detail, ts, &format!("git commit on {branch}: {} files", files.len())).map_err(|_| PubErr::ChangesChanged.msg())?;
+    // 3. Fixed argv (publish::commit_on_new_branch). `switch -c` first: the current branch is never committed to.
+    let sha = publish::commit_on_new_branch(&root, &branch, &title, &body, &files).map_err(|e| {
+        audit_publish(&app, "git.commit", "error", e.code(), ts);
+        e.msg()
+    })?;
+    audit_publish(&app, "git.commit", "success", &format!("committed {} files on {branch}", files.len()), ts);
+    Ok(sha)
+}
+
+#[tauri::command]
+async fn git_publish_push(app: AppHandle, token: String, cwd: String, branch: String, ts: Option<u64>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || publish_push_blocking(app, token, cwd, branch, ts.unwrap_or(0)))
+        .await
+        .map_err(|_| publish::PubErr::Unknown.msg())?
+}
+
+fn publish_push_blocking(app: AppHandle, token: String, cwd: String, branch: String, ts: u64) -> Result<(), String> {
+    use publish::PubErr;
+    check_git_cwd(&cwd).map_err(|_| PubErr::Unknown.msg())?;
+    if !publish::is_valid_branch(&branch) { return Err(PubErr::InvalidBranch.msg()); }
+    let (owner, repo, https) = publish::origin_remote(&cwd).ok_or_else(|| PubErr::NotGithub.msg())?;
+    let slug = format!("{owner}/{repo}");
+    // The push goes to an explicit URL built from the approved owner/repo, never to the `origin` name.
+    let url = publish::push_url(&owner, &repo, https);
+    let argv: Vec<String> = ["push", "--no-verify", url.as_str(), branch.as_str()].iter().map(|s| s.to_string()).collect();
+    if publish::push_argv_denied(&argv, &url) { return Err(PubErr::InvalidBranch.msg()); } // force/delete/refspec/other target: never
+    if publish::current_branch(&cwd).as_deref() != Some(branch.as_str()) { return Err(PubErr::WrongBranch.msg()); }
+    let pat = if https {
+        let dir = config_dir(&app)?;
+        Some(make_backend(&dir).get(GH_PAT_ACCOUNT)?.ok_or_else(|| PubErr::NoPat.msg())?)
+    } else { None };
+    let detail = ActionDetail { cwd: Some(cwd.clone()), branch: Some(branch.clone()), repo: Some(slug.clone()), ..Default::default() };
+    spend_publish_token(&app, &token, "git.push", &detail, ts, &format!("git push {branch} to {slug}"))?;
+    let include = match &pat {
+        Some(p) => {
+            let dir = config_dir(&app)?.join("tmp");
+            fs::create_dir_all(&dir).map_err(|_| PubErr::Unknown.msg())?;
+            Some(publish::AuthInclude::create(&dir, p, &mint_id("push", now_ms())).map_err(|e| e.msg())?)
+        }
+        None => None,
+    };
+    // Config re-check, push (fresh empty 0700 hooks dir, deleted after) and a post-push config re-check: ONE call.
+    let tmp_root = config_dir(&app)?.join("tmp");
+    let out = publish::guarded_push(&cwd, &url, &branch, include.as_ref().map(|i| i.path()), &tmp_root).map_err(|e| {
+        audit_publish(&app, "git.push", "error", e.code(), ts);
+        e.msg()
+    })?;
+    drop(include);
+    publish::sweep_stale(&tmp_root, std::time::Duration::from_secs(120));
+    if out.ok {
+        audit_publish(&app, "git.push", "success", &format!("pushed {branch} to {slug}"), ts);
+        Ok(())
+    } else {
+        let e = publish::classify_push_failure(&out.stderr);
+        audit_publish(&app, "git.push", "error", e.code(), ts);
+        Err(e.msg())
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PrResult { number: u64, url: String }
+
+#[tauri::command]
+async fn github_open_pr(app: AppHandle, token: String, cwd: String, branch: String, base: String, title: String, body: String, draft: bool, ts: Option<u64>) -> Result<PrResult, String> {
+    tauri::async_runtime::spawn_blocking(move || open_pr_blocking(app, token, cwd, branch, base, title, body, draft, ts.unwrap_or(0)))
+        .await
+        .map_err(|_| publish::PubErr::Unknown.msg())?
+}
+
+fn open_pr_blocking(app: AppHandle, token: String, cwd: String, branch: String, base: String, title: String, body: String, draft: bool, ts: u64) -> Result<PrResult, String> {
+    use publish::PubErr;
+    check_git_cwd(&cwd).map_err(|_| PubErr::Unknown.msg())?;
+    if !publish::is_valid_branch(&branch) || !publish::is_valid_branch(&base) { return Err(PubErr::InvalidBranch.msg()); }
+    if !publish::valid_title(&title) || !publish::valid_body(&body) { return Err(PubErr::InvalidText.msg()); }
+    let (owner, repo, _) = publish::origin_remote(&cwd).ok_or_else(|| PubErr::NotGithub.msg())?;
+    let slug = format!("{owner}/{repo}");
+    let dir = config_dir(&app)?;
+    let pat = make_backend(&dir).get(GH_PAT_ACCOUNT)?.ok_or_else(|| PubErr::NoPat.msg())?;
+    let detail = ActionDetail { cwd: Some(cwd.clone()), branch: Some(branch.clone()), base: Some(base.clone()), repo: Some(slug.clone()), title: Some(title.clone()), body: Some(body.clone()), draft: Some(draft), ..Default::default() };
+    spend_publish_token(&app, &token, "github.pr", &detail, ts, &format!("open PR {branch} -> {base} in {slug}"))?;
+    let payload = publish::pr_payload(&title, &body, &branch, &base, draft);
+    match publish::open_pr(publish::GITHUB_API, &pat, &owner, &repo, &payload) {
+        Ok(pr) => {
+            audit_publish(&app, "github.pr", "success", &format!("PR #{} opened in {slug}", pr.number), ts);
+            Ok(PrResult { number: pr.number, url: pr.url })
+        }
+        Err(e) => {
+            audit_publish(&app, "github.pr", "error", e.code(), ts);
+            Err(e.msg())
+        }
+    }
 }
 
 /// True when a joined command line matches an obviously destructive pattern.
@@ -1026,6 +1246,16 @@ struct ActionDetail {
     app: Option<String>,
     x: Option<i64>,
     y: Option<i64>,
+    /// git.commit / git.push / github.pr (BRA-UI-10): the exact branch, PR base, repository slug,
+    /// commit/PR title and description, the staged file list and the draft flag. All bound into the
+    /// token and shown in the native dialog, so an approval for one push/PR cannot be spent on another.
+    branch: Option<String>,
+    base: Option<String>,
+    repo: Option<String>,
+    title: Option<String>,
+    body: Option<String>,
+    files: Option<Vec<String>>,
+    draft: Option<bool>,
 }
 
 impl ActionDetail {
@@ -1038,7 +1268,7 @@ impl ActionDetail {
     /// struct, so adding the fields keeps host mint/consume in step.
     fn binding(&self, kind: &str) -> String {
         format!(
-            "{kind}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            "{kind}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
             self.argv,
             self.cwd,
             self.path,
@@ -1054,7 +1284,14 @@ impl ActionDetail {
             self.interact_kind,
             self.app,
             self.x,
-            self.y
+            self.y,
+            self.branch,
+            self.base,
+            self.repo,
+            self.title,
+            self.body,
+            self.files,
+            self.draft
         )
     }
     fn summary_or(&self, kind: &str) -> String {
@@ -1132,6 +1369,29 @@ impl ActionDetail {
                 ("scroll", Some(v)) => lines.push(format!("Scroll by: {}", sanitize_field(v))),
                 ("", _) => {}
                 (k, _) => lines.push(format!("Do: {}", sanitize_field(k))),
+            }
+        }
+        // Publish (BRA-UI-10): the exact repository, branch, target and files the token binds to.
+        if matches!(kind, "git.commit" | "git.push" | "github.pr") {
+            if let Some(r) = &self.repo {
+                lines.push(format!("Repository: {}", sanitize_field(r)));
+            }
+            if let Some(b) = &self.branch {
+                match (kind, &self.base) {
+                    ("github.pr", Some(base)) => lines.push(format!("Branch: {} -> {}", sanitize_field(b), sanitize_field(base))),
+                    _ => lines.push(format!("Branch: {}", sanitize_field(b))),
+                }
+            }
+            if let Some(t) = &self.title {
+                lines.push(format!("Title: {}", sanitize_field(t)));
+            }
+            if kind == "github.pr" && self.draft == Some(true) {
+                lines.push("Draft pull request".into());
+            }
+            if let Some(files) = self.files.as_ref().filter(|f| !f.is_empty()) {
+                let shown: Vec<String> = files.iter().take(5).map(|f| sanitize_field(f)).collect();
+                let more = if files.len() > 5 { format!(" (+{} more)", files.len() - 5) } else { String::new() };
+                lines.push(format!("Files ({}): {}{}", files.len(), shown.join(", "), more));
             }
         }
         if let Some(server) = &self.server {
@@ -1364,6 +1624,9 @@ fn request_action(app: AppHandle, window: tauri::WebviewWindow, gov: State<'_, G
         // (same convention as pty passing its cwd as path). The token is still
         // bound to the url through ActionDetail::binding, unaffected by this.
         classify(&kind, &[], detail.url.as_deref())
+    } else if matches!(kind.as_str(), "git.commit" | "git.push" | "github.pr") {
+        // The branch is the hard-deny subject (same "pass it as path" convention as pty/browser).
+        classify(&kind, &[], detail.branch.as_deref())
     } else {
         classify(&kind, detail.argv.as_deref().unwrap_or(&[]), detail.path.as_deref())
     };
@@ -3571,6 +3834,109 @@ mod governance_tests {
         assert!(try_consume_token(&mut gate, "tok-openai", "direct.dispatch", &binding_openai));
     }
 
+    // ── BRA-UI-10: publish kinds ──────────────────────────────────────────────
+
+    #[test]
+    fn publish_kinds_require_approval_and_deny_bad_branches() {
+        for k in ["git.commit", "git.push", "github.pr"] {
+            assert_eq!(classify(k, &[], Some("braavo/fix-1")), ("require-approval", "side-effecting action"));
+            for bad in ["--force", "+x:y", "a..b", "x;rm", ""] {
+                assert_eq!(classify(k, &[], Some(bad)).0, "deny", "{k} {bad}");
+            }
+            assert_eq!(classify(k, &[], None).0, "deny", "{k} without a branch");
+        }
+        // the fail-closed default for unknown kinds is unchanged
+        assert_eq!(classify("git.force-push", &[], Some("x")).0, "require-approval");
+    }
+
+    #[test]
+    fn publish_dialog_shows_enforced_fields_and_token_binds_them_all() {
+        let d = ActionDetail {
+            summary: Some("Harmless".into()),
+            cwd: Some("/w".into()),
+            branch: Some("braavo/x".into()),
+            base: Some("main".into()),
+            repo: Some("o/r".into()),
+            title: Some("Fix totals".into()),
+            files: Some((0..7).map(|i| format!("f{i}.ts")).collect()),
+            draft: Some(true),
+            ..Default::default()
+        };
+        let text = d.enforced_dialog_text("github.pr");
+        for must in ["Repository: o/r", "Branch: braavo/x -> main", "Title: Fix totals", "Draft pull request", "Files (7)", "(+2 more)"] {
+            assert!(text.contains(must), "{must} in {text}");
+        }
+        assert!(!text.contains("Harmless"));
+        let b = d.binding("github.pr");
+        for change in [
+            ActionDetail { branch: Some("braavo/y".into()), ..d.clone() },
+            ActionDetail { base: Some("dev".into()), ..d.clone() },
+            ActionDetail { repo: Some("o/other".into()), ..d.clone() },
+            ActionDetail { title: Some("Other".into()), ..d.clone() },
+            ActionDetail { body: Some("x".into()), ..d.clone() },
+            ActionDetail { files: Some(vec!["only.ts".into()]), ..d.clone() },
+            ActionDetail { draft: Some(false), ..d.clone() },
+        ] {
+            assert_ne!(change.binding("github.pr"), b);
+        }
+        assert_ne!(d.binding("git.push"), b, "a push approval cannot be spent on the PR");
+    }
+
+    struct PatMock { secure: bool, store: Mutex<BTreeMap<String, String>> }
+    impl PatMock {
+        fn new(secure: bool) -> Self { Self { secure, store: Mutex::new(BTreeMap::new()) } }
+    }
+    impl SecretBackend for PatMock {
+        fn set(&self, a: &str, s: &str) -> Result<(), String> { self.store.lock().unwrap().insert(a.into(), s.into()); Ok(()) }
+        fn get(&self, a: &str) -> Result<Option<String>, String> { Ok(self.store.lock().unwrap().get(a).cloned()) }
+        fn delete(&self, a: &str) -> Result<(), String> { self.store.lock().unwrap().remove(a); Ok(()) }
+        fn secure(&self) -> bool { self.secure }
+    }
+
+    #[test]
+    fn pat_goes_only_to_a_secure_backend_and_is_never_listed() {
+        let weak = PatMock::new(false);
+        assert_eq!(store_pat(&weak, "github_pat_11ABCDEFG0123456789_abcdefghijklmnop"), Err(publish::PubErr::KeychainUnavailable));
+        assert!(weak.store.lock().unwrap().is_empty(), "nothing written to a non-keychain store");
+        let ok = PatMock::new(true);
+        assert_eq!(store_pat(&ok, "short"), Err(publish::PubErr::InvalidText));
+        store_pat(&ok, "github_pat_11ABCDEFG0123456789_abcdefghijklmnop").unwrap();
+        assert!(ok.store.lock().unwrap().contains_key(GH_PAT_ACCOUNT));
+        // sanitize/redact scrub a PAT even if one reached an audit-bound string
+        assert!(!sanitize_field("failed with github_pat_11ABCDEFG0123456789_abcdefghijklmnop here").contains("github_pat_11"));
+    }
+
+    #[test]
+    fn multi_file_mixed_tracked_and_untracked_binds_the_same_list_whatever_the_order() {
+        // A real repo: tracked edits of different sizes plus untracked files, in git's own status order.
+        let dir = std::env::temp_dir().join(format!("bv-order-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let g = |a: &[&str]| { let o = std::process::Command::new("git").args(a).current_dir(&dir).env("GIT_CONFIG_GLOBAL", if cfg!(windows) { "NUL" } else { "/dev/null" }).output().unwrap(); assert!(o.status.success()); };
+        g(&["init", "-q", "-b", "main"]); g(&["config", "user.email", "t@e.test"]); g(&["config", "user.name", "T"]);
+        for f in ["b.ts", "m.ts", "z.ts"] { fs::write(dir.join(f), "1\n").unwrap(); }
+        g(&["add", "."]); g(&["commit", "-q", "-m", "i"]);
+        fs::write(dir.join("z.ts"), "1\n2\n3\n4\n5\n6\n").unwrap(); // biggest edit
+        fs::write(dir.join("b.ts"), "2\n").unwrap();
+        fs::write(dir.join("new2.ts"), "n").unwrap();
+        fs::write(dir.join("new1.ts"), "n").unwrap();
+        let host: Vec<String> = changed_files_in(dir.to_str().unwrap()).unwrap().into_iter().map(|c| c.path).collect();
+        assert!(host.len() >= 4);
+        // the UI orders by edit size then name (changes.ts); emulate with a different permutation
+        let mut ui = host.clone();
+        ui.reverse();
+        ui.rotate_left(1);
+        assert_ne!(ui, host);
+        let bind = |files: Vec<String>| ActionDetail { cwd: Some("/w".into()), branch: Some("braavo/x".into()), title: Some("t".into()), body: Some("".into()), files: Some(publish::canonical_files(files)), ..Default::default() }.binding("git.commit");
+        assert_eq!(bind(host.clone()), bind(ui), "UI order and host order must bind identically");
+        let mut gate = GateState::default();
+        seed_token(&mut gate, "tok-c", "git.commit", &bind(host.clone()));
+        let mut shuffled = host.clone();
+        shuffled.reverse();
+        assert!(try_consume_token(&mut gate, "tok-c", "git.commit", &bind(shuffled)));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     // ── S-012: native dialog shows the ENFORCED action, not free-text summary ──
 
     #[test]
@@ -4273,6 +4639,11 @@ async fn computer_dispatch(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            // A crashed push may have left its auth include (token header) or hooks dir behind: remove them now.
+            if let Ok(dir) = config_dir(&app.handle()) { publish::sweep_stale(&dir.join("tmp"), std::time::Duration::ZERO); }
+            Ok(())
+        })
         .plugin(tauri_plugin_dialog::init()) // S-012 native approval dialog
         .manage(Governance(Mutex::new(GateState::default())))
         .manage(pty::PtyHostState::default()) // R6 Lane-B real-PTY session registry
@@ -4317,6 +4688,13 @@ pub fn run() {
             computer_session_stop,
             computer_dispatch,
             git_changed_files,
+            git_publish_info,
+            git_publish_commit,
+            git_publish_push,
+            github_open_pr,
+            github_pat_set,
+            github_pat_clear,
+            github_pat_status,
             mcp_capabilities,
             mcp_list_servers,
             mcp_add_server,
