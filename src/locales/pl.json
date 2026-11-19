@@ -753,5 +753,6 @@
   "setup.sum.macOnly": "Sterowanie komputerem jest dostępne tylko w macOS.",
   "setup.sum.perms": "Zezwolono na {n} z {total} uprawnień",
   "setup.sum.keyDone": "Zapisano klucz {provider}",
-  "setup.sum.keyLater": "Nie dodano jeszcze klucza"
+  "setup.sum.keyLater": "Nie dodano jeszcze klucza",
+  "setup.state.pending": "Czeka na Ciebie"
 }

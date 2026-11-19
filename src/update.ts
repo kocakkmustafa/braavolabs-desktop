@@ -102,7 +102,32 @@ export function checkDue(last: unknown, now: number): boolean {
 }
 
 // ── the check ───────────────────────────────────────────────────────────────
-export type FetchFn = (url: string, init: Record<string, unknown>) => Promise<{ ok: boolean; status: number; text(): Promise<string> }>;
+export interface FetchBody { getReader(): { read(): Promise<{ done: boolean; value?: Uint8Array }>; cancel(): Promise<void> | void } }
+export type FetchFn = (url: string, init: Record<string, unknown>) => Promise<{
+  ok: boolean; status: number; text(): Promise<string>;
+  headers?: { get(name: string): string | null }; body?: FetchBody | null;
+}>;
+
+/** The body as text, never more than MAX_BODY_CHARS: a declared length over the limit is refused, and a stream is cut off at the limit. */
+async function readCapped(res: Awaited<ReturnType<FetchFn>>): Promise<string | null> {
+  const declared = Number(res.headers?.get("content-length") ?? NaN);
+  if (Number.isFinite(declared) && declared > MAX_BODY_CHARS) return null;
+  const reader = res.body?.getReader?.();
+  if (!reader) {
+    const text = await res.text();
+    return text.length > MAX_BODY_CHARS ? null : text;
+  }
+  const dec = new TextDecoder();
+  let out = "", bytes = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    bytes += value?.byteLength ?? 0;
+    if (bytes > MAX_BODY_CHARS) { void reader.cancel(); return null; }
+    if (value) out += dec.decode(value, { stream: true });
+  }
+  return out + dec.decode();
+}
 
 export type CheckResult =
   | { kind: "newer"; version: string; url: string }
@@ -123,8 +148,8 @@ export async function checkForUpdate(current: string, fetchFn: FetchFn): Promise
       ...(ctl ? { signal: ctl.signal } : {}),
     });
     if (!res.ok) return { kind: "failed" };
-    const text = await res.text();
-    if (text.length > MAX_BODY_CHARS) return { kind: "failed" };
+    const text = await readCapped(res);
+    if (text === null) return { kind: "failed" };
     const latest = validateRelease(JSON.parse(text));
     if (!latest) return { kind: "failed" };
     const lv = parseSemver(latest.version)!;
@@ -207,7 +232,7 @@ export function createUpdateChecker(deps: UpdateDeps): UpdateChecker {
       } else if (r.kind === "current") {
         write(store(deps), UPDATE_SEEN_KEY, "");
         set({ phase: "current", lastCheck: at });
-      } else set({ phase: "failed", lastCheck: at });
+      } else set({ phase: "failed", version: st.version, url: st.url, lastCheck: at }); // a known newer version stays offered
     } finally {
       running = false;
     }
@@ -229,4 +254,5 @@ export function createUpdateChecker(deps: UpdateDeps): UpdateChecker {
 }
 
 /** The banner shows only for a newer, validated, not-dismissed version. */
-export const bannerVisible = (s: UpdateState): boolean => s.phase === "newer" && !s.dismissed && !!s.version && isReleaseUrl(s.url);
+export const bannerVisible = (s: UpdateState): boolean =>
+  (s.phase === "newer" || s.phase === "checking" || s.phase === "failed") && !s.dismissed && !!s.version && isReleaseUrl(s.url);

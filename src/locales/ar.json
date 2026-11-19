@@ -730,5 +730,6 @@
   "setup.sum.macOnly": "التحكم بالحاسوب متاح على macOS فقط.",
   "setup.sum.perms": "تم السماح بـ {n} من {total} أذونات",
   "setup.sum.keyDone": "تم حفظ مفتاح {provider}",
-  "setup.sum.keyLater": "لم تتم إضافة مفتاح بعد"
+  "setup.sum.keyLater": "لم تتم إضافة مفتاح بعد",
+  "setup.state.pending": "بانتظار ردك"
 }

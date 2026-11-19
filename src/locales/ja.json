@@ -730,5 +730,6 @@
   "setup.sum.macOnly": "コンピューター操作は macOS でのみ利用できます。",
   "setup.sum.perms": "{total} 件中 {n} 件の権限を許可済み",
   "setup.sum.keyDone": "{provider} のキーを保存しました",
-  "setup.sum.keyLater": "キーはまだ追加されていません"
+  "setup.sum.keyLater": "キーはまだ追加されていません",
+  "setup.state.pending": "確認待ち"
 }

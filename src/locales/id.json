@@ -753,5 +753,6 @@
   "setup.sum.macOnly": "Kontrol komputer hanya tersedia di macOS.",
   "setup.sum.perms": "{n} dari {total} izin diizinkan",
   "setup.sum.keyDone": "Kunci {provider} disimpan",
-  "setup.sum.keyLater": "Belum ada kunci yang ditambahkan"
+  "setup.sum.keyLater": "Belum ada kunci yang ditambahkan",
+  "setup.state.pending": "Menunggu Anda"
 }

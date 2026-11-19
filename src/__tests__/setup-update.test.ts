@@ -142,6 +142,61 @@ describe("checker: at most one automatic request a day", () => {
   });
 });
 
+describe("review fixes", () => {
+  it("keeps offering a known newer version when a later check fails, and cleans up subscriptions", async () => {
+    stubDom();
+    const storage = mem();
+    let body: Record<string, unknown> | Error = release();
+    const fetchFn: FetchFn = () => (body instanceof Error ? Promise.reject(body) : ok(body));
+    const c = createUpdateChecker({ current: "1.1.0", storage, fetchFn, now: () => 9e12 });
+    await c.auto();
+    body = new TypeError("offline");
+    await c.manual();
+    expect(c.state()).toMatchObject({ phase: "failed", version: "1.2.0", url: REL });
+    expect(bannerVisible(c.state())).toBe(true);
+    const ui = mountUpdate({ t: makeT("en"), version: "1.1.0", storage: mem(), fetchFn: () => ok(release()), now: () => 9e12 }, { getItem: (k: string) => (k === UPDATE_FLAG_KEY ? "1" : null) })!;
+    await flush();
+    const about = ui.about() as unknown as El & { dispose(): void };
+    ui.dispose();
+    const before = about.text();
+    await ui.checker.manual(); await flush();
+    expect(about.text()).toBe(before); // no longer subscribed
+  });
+  it("refuses a declared length over the limit and cuts a stream at the limit", async () => {
+    const big = { ok: true, status: 200, headers: { get: () => String(600 * 1024) }, text: async () => JSON.stringify(release()) };
+    expect(await checkForUpdate("1.1.0", () => Promise.resolve(big))).toEqual({ kind: "failed" });
+    const chunk = new Uint8Array(100 * 1024);
+    let reads = 0; const cancel = vi.fn();
+    const streaming = { ok: true, status: 200, text: async () => "", body: { getReader: () => ({ read: async () => (++reads < 100 ? { done: false, value: chunk } : { done: true }), cancel }) } };
+    expect(await checkForUpdate("1.1.0", () => Promise.resolve(streaming))).toEqual({ kind: "failed" });
+    expect(reads).toBeLessThan(10);
+    expect(cancel).toHaveBeenCalled();
+    const bytes = new TextEncoder().encode(JSON.stringify(release()));
+    let sent = false;
+    const small = { ok: true, status: 200, text: async () => "", body: { getReader: () => ({ read: async () => (sent ? { done: true } : (sent = true, { done: false, value: bytes })), cancel: () => {} }) } };
+    expect(await checkForUpdate("1.1.0", () => Promise.resolve(small))).toMatchObject({ kind: "newer" });
+  });
+  it("re-reads the permission state when the window gets focus again", async () => {
+    stubDom();
+    const listeners = new Map<string, () => void>();
+    vi.stubGlobal("addEventListener", (n: string, h: () => void) => listeners.set(n, h));
+    vi.stubGlobal("removeEventListener", (n: string) => listeners.delete(n));
+    let st = { supported: true, accessibility: false, screenRecording: false };
+    const ui = mountSetup({ t: makeT("en"), invoke: async (cmd) => (cmd === "computer_status" ? st : undefined), vault: createMemoryKeyVault(), providers: ["anthropic"], storage: mem() });
+    await ui.ready; await flush();
+    const el = ui.element as unknown as El;
+    expect(el.text()).not.toContain("Allowed");
+    expect(el.text()).not.toContain("quit and reopen");
+    await el.all().filter(e => e.tag === "button" && e.textContent === "Allow")[0].click(); await flush(); // screen recording: asked, host still says no
+    expect(el.text()).toContain("quit and reopen"); // existing Screen Recording note
+    st = { supported: true, accessibility: true, screenRecording: true }; // the user allowed them in System Settings
+    listeners.get("focus")!(); await flush();
+    expect(el.text()).toContain("Allowed");
+    ui.dispose();
+    expect(listeners.has("focus")).toBe(false);
+  });
+});
+
 describe("flags are default OFF and never set in code", () => {
   it("needs the literal 1", () => {
     for (const [on, f, key] of [[isUpdateEnabled, UPDATE_FLAG_KEY, "bv.flags.updateBanner"], [isSetupEnabled, SETUP_FLAG_KEY, "bv.flags.setup"]] as const) {
@@ -165,7 +220,7 @@ describe("flags are default OFF and never set in code", () => {
     const ui = read("../ui.ts");
     expect(ui.match(/mountUpdate\(/g)).toHaveLength(1);
     expect(ui.match(/mountSetup\(/g)).toHaveLength(1);
-    expect(ui).toMatch(/if \(isSetupEnabled\(\) && !isSetupDone\(\)\) \{\s*const setup = mountSetup\(/);
+    expect(ui).toMatch(/if \(isSetupEnabled\(\) && !isSetupDone\(\)\) \{\s*const setup = setupUi = mountSetup\(/);
     expect(ui).not.toMatch(/createUpdateChecker|checkForUpdate|api\.github\.com/);
     expect(read("../update-view.ts")).toMatch(/if \(!isUpdateEnabled\(flagStorage\)\) return null;/);
   });
@@ -197,9 +252,10 @@ describe("permission rows come from real reports", () => {
   const none = new Set<PermId>();
   it("maps the host answer and the microphone answer, never inventing a grant", () => {
     expect(mapPermissions(host, "unknown", none, none)).toEqual([{ id: "screen", state: "granted" }, { id: "accessibility", state: "needed" }, { id: "microphone", state: "needed" }]);
+    expect(mapPermissions(host, "unknown", new Set<PermId>(["microphone"]), none)[2].state).toBe("pending");
     expect(mapPermissions(host, "granted", none, none)[2].state).toBe("granted");
     expect(mapPermissions(host, "denied", none, none)[2].state).toBe("notGranted");
-    expect(mapPermissions(host, "unknown", new Set<PermId>(["accessibility"]), none)[1].state).toBe("notGranted");
+    expect(mapPermissions(host, "unknown", new Set<PermId>(["accessibility"]), none)[1].state).toBe("pending"); // asked, still not granted: neutral, not red
     expect(mapPermissions(host, "unknown", none, new Set<PermId>(["accessibility"]))[1].state).toBe("later");
     expect(mapPermissions({ ...host, accessibility: true }, "unknown", new Set<PermId>(["accessibility"]), none)[1].state).toBe("granted");
   });
@@ -264,7 +320,8 @@ describe("setup flow (flag on)", () => {
     expect(calls).toContain('computer_request_access:{"kind":"screen"}');
     expect(el.text()).toContain("Allowed"); // screen recording, as the host now reports
     await el.all().filter(e => e.tag === "button" && e.textContent === "Allow")[0].click(); await flush();
-    expect(el.text()).toContain("Not allowed"); // asked, still not granted
+    expect(el.text()).toContain("Waiting for you"); // asked, still not granted: neutral
+    expect(el.text()).not.toContain("■");
     expect(el.hasButton("Open System Settings")).toBe(true);
     el.button("Open System Settings").click(); await flush();
     expect(calls).toContain('computer_open_settings:{"pane":"accessibility"}');
@@ -425,7 +482,7 @@ describe("i18n (14 languages)", () => {
     expect(unused).toEqual([]);
     expect([...used].filter(k => !keys.includes(k))).toEqual([]);
     for (const id of ["screen", "accessibility", "microphone"]) expect(keys).toContain(`setup.perm.${id}Why`);
-    for (const s of ["granted", "notGranted", "later"]) expect(keys).toContain(`setup.state.${s}`);
+    for (const s of ["granted", "pending", "notGranted", "later"]) expect(keys).toContain(`setup.state.${s}`);
   });
   it("never promises an automatic update or a restart, in any language", () => {
     const banned: Record<string, RegExp> = {
@@ -434,7 +491,7 @@ describe("i18n (14 languages)", () => {
       id: /otomatis|mulai ulang/i, pl: /automatyczn|uruchom ponownie|restart/i, hi: /स्वचालित|रीस्टार्ट|पुनः आरंभ/, "zh-Hans": /自动|重启|重新启动/,
     };
     for (const l of LOCALES) for (const k of keys) expect(MESSAGES[l][k], `${l}:${k}`).not.toMatch(banned[l]);
-    for (const f of ["../update.ts", "../update-view.ts", "../setup.ts", "../setup-view.ts"]) expect(read(f).replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, ""), f).not.toMatch(/relaunch|restart|autoUpdate/i);
+    for (const f of ["../update.ts", "../update-view.ts", "../setup.ts", "../setup-view.ts"]) expect(read(f).replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "").replace("computer.restartNote", ""), f).not.toMatch(/relaunch|restart|autoUpdate/i);
     expect(MESSAGES.en["about.manual"]).toMatch(/download and install/);
   });
 });

@@ -37,6 +37,7 @@ export interface UpdateUiDeps {
   formatDate?: (ms: number) => string;
 }
 export interface UpdateUi { checker: UpdateChecker; banner: HTMLElement; about(): HTMLElement; dispose(): void }
+type Disposable<T> = T & { dispose(): void };
 
 /** Null when the flag is off: no checker, no banner, no network. */
 export function mountUpdate(deps: UpdateUiDeps, flagStorage?: FlagStorage): UpdateUi | null {
@@ -66,12 +67,13 @@ export function mountUpdate(deps: UpdateUiDeps, flagStorage?: FlagStorage): Upda
   const unsubBanner = checker.subscribe(paintBanner);
   void checker.auto();
 
-  const about = () => buildAbout(deps, checker, fmt);
-  return { checker, banner, about, dispose: unsubBanner };
+  const abouts: Array<() => void> = [];
+  const about = () => { const a = buildAbout(deps, checker, fmt); abouts.push(a.dispose); return a; };
+  return { checker, banner, about, dispose: () => { unsubBanner(); for (const d of abouts.splice(0)) d(); } };
 }
 
 /** The "About" settings page. Without a checker (flag off) it shows the version and the manual-install note only. */
-export function buildAbout(deps: Pick<UpdateUiDeps, "t" | "version" | "invoke">, checker: UpdateChecker | null, fmt: (ms: number) => string): HTMLElement {
+export function buildAbout(deps: Pick<UpdateUiDeps, "t" | "version" | "invoke">, checker: UpdateChecker | null, fmt: (ms: number) => string): Disposable<HTMLElement> {
   const { t } = deps;
   const root = make("div", "sheet-sec about-sec");
   const list = make("div", "about-list");
@@ -122,7 +124,7 @@ export function buildAbout(deps: Pick<UpdateUiDeps, "t" | "version" | "invoke">,
     }
     list.replaceChildren(...rows);
   };
-  if (checker) checker.subscribe(paint);
+  const unsub = checker ? checker.subscribe(paint) : () => {};
   paint(checker?.state());
-  return root;
+  return Object.assign(root, { dispose: unsub });
 }

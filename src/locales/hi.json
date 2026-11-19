@@ -753,5 +753,6 @@
   "setup.sum.macOnly": "कंप्यूटर नियंत्रण केवल macOS पर उपलब्ध है।",
   "setup.sum.perms": "{total} में से {n} अनुमतियाँ दी गईं",
   "setup.sum.keyDone": "{provider} की कुंजी सहेजी गई",
-  "setup.sum.keyLater": "अभी कोई कुंजी नहीं जोड़ी गई"
+  "setup.sum.keyLater": "अभी कोई कुंजी नहीं जोड़ी गई",
+  "setup.state.pending": "आपके जवाब की प्रतीक्षा"
 }

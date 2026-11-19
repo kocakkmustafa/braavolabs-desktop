@@ -753,5 +753,6 @@
   "setup.sum.macOnly": "컴퓨터 제어는 macOS에서만 사용할 수 있습니다.",
   "setup.sum.perms": "권한 {total}개 중 {n}개 허용됨",
   "setup.sum.keyDone": "{provider} 키 저장됨",
-  "setup.sum.keyLater": "아직 추가된 키 없음"
+  "setup.sum.keyLater": "아직 추가된 키 없음",
+  "setup.state.pending": "확인 대기 중"
 }

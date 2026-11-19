@@ -37,8 +37,8 @@ export function planSteps(opts: { supported: boolean; hasKey: boolean }): StepId
 // ── permissions ─────────────────────────────────────────────────────────────
 export type PermId = "screen" | "accessibility" | "microphone";
 export const PERM_IDS: readonly PermId[] = ["screen", "accessibility", "microphone"];
-/** "granted" · "later" (the user postponed) · "notGranted" (asked, still not granted) · "needed" (not asked yet). */
-export type PermState = "granted" | "needed" | "notGranted" | "later";
+/** "granted" · "later" (the user postponed) · "pending" (asked, host still reports not granted: macOS does not say denied or undecided) · "notGranted" (the webview says denied) · "needed" (not asked yet). */
+export type PermState = "granted" | "needed" | "pending" | "notGranted" | "later";
 export type MicReport = "granted" | "denied" | "prompt" | "unknown";
 
 export interface HostStatus { supported: boolean; accessibility: boolean; screenRecording: boolean }
@@ -57,7 +57,8 @@ export function mapPermissions(host: HostStatus, mic: MicReport, asked: Readonly
   const granted: Record<PermId, boolean> = { screen: host.screenRecording, accessibility: host.accessibility, microphone: mic === "granted" };
   return PERM_IDS.map(id => {
     if (granted[id]) return { id, state: "granted" as const };
-    if (asked.has(id) || (id === "microphone" && mic === "denied")) return { id, state: "notGranted" as const };
+    if (id === "microphone" && mic === "denied") return { id, state: "notGranted" as const };
+    if (asked.has(id)) return { id, state: "pending" as const };
     if (later.has(id)) return { id, state: "later" as const };
     return { id, state: "needed" as const };
   });

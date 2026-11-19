@@ -1275,8 +1275,9 @@ export function renderWorkspace(deps: UiDeps): void {
   win.append(titlebar, ...(update ? [update.banner] : []), shell);
   root.append(win);
   // BRA-UI-11: first-run setup, behind a default-OFF flag (bv.flags.setup = "1"). Flag off: nothing below is created.
+  let setupUi: ReturnType<typeof mountSetup> | null = null;
   if (isSetupEnabled() && !isSetupDone()) {
-    const setup = mountSetup({ t, invoke: tauriInvoke, vault: deps.vault, providers: DIRECT_PROVIDERS, nav: globalThis.navigator as never, contain: containDialog });
+    const setup = setupUi = mountSetup({ t, invoke: tauriInvoke, vault: deps.vault, providers: DIRECT_PROVIDERS, nav: globalThis.navigator as never, contain: containDialog });
     root.append(setup.element);
   }
 
@@ -2711,6 +2712,8 @@ export function renderWorkspace(deps: UiDeps): void {
     if (activeDispatchStopper === stopDispatch) activeDispatchStopper = null;
     void deps.gov.invalidate().catch(() => {});
     workspaceDisposed = true;
+    update?.dispose();
+    setupUi?.dispose();
     voiceChat?.dismiss();
     attachUi?.dispose();
     attachTray?.take();

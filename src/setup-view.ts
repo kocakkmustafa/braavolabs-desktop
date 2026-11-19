@@ -59,7 +59,13 @@ export function mountSetup(deps: SetupDeps): SetupUi {
 
   const rows = (): PermRow[] => (host ? mapPermissions(host, mic, asked, later) : []);
 
-  const close = () => { if (disposed) return; disposed = true; release?.(); release = undefined; root.remove(); deps.onClose?.(); };
+  const close = () => {
+    if (disposed) return;
+    disposed = true; release?.(); release = undefined;
+    globalThis.removeEventListener?.("focus", onBack);
+    globalThis.document?.removeEventListener?.("visibilitychange", onBack);
+    root.remove(); deps.onClose?.();
+  };
 
   const refreshStatus = async () => {
     if (deps.invoke) {
@@ -100,10 +106,12 @@ export function mountSetup(deps: SetupDeps): SetupUi {
     const title = make("b", undefined, t(`setup.perm.${r.id}`));
     if (r.state !== "needed") title.append(tag);
     text.append(title, make("span", "setup-row-desc", t(`setup.perm.${r.id}Why`)));
+    // macOS applies a Screen Recording grant only after the app is opened again (existing catalogue note).
+    if (r.id === "screen" && (r.state === "pending" || r.state === "notGranted")) text.append(make("span", "setup-row-desc", t("computer.restartNote")));
     const acts = make("div", "setup-row-acts");
     if (r.state === "needed") acts.append(btn(t("setup.later"), "ghost", () => { later.add(r.id); draw(); }));
     if (r.state === "needed" || r.state === "later") acts.append(btn(t("setup.allow"), "", () => void allow(r.id)));
-    if (r.state === "notGranted") acts.append(btn(t("setup.openSettings"), "primary", () => void openSettings(r.id)));
+    if (r.state === "notGranted" || r.state === "pending") acts.append(btn(t("setup.openSettings"), "primary", () => void openSettings(r.id)));
     row.append(text, acts);
     return row;
   };
@@ -119,8 +127,16 @@ export function mountSetup(deps: SetupDeps): SetupUi {
     } finally { busy = false; if (!disposed) draw(); }
   };
   const openSettings = async (id: PermId) => {
-    try { await deps.invoke?.("computer_open_settings", { pane: SETTINGS_PANE[id] }); } catch { note = t("setup.err.settings"); draw(); }
+    try { await deps.invoke?.("computer_open_settings", { pane: SETTINGS_PANE[id] }); } catch { note = t("setup.err.settings"); }
+    await recheck();
   };
+  /** Re-read the real state (after System Settings, or when the user comes back to this window). */
+  const recheck = async () => {
+    if (disposed || busy) return;
+    await refreshStatus();
+    if (!disposed) draw();
+  };
+  const onBack = () => { if (!document.hidden) void recheck(); };
 
   const permissionsStep = () => {
     const r = rows();
@@ -217,6 +233,8 @@ export function mountSetup(deps: SetupDeps): SetupUi {
     steps = planSteps({ supported: !!(host as HostStatus | null)?.supported, hasKey });
     idx = 0;
     draw(true);
+    globalThis.addEventListener?.("focus", onBack);
+    globalThis.document?.addEventListener?.("visibilitychange", onBack);
     if (deps.contain) release = deps.contain(card, () => { /* the setup is not dismissed with Esc: it ends with a button */ });
   })();
   return { element: root, ready, dispose: close };

@@ -753,5 +753,6 @@
   "setup.sum.macOnly": "Il controllo del computer è disponibile solo su macOS.",
   "setup.sum.perms": "{n} permessi su {total} consentiti",
   "setup.sum.keyDone": "Chiave di {provider} salvata",
-  "setup.sum.keyLater": "Nessuna chiave aggiunta"
+  "setup.sum.keyLater": "Nessuna chiave aggiunta",
+  "setup.state.pending": "In attesa di una tua risposta"
 }

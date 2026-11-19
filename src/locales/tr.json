@@ -730,5 +730,6 @@
   "setup.sum.macOnly": "Bilgisayar kontrolü yalnız macOS'ta var.",
   "setup.sum.perms": "{total} izinden {n} tanesi verildi",
   "setup.sum.keyDone": "{provider} anahtarı kaydedildi",
-  "setup.sum.keyLater": "Henüz anahtar eklenmedi"
+  "setup.sum.keyLater": "Henüz anahtar eklenmedi",
+  "setup.state.pending": "Yanıtınız bekleniyor"
 }

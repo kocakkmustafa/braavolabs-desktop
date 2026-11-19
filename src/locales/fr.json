@@ -730,5 +730,6 @@
   "setup.sum.macOnly": "Le contrôle de l'ordinateur n'existe que sous macOS.",
   "setup.sum.perms": "{n} autorisations sur {total} accordées",
   "setup.sum.keyDone": "Clé {provider} enregistrée",
-  "setup.sum.keyLater": "Aucune clé ajoutée pour l'instant"
+  "setup.sum.keyLater": "Aucune clé ajoutée pour l'instant",
+  "setup.state.pending": "En attente de votre réponse"
 }

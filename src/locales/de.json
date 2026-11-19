@@ -730,5 +730,6 @@
   "setup.sum.macOnly": "Die Computersteuerung gibt es nur unter macOS.",
   "setup.sum.perms": "{n} von {total} Berechtigungen erlaubt",
   "setup.sum.keyDone": "Schlüssel für {provider} gespeichert",
-  "setup.sum.keyLater": "Noch kein Schlüssel hinzugefügt"
+  "setup.sum.keyLater": "Noch kein Schlüssel hinzugefügt",
+  "setup.state.pending": "Wartet auf Sie"
 }

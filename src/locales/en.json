@@ -730,5 +730,6 @@
   "setup.sum.macOnly": "Computer control is available on macOS only.",
   "setup.sum.perms": "{n} of {total} permissions allowed",
   "setup.sum.keyDone": "{provider} key saved",
-  "setup.sum.keyLater": "No key added yet"
+  "setup.sum.keyLater": "No key added yet",
+  "setup.state.pending": "Waiting for you"
 }

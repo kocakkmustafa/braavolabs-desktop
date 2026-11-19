@@ -730,5 +730,6 @@
   "setup.sum.macOnly": "El control del equipo solo está disponible en macOS.",
   "setup.sum.perms": "{n} de {total} permisos permitidos",
   "setup.sum.keyDone": "Clave de {provider} guardada",
-  "setup.sum.keyLater": "Aún no se añadió ninguna clave"
+  "setup.sum.keyLater": "Aún no se añadió ninguna clave",
+  "setup.state.pending": "Esperando tu respuesta"
 }
