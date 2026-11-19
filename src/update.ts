@@ -218,7 +218,7 @@ export function createUpdateChecker(deps: UpdateDeps): UpdateChecker {
     subscribe(fn) { subs.add(fn); return () => subs.delete(fn); },
     async auto() {
       if (checkDue(read(store(deps), UPDATE_LAST_KEY), now())) await run();
-      else restore();
+      else if (st.phase === "idle") restore();
     },
     async manual() { await run(); },
     dismiss() {
