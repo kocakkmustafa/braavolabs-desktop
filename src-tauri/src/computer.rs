@@ -97,6 +97,15 @@ pub fn is_bundle_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 200 && s.contains('.') && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
 }
 
+/// The System Settings privacy pane for a permission kind. Anything unknown means Accessibility.
+pub fn settings_anchor(pane: &str) -> &'static str {
+    match pane {
+        "screen" => "Privacy_ScreenCapture",
+        "microphone" => "Privacy_Microphone",
+        _ => "Privacy_Accessibility",
+    }
+}
+
 // ── session ─────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -232,7 +241,7 @@ pub mod host {
         unsafe { CGRequestScreenCaptureAccess() != 0 }
     }
     pub fn open_settings(pane: &str) -> Result<(), String> {
-        let anchor = if pane == "screen" { "Privacy_ScreenCapture" } else { "Privacy_Accessibility" };
+        let anchor = super::settings_anchor(pane);
         Command::new("/usr/bin/open")
             .arg(format!("x-apple.systempreferences:com.apple.preference.security?{anchor}"))
             .status()
@@ -421,6 +430,14 @@ mod tests {
         assert!(blocked_reason(Some("com.example.otherwise"), Some("Otherwise")).is_none());
         assert!(blocked_reason(None, None).is_some());
         assert!(blocked_reason(Some("  "), None).is_some());
+    }
+
+    #[test]
+    fn maps_each_permission_kind_to_its_settings_pane() {
+        assert_eq!(settings_anchor("screen"), "Privacy_ScreenCapture");
+        assert_eq!(settings_anchor("microphone"), "Privacy_Microphone");
+        assert_eq!(settings_anchor("accessibility"), "Privacy_Accessibility");
+        assert_eq!(settings_anchor("anything else"), "Privacy_Accessibility");
     }
 
     #[test]

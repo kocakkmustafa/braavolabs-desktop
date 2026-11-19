@@ -78,6 +78,8 @@ mod daemon;
 mod computer;
 // BRA-UI-10: "Yayına hazırla" — fixed-argv commit/push and the PR call; see publish.rs.
 mod publish;
+// BRA-UI-11: open a release page in the system browser (manual install; no updater); see external.rs.
+mod external;
 
 /// Token bundle mirrored to the CLI's config field names ({token, refreshToken})
 /// so the two clients share one mental model. Serialized as camelCase so the
@@ -4397,6 +4399,13 @@ fn computer_request_access(kind: String) -> Result<bool, String> {
     }
 }
 
+/// BRA-UI-11: the new-version banner's "Download" button. Only https links under the project's own
+/// GitHub account open (external.rs); the user installs the new version by hand.
+#[tauri::command]
+fn open_release_page(url: String) -> Result<(), String> {
+    external::open_in_browser(&url)
+}
+
 #[tauri::command]
 fn computer_open_settings(pane: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
@@ -4668,6 +4677,7 @@ pub fn run() {
             consume_action,
             invalidate_actions,
             set_ui_locale,
+            open_release_page,
             settle_action,
             audit_recent,
             governed_command,
