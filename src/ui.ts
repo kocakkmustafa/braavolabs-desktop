@@ -3214,10 +3214,10 @@ function renderLaneBSection(deps: UiDeps): HTMLElement {
       const cmdText = plan.cliDelegation.join(" ");
       const copyBtn = el("button", "laneb-btn", t("laneB.copy"));
       copyBtn.append(el("span", "laneb-gov-badge", t("gov.governedBadge")));
-      const cmdBox = ltr(el("div", "laneb-cmd mono"));
+      const cmdBox = el("div", "laneb-cmd mono");
       cmdBox.style.display = "none";
       cmdBox.append(el("div", "laneb-cmd-hint", t("laneB.launchHint")));
-      cmdBox.append(el("code", undefined, cmdText));
+      cmdBox.append(ltr(el("code", undefined, cmdText)));
       const gateErr = el("div", "laneb-gate-err");
       gateErr.style.display = "none";
       copyBtn.addEventListener("click", () => {

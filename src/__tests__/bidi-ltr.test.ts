@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ltr } from "../bidi";
 import { renderSentChips } from "../attachments-view";
 import { buildAbout } from "../update-view";
@@ -24,8 +24,7 @@ beforeAll(() => {
     createTextNode: (s: string) => Object.assign(new FakeNode("#text"), { textContent: s }),
   };
 });
-afterEach(() => { /* nothing global to reset */ });
-const restore = () => { (globalThis as { document?: unknown }).document = saved; };
+afterAll(() => { (globalThis as { document?: unknown }).document = saved; });
 const read = (p: string) => readFileSync(new URL(`../${p}`, import.meta.url), "utf8");
 const t = makeT("ar");
 
@@ -47,7 +46,6 @@ describe("RTL lock: paths, targets and identifiers keep dir=ltr (BRA-ADAY-8)", (
     const v = about.find(n => n.className === "mono");
     expect(v[0].dir).toBe("ltr");
     expect(v[0].textContent).toBe("1.2.3");
-    restore();
   });
   it("publish flow (UI-10): branch input, repo/branch rows, done card branch and URL are dir=ltr", () => {
     const src = read("publish-view.ts");
@@ -56,11 +54,17 @@ describe("RTL lock: paths, targets and identifiers keep dir=ltr (BRA-ADAY-8)", (
     expect(src).toMatch(/const br = ltr\(make\("div", "pb-line mono"/);
     expect(src).toMatch(/const link = ltr\(make\("div", "pb-line mono pb-url"/);
   });
+  it("launch-command box keeps the translated hint unforced: only the <code> node is ltr", () => {
+    expect(read("ui.ts")).toContain('const cmdBox = el("div", "laneb-cmd mono");');
+  });
+  it("RTL alignment rule exists for publish lines and changes file names", () => {
+    expect(read("styles.css")).toMatch(/:root\[dir="rtl"\] \.pb-line\[dir="ltr"\][\s\S]*text-align: right/);
+  });
   it("changes list, MCP and launch-command surfaces are dir=ltr; computer-pane bundle ids too", () => {
     const ui = read("ui.ts");
     for (const needle of [
       'ltr(el("input", "changes-path"))', 'ltr(el("span", "changes-file mono"', "dir ? ltr(dirLabel) : dirLabel",
-      'ltr(el("div", "laneb-cmd mono"))', 'ltr(el("span", "mcp-name mono"', 'ltr(el("span", "mcp-cmd mono"', 'ltr(el("span", "mcp-tool-name mono"',
+      'ltr(el("code", undefined, cmdText))', 'ltr(el("span", "mcp-name mono"', 'ltr(el("span", "mcp-cmd mono"', 'ltr(el("span", "mcp-tool-name mono"',
     ]) expect(ui, needle).toContain(needle);
     expect(read("computer-pane.ts")).toContain('ltr(el("span", "cp-sub mono", a.bundleId))');
   });
