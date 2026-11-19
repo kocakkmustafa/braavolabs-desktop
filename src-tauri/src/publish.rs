@@ -43,6 +43,7 @@ pub enum PubErr {
     RateLimit,
     Network,
     Conflict,
+    UnsafeConfig,
     Unknown,
 }
 
@@ -68,6 +69,7 @@ impl PubErr {
             PubErr::RateLimit => "rateLimit",
             PubErr::Network => "network",
             PubErr::Conflict => "conflict",
+            PubErr::UnsafeConfig => "unsafeConfig",
             PubErr::Unknown => "unknown",
         }
     }
@@ -177,9 +179,9 @@ pub fn push_argv_denied(argv: &[String], expected_url: &str) -> bool {
             return true;
         }
     }
-    // exactly: push <the verified explicit URL> <branch>. Never the `origin` name: its URL, pushurl and any
+    // exactly: push --no-verify <the verified explicit URL> <branch>. Never the `origin` name: its URL, pushurl and any
     // insteadOf rewrite live in repo config the user's tooling (or a hostile repo) controls.
-    !(a.len() == 3 && a[0] == "push" && a[1] == expected_url && is_valid_branch(a[2]))
+    !(a.len() == 4 && a[0] == "push" && a[1] == "--no-verify" && a[2] == expected_url && is_valid_branch(a[3]))
 }
 
 /// The one URL a push may go to, built from the approved owner/repo (never from `origin`'s raw string).
@@ -260,7 +262,7 @@ pub struct GitOut {
 
 /// Run `git` with fixed args (no shell), never prompting. `extra_env` carries nothing secret.
 pub fn run_git(cwd: &str, args: &[&str], include: Option<&Path>) -> Result<GitOut, PubErr> {
-    run_git_with(cwd, args, include, &[], false)
+    run_git_with(cwd, args, include, &[], None)
 }
 
 #[cfg(windows)]
@@ -271,12 +273,16 @@ const NULL_CONFIG: &str = "/dev/null";
 /// `hardened` is for the push that carries the token: repo-level config must not be able to redirect the
 /// target, weaken TLS, add a proxy, run a hook or an ssh command, and the system/global config and
 /// proxy environment are not consulted. `extra_env` carries nothing secret.
-pub fn run_git_with(cwd: &str, args: &[&str], include: Option<&Path>, extra_env: &[(&str, &str)], hardened: bool) -> Result<GitOut, PubErr> {
+pub fn run_git_with(cwd: &str, args: &[&str], include: Option<&Path>, extra_env: &[(&str, &str)], hardened: Option<&Path>) -> Result<GitOut, PubErr> {
     let mut cmd = Command::new("git");
-    if hardened {
-        for c in ["http.sslVerify=true", "http.proxy=", "core.hooksPath=/dev/null", "core.sshCommand=ssh", "credential.helper=", "http.followRedirects=false"] {
+    if let Some(hooks) = hardened {
+        // Repo config cannot weaken TLS, add a proxy/CA, run a hook or an ssh command on this call: the plain keys
+        // AND the URL-scoped forms (`http.<url>.*` beats the plain key) are pinned, and hooks point at an EMPTY dir.
+        for c in ["http.sslVerify=true", "http.proxy=", "http.sslCAInfo=", "http.https://github.com/.sslVerify=true", "http.https://github.com/.proxy=", "http.https://github.com/.sslCAInfo=",
+                  "core.sshCommand=ssh", "core.gitProxy=", "credential.helper=", "http.followRedirects=false"] {
             cmd.arg("-c").arg(c);
         }
+        cmd.arg("-c").arg(format!("core.hooksPath={}", hooks.display()));
         cmd.env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", NULL_CONFIG);
         for v in ["GIT_SSL_NO_VERIFY", "http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND"] {
             cmd.env_remove(v);
@@ -305,17 +311,31 @@ pub fn run_git_with(cwd: &str, args: &[&str], include: Option<&Path>, extra_env:
     })
 }
 
-/// True only when git, with repo/global/system config neutralised and then with the repo's own config, resolves the
-/// explicit push URL to itself: a `url.<x>.insteadOf` / `pushInsteadOf` rewrite in the repo would send the push (and
-/// the token) elsewhere, so any difference refuses the push.
-pub fn push_url_unrewritten(cwd: &str, url: &str) -> bool {
-    match run_git_with(cwd, &["ls-remote", "--get-url", url], None, &[], true) {
-        Ok(o) if o.ok && o.stdout.trim() == url => {}
-        _ => return false,
+/// A token push is only made from a repo whose own config cannot redirect or weaken it. Any repo-level `http.*`,
+/// `url.*` (insteadOf/pushInsteadOf), `remote.origin.pushurl` or `core.sshCommand/hooksPath/gitProxy` key refuses it
+/// (system/global config is not read on the hardened call). `remote.origin.url` itself is NOT a reason: the push
+/// never goes to `origin`, it goes to the explicit verified URL. `git config` exit 1 with no output = no such key.
+pub fn push_config_clean(cwd: &str, _hooks: &Path) -> bool {
+    // No `-c` pins here (they would show up in the listing themselves); system/global config are switched off by env.
+    // `include.*` is refused too: an included file could carry any of the keys.
+    let re = r"^(http\.|url\.|include\.|includeif\.|remote\.origin\.pushurl|core\.(sshcommand|hookspath|gitproxy))";
+    let env = [("GIT_CONFIG_NOSYSTEM", "1"), ("GIT_CONFIG_GLOBAL", NULL_CONFIG)];
+    matches!(run_git_with(cwd, &["config", "--get-regexp", re], None, &env, None), Ok(o) if !o.ok && o.stdout.trim().is_empty())
+}
+
+/// The token push, as ONE call: re-check the repo config, then push to the explicit URL with the hardened flags.
+/// Doing the check here, immediately before the push, leaves no window for a rewrite in between (the caller
+/// passes the same URL it verified and the token binding covers).
+pub fn guarded_push(cwd: &str, url: &str, branch: &str, include: Option<&Path>, hooks: &Path) -> Result<GitOut, PubErr> {
+    let argv: Vec<String> = ["push", "--no-verify", url, branch].iter().map(|s| s.to_string()).collect();
+    if argv[3] != branch || !is_valid_branch(branch) || argv.iter().any(|a| a.starts_with('+') || a.starts_with("--force") || a == "--delete") {
+        return Err(PubErr::InvalidBranch);
     }
-    // `ls-remote --get-url` ignores pushInsteadOf, so ANY url.*.insteadOf / pushInsteadOf in the repo's own config
-    // refuses the push (exit 1 = no such key). Global/system config is not read on the hardened push, so it cannot matter.
-    matches!(run_git_with(cwd, &["config", "--get-regexp", r"^url\..*\.(push)?insteadof$"], None, &[], true), Ok(o) if !o.ok && o.stdout.trim().is_empty())
+    if !push_config_clean(cwd, hooks) {
+        return Err(PubErr::UnsafeConfig);
+    }
+    let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+    run_git_with(cwd, &args, include, &[], Some(hooks))
 }
 
 pub fn current_branch(cwd: &str) -> Option<String> {
@@ -396,7 +416,7 @@ pub fn commit_on_new_branch(cwd: &str, branch: &str, title: &str, body: &str, fi
     // Literal pathspecs: a changed file named `:(top)x` or `*.ts` is that file, never pathspec magic or a glob.
     let mut add: Vec<&str> = vec!["--literal-pathspecs", "add", "--"];
     add.extend(files.iter().map(|s| s.as_str()));
-    match run_git_with(cwd, &add, None, &[("GIT_LITERAL_PATHSPECS", "1")], false) {
+    match run_git_with(cwd, &add, None, &[("GIT_LITERAL_PATHSPECS", "1")], None) {
         Ok(o) if o.ok => {}
         _ => {
             undo();
@@ -588,7 +608,8 @@ mod tests {
         let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let url = push_url("o", "r", true);
         assert_eq!(url, "https://github.com/o/r.git");
-        assert!(!push_argv_denied(&a(&["push", &url, "braavo/x"]), &url));
+        assert!(!push_argv_denied(&a(&["push", "--no-verify", &url, "braavo/x"]), &url));
+        assert!(push_argv_denied(&a(&["push", &url, "braavo/x"]), &url), "--no-verify is part of the shape");
         for bad in [
             a(&["push", "--force", &url, "x"]),
             a(&["push", &url, "+x"]),
@@ -879,29 +900,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    #[test]
-    fn push_url_is_refused_when_repo_config_rewrites_it() {
-        let d = tmp("rewrite");
-        init_repo(&d);
-        let cwd = d.to_str().unwrap();
-        let url = push_url("o", "r", true);
-        assert!(push_url_unrewritten(cwd, &url));
-        sh(&d, &["config", "url.https://evil.example/.insteadOf", "https://github.com/"]);
-        assert!(!push_url_unrewritten(cwd, &url), "insteadOf rewrite must be refused");
-        sh(&d, &["config", "--unset", "url.https://evil.example/.insteadOf"]);
-        sh(&d, &["config", "url.https://evil.example/.pushInsteadOf", "https://github.com/"]);
-        assert!(!push_url_unrewritten(cwd, &url), "pushInsteadOf rewrite must be refused");
-        let _ = std::fs::remove_dir_all(&d);
+    fn empty_hooks(root: &Path) -> std::path::PathBuf {
+        let h = root.join("empty-hooks");
+        std::fs::create_dir_all(&h).unwrap();
+        h
     }
 
     #[test]
-    fn hardened_push_ignores_repo_hooks_and_proxy_config() {
-        let root = tmp("hard");
+    fn push_config_check_refuses_every_redirecting_repo_key() {
+        let root = tmp("cfg");
+        let d = root.join("w");
+        std::fs::create_dir_all(&d).unwrap();
+        init_repo(&d);
+        sh(&d, &["remote", "add", "origin", "https://github.com/o/r.git"]);
+        let (cwd, hooks) = (d.to_str().unwrap(), empty_hooks(&root));
+        assert!(push_config_clean(cwd, &hooks), "a normal clone (origin url only) is clean");
+        for (key, val) in [
+            ("url.https://evil.example/.insteadOf", "https://github.com/"),
+            ("url.https://evil.example/.pushInsteadOf", "https://github.com/"),
+            ("http.proxy", "http://127.0.0.1:9"),
+            ("http.sslVerify", "false"),
+            ("http.https://github.com/.sslVerify", "false"),
+            ("http.https://github.com/.proxy", "http://127.0.0.1:9"),
+            ("http.sslCAInfo", "/tmp/evil.pem"),
+            ("remote.origin.pushurl", "https://evil.example/o/r.git"),
+            ("core.sshCommand", "/tmp/evil"),
+            ("core.hooksPath", "/tmp/evil-hooks"),
+            ("core.gitProxy", "/tmp/evil"),
+        ] {
+            sh(&d, &["config", key, val]);
+            assert!(!push_config_clean(cwd, &hooks), "{key} must refuse the push");
+            sh(&d, &["config", "--unset", key]);
+            assert!(push_config_clean(cwd, &hooks), "clean again after unsetting {key}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn guarded_push_checks_and_pushes_in_one_call_with_no_hooks() {
+        let root = tmp("guard");
         let (work, bare) = (root.join("w"), root.join("o.git"));
         std::fs::create_dir_all(&work).unwrap();
         std::fs::create_dir_all(&bare).unwrap();
         sh(&bare, &["init", "-q", "--bare", "-b", "main"]);
         init_repo(&work);
+        sh(&work, &["checkout", "-q", "-b", "braavo/g"]);
         let marker = root.join("hook-ran");
         let hook = work.join(".git/hooks/pre-push");
         std::fs::write(&hook, format!("#!/bin/sh\ntouch {}\nexit 0\n", marker.display())).unwrap();
@@ -910,10 +953,18 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+        let (cwd, hooks, url) = (work.to_str().unwrap(), empty_hooks(&root), bare.to_str().unwrap());
+        // a rewrite planted between "verification" and the push is caught by the check inside the same call
         sh(&work, &["config", "http.proxy", "http://127.0.0.1:9"]);
-        let o = run_git_with(work.to_str().unwrap(), &["push", bare.to_str().unwrap(), "main"], None, &[], true).unwrap();
+        assert_eq!(guarded_push(cwd, url, "braavo/g", None, &hooks).err(), Some(PubErr::UnsafeConfig));
+        sh(&work, &["config", "--unset", "http.proxy"]);
+        // a hostile branch never reaches git
+        assert_eq!(guarded_push(cwd, url, "+x:y", None, &hooks).err(), Some(PubErr::InvalidBranch));
+        let o = guarded_push(cwd, url, "braavo/g", None, &hooks).unwrap();
         assert!(o.ok, "{}", o.stderr);
-        assert!(!marker.exists(), "pre-push hook must not run on the hardened push");
+        assert!(!marker.exists(), "the repo's pre-push hook must not run on the token push");
+        let heads = Command::new("git").args(["branch", "--list"]).current_dir(&bare).output().unwrap();
+        assert!(String::from_utf8_lossy(&heads.stdout).contains("braavo/g"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

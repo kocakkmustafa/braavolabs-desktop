@@ -964,9 +964,8 @@ fn publish_push_blocking(app: AppHandle, token: String, cwd: String, branch: Str
     let slug = format!("{owner}/{repo}");
     // The push goes to an explicit URL built from the approved owner/repo, never to the `origin` name.
     let url = publish::push_url(&owner, &repo, https);
-    let argv: Vec<String> = ["push", url.as_str(), branch.as_str()].iter().map(|s| s.to_string()).collect();
+    let argv: Vec<String> = ["push", "--no-verify", url.as_str(), branch.as_str()].iter().map(|s| s.to_string()).collect();
     if publish::push_argv_denied(&argv, &url) { return Err(PubErr::InvalidBranch.msg()); } // force/delete/refspec/other target: never
-    if !publish::push_url_unrewritten(&cwd, &url) { return Err(PubErr::NotGithub.msg()); } // insteadOf/pushInsteadOf rewrite
     if publish::current_branch(&cwd).as_deref() != Some(branch.as_str()) { return Err(PubErr::WrongBranch.msg()); }
     let pat = if https {
         let dir = config_dir(&app)?;
@@ -982,8 +981,11 @@ fn publish_push_blocking(app: AppHandle, token: String, cwd: String, branch: Str
         }
         None => None,
     };
-    let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-    let out = publish::run_git_with(&cwd, &args, include.as_ref().map(|i| i.path()), &[], true).map_err(|e| e.msg())?;
+    // An empty hooks dir in the app's own config dir: core.hooksPath points here for the token push.
+    let hooks = config_dir(&app)?.join("empty-hooks");
+    fs::create_dir_all(&hooks).map_err(|_| PubErr::Unknown.msg())?;
+    // Config re-check + push happen inside ONE call (publish::guarded_push), right before git runs.
+    let out = publish::guarded_push(&cwd, &url, &branch, include.as_ref().map(|i| i.path()), &hooks).map_err(|e| e.msg())?;
     drop(include);
     if out.ok {
         audit_publish(&app, "git.push", "success", &format!("pushed {branch} to {slug}"), ts);
