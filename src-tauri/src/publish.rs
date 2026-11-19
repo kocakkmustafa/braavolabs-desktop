@@ -3,12 +3,13 @@
 //! Deliberately NOT a general git or HTTP bridge. Three governed actions, each with fixed argv and
 //! a one-time approval token bound to its exact fields (see `lib.rs`):
 //!   * `git.commit` — `git switch -c <branch>`, `git add -- <changed files>`, `git commit`
-//!   * `git.push`   — `git push -u origin <branch>` (never force, never delete, never a refspec)
+//!   * `git.push`   — `git push --no-verify <verified github.com url> <branch>` (never force, delete or a refspec; no token)
 //!   * `github.pr`  — `POST /repos/{owner}/{repo}/pulls` on api.github.com with the user's own PAT
 //!
-//! The PAT lives only in the OS keychain. It is read here, inside the host, for exactly two uses
-//! (a 0600 git config include for the push, a stdin curl config for the PR) and is never returned
-//! to the webview, logged, put in argv, or put in an error string. Errors cross the boundary as
+//! The PAT lives only in the OS keychain. It is read here, inside the host, for exactly ONE use: the
+//! `POST /pulls` call (a stdin curl config). It never touches `git push`, which authenticates with the
+//! user's own git identity (credential helper or SSH). It is never returned to the webview, logged,
+//! put in argv, or put in an error string. Errors cross the boundary as
 //! stable codes (`publish:<code>`), never as git/curl output (which can echo a remote URL).
 
 use std::io::{Read, Write};
@@ -44,6 +45,7 @@ pub enum PubErr {
     Network,
     Conflict,
     UnsafeConfig,
+    GitAuth,
     ChangesChanged,
     Unknown,
 }
@@ -71,6 +73,7 @@ impl PubErr {
             PubErr::Network => "network",
             PubErr::Conflict => "conflict",
             PubErr::UnsafeConfig => "unsafeConfig",
+            PubErr::GitAuth => "gitAuth",
             PubErr::ChangesChanged => "changesChanged",
             PubErr::Unknown => "unknown",
         }
@@ -249,21 +252,6 @@ pub fn pat_shape_ok(pat: &str) -> bool {
     p.len() >= 20 && p.len() <= 255 && p.bytes().all(|b| b.is_ascii_graphic())
 }
 
-// ── base64 (header only; no crate) ───────────────────────────────────────────
-
-pub fn base64(input: &[u8]) -> String {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
-    for c in input.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
-        out.push(T[(n >> 18) as usize & 63] as char);
-        out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
-    }
-    out
-}
-
 // ── git ──────────────────────────────────────────────────────────────────────
 
 pub struct GitOut {
@@ -273,8 +261,8 @@ pub struct GitOut {
 }
 
 /// Run `git` with fixed args (no shell), never prompting. `extra_env` carries nothing secret.
-pub fn run_git(cwd: &str, args: &[&str], include: Option<&Path>) -> Result<GitOut, PubErr> {
-    run_git_with(cwd, args, include, &[], None)
+pub fn run_git(cwd: &str, args: &[&str]) -> Result<GitOut, PubErr> {
+    run_git_with(cwd, args, &[], None)
 }
 
 #[cfg(windows)]
@@ -282,27 +270,17 @@ const NULL_CONFIG: &str = "NUL";
 #[cfg(not(windows))]
 const NULL_CONFIG: &str = "/dev/null";
 
-/// `hardened` is for the push that carries the token: repo-level config must not be able to redirect the
-/// target, weaken TLS, add a proxy, run a hook or an ssh command, and the system/global config and
-/// proxy environment are not consulted. `extra_env` carries nothing secret.
-pub fn run_git_with(cwd: &str, args: &[&str], include: Option<&Path>, extra_env: &[(&str, &str)], hardened: Option<&Path>) -> Result<GitOut, PubErr> {
+/// `hardened` is for the push: the repo's own config must not run a hook on it (hooks point at an EMPTY dir) or switch TLS
+/// verification off. No token is involved: the push authenticates with the user's own git identity (credential helper or
+/// SSH), so the user's global config is read as usual. `extra_env` carries nothing secret.
+pub fn run_git_with(cwd: &str, args: &[&str], extra_env: &[(&str, &str)], hardened: Option<&Path>) -> Result<GitOut, PubErr> {
     let mut cmd = Command::new("git");
     if let Some(hooks) = hardened {
-        // Repo config cannot weaken TLS, add a proxy/CA, run a hook or an ssh command on this call: the plain keys
-        // AND the URL-scoped forms (`http.<url>.*` beats the plain key) are pinned, and hooks point at an EMPTY dir.
-        for c in ["http.sslVerify=true", "http.proxy=", "http.sslCAInfo=", "http.https://github.com/.sslVerify=true", "http.https://github.com/.proxy=", "http.https://github.com/.sslCAInfo=",
-                  "core.sshCommand=ssh", "core.gitProxy=", "credential.helper=", "http.followRedirects=false"] {
+        for c in ["http.sslVerify=true", "http.https://github.com/.sslVerify=true", "http.followRedirects=false"] {
             cmd.arg("-c").arg(c);
         }
         cmd.arg("-c").arg(format!("core.hooksPath={}", hooks.display()));
-        cmd.env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", NULL_CONFIG);
-        for v in ["GIT_SSL_NO_VERIFY", "http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND"] {
-            cmd.env_remove(v);
-        }
-    }
-    if let Some(p) = include {
-        cmd.arg("-c").arg(format!("include.path={}", p.display()));
-        cmd.arg("-c").arg("credential.helper=");
+        cmd.env_remove("GIT_SSL_NO_VERIFY");
     }
     for (k, v) in extra_env {
         cmd.env(k, v);
@@ -347,7 +325,7 @@ fn remote_keys_ok(listing: &str, expected: &(String, String)) -> bool {
     true
 }
 
-/// A token push is only made from a repo whose own config cannot redirect or weaken it. Any repo-level `http.*`,
+/// A push is only made from a repo whose own config cannot redirect or weaken it. Any repo-level `http.*`,
 /// `url.*` (insteadOf/pushInsteadOf), `include.*` or `core.sshCommand/hooksPath/gitProxy` key refuses it, and the
 /// `remote.*` keys must pass `remote_keys_ok` (system/global config is not read: env switches them off).
 /// `git config` exit 1 with no output = no such key.
@@ -355,18 +333,18 @@ pub fn push_config_clean(cwd: &str, expected: &(String, String)) -> bool {
     // No `-c` pins here (they would show up in the listing themselves).
     let re = r"^(http\.|url\.|include\.|includeif\.|core\.(sshcommand|hookspath|gitproxy))";
     let env = [("GIT_CONFIG_NOSYSTEM", "1"), ("GIT_CONFIG_GLOBAL", NULL_CONFIG)];
-    if !matches!(run_git_with(cwd, &["config", "--get-regexp", re], None, &env, None), Ok(o) if !o.ok && o.stdout.trim().is_empty()) {
+    if !matches!(run_git_with(cwd, &["config", "--get-regexp", re], &env, None), Ok(o) if !o.ok && o.stdout.trim().is_empty()) {
         return false;
     }
-    match run_git_with(cwd, &["config", "--get-regexp", r"^remote\."], None, &env, None) {
+    match run_git_with(cwd, &["config", "--get-regexp", r"^remote\."], &env, None) {
         Ok(o) if o.ok => remote_keys_ok(&o.stdout, expected),
         Ok(o) => o.stdout.trim().is_empty(), // exit 1: no remote keys at all
         Err(_) => false,
     }
 }
 
-/// Remove leftovers of a crashed push: auth includes (`gh-push-*`, which held the token header) and hooks dirs (`hooks-*`) older
-/// than `min_age` (zero at startup). Best effort; never touches anything else.
+/// Remove leftovers of a crashed push: hooks dirs (`hooks-*`) older than `min_age` (zero at startup). Best effort; never
+/// touches anything else.
 pub fn sweep_stale(tmp_root: &Path, min_age: std::time::Duration) {
     let Ok(rd) = std::fs::read_dir(tmp_root) else { return };
     for e in rd.flatten() {
@@ -375,9 +353,7 @@ pub fn sweep_stale(tmp_root: &Path, min_age: std::time::Duration) {
         if !old {
             continue;
         }
-        if name.starts_with("gh-push-") && e.path().is_file() {
-            let _ = std::fs::remove_file(e.path());
-        } else if name.starts_with("hooks-") && e.path().is_dir() {
+        if name.starts_with("hooks-") && e.path().is_dir() {
             let _ = std::fs::remove_dir_all(e.path());
         }
     }
@@ -406,22 +382,26 @@ impl Drop for TempHooks {
     }
 }
 
-/// The token push, as ONE call: re-check the repo config, push to the explicit URL with the hardened flags (a fresh empty
-/// hooks dir under `tmp_root`, deleted afterwards), then re-check that the config did not change during the push.
-/// KNOWN LIMIT: repo configuration + a token-carrying `git push` remain an inherent exposure; this narrows it, it does not
-/// remove it (a stricter option, a temporary GIT_DIR, was deliberately not taken).
-pub fn guarded_push(cwd: &str, url: &str, branch: &str, include: Option<&Path>, tmp_root: &Path) -> Result<GitOut, PubErr> {
+/// The push, as ONE call: re-check the repo config, push to the explicit URL with the hardened flags (a fresh empty hooks
+/// dir under `tmp_root`, deleted afterwards), then re-check that the config did not change during the push. No token is
+/// involved: authentication is the user's own git identity (credential helper or SSH), never prompted for (`GIT_TERMINAL_PROMPT=0`).
+pub fn guarded_push(cwd: &str, url: &str, branch: &str, tmp_root: &Path) -> Result<GitOut, PubErr> {
+    guarded_push_inner(cwd, url, branch, tmp_root, true)
+}
+
+/// `verify_target` is false only in tests that push to a local bare repository (not a github.com URL).
+fn guarded_push_inner(cwd: &str, url: &str, branch: &str, tmp_root: &Path, verify_target: bool) -> Result<GitOut, PubErr> {
     let argv: Vec<String> = ["push", "--no-verify", url, branch].iter().map(|s| s.to_string()).collect();
     if argv[3] != branch || !is_valid_branch(branch) || argv.iter().any(|a| a.starts_with('+') || a.starts_with("--force") || a == "--delete") {
         return Err(PubErr::InvalidBranch);
     }
     let expected = parse_github_remote(url).map(|(o, r, _)| (o, r)).unwrap_or_default();
-    if !push_config_clean(cwd, &expected) {
+    if !push_config_clean(cwd, &expected) || (verify_target && !push_target_matches(cwd, url, &expected)) {
         return Err(PubErr::UnsafeConfig);
     }
     let hooks = TempHooks::create(tmp_root)?;
     let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-    let out = run_git_with(cwd, &args, include, &[], Some(&hooks.0))?;
+    let out = run_git_with(cwd, &args, &[], Some(&hooks.0))?;
     drop(hooks);
     if !push_config_clean(cwd, &expected) {
         return Err(PubErr::UnsafeConfig);
@@ -429,21 +409,35 @@ pub fn guarded_push(cwd: &str, url: &str, branch: &str, include: Option<&Path>, 
     Ok(out)
 }
 
+/// The push goes where the user approved: `origin`'s push URL (as git resolves it, rewrites included) and the explicit URL
+/// (resolved the same way, so a global `insteadOf` is seen) must both name the approved owner/repo on github.com. A rewrite
+/// to another repository or host means no push. https and ssh forms of the same repository are the same target.
+pub fn push_target_matches(cwd: &str, url: &str, expected: &(String, String)) -> bool {
+    let same = |o: &GitOut| {
+        o.ok && matches!(parse_github_remote(o.stdout.trim()), Some((a, b, _)) if a == expected.0 && b == expected.1)
+    };
+    match run_git(cwd, &["remote", "get-url", "--push", "origin"]) {
+        Ok(o) if same(&o) => {}
+        _ => return false,
+    }
+    matches!(run_git(cwd, &["ls-remote", "--get-url", url]), Ok(o) if same(&o))
+}
+
 pub fn current_branch(cwd: &str) -> Option<String> {
-    let o = run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"], None).ok()?;
+    let o = run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).ok()?;
     let b = o.stdout.trim().to_string();
     (o.ok && !b.is_empty() && b != "HEAD").then_some(b)
 }
 
 /// The repository root. `git status` reports paths relative to it, so `git add` must run there, not in a subfolder.
 pub fn repo_root(cwd: &str) -> Option<String> {
-    let o = run_git(cwd, &["rev-parse", "--show-toplevel"], None).ok()?;
+    let o = run_git(cwd, &["rev-parse", "--show-toplevel"]).ok()?;
     let r = o.stdout.trim().to_string();
     (o.ok && !r.is_empty()).then_some(r)
 }
 
 pub fn origin_remote(cwd: &str) -> Option<(String, String, bool)> {
-    let o = run_git(cwd, &["remote", "get-url", "origin"], None).ok()?;
+    let o = run_git(cwd, &["remote", "get-url", "origin"]).ok()?;
     if !o.ok {
         return None;
     }
@@ -452,7 +446,7 @@ pub fn origin_remote(cwd: &str) -> Option<(String, String, bool)> {
 
 /// The repository's default branch (what a PR targets). Falls back to `main`.
 pub fn default_base(cwd: &str) -> String {
-    if let Ok(o) = run_git(cwd, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], None) {
+    if let Ok(o) = run_git(cwd, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]) {
         if o.ok {
             if let Some(b) = o.stdout.trim().strip_prefix("origin/") {
                 if is_valid_branch(b) {
@@ -495,7 +489,7 @@ fn has_status_code(line: &str, code: &str) -> bool {
     false
 }
 
-/// Classify a failed `git push`. Only git's own diagnostic lines count (`remote:`, `fatal:`, `error:`, ` ! [...]`), and
+/// Classify a failed `git push` (authentication problems all become `GitAuth`: the app's key plays no part in the push). Only git's own diagnostic lines count (`remote:`, `fatal:`, `error:`, ` ! [...]`), and
 /// HTTP codes only as whole numbers, so a repository called `app404` or a number in a URL cannot steer the result.
 pub fn classify_push_failure(stderr: &str) -> PubErr {
     let lines: Vec<String> = stderr
@@ -508,12 +502,14 @@ pub fn classify_push_failure(stderr: &str) -> PubErr {
     let code = |c: &str| any(&|l: &str| has_status_code(l, c));
     if has("could not resolve host") || any(&|l: &str| l.contains("unable to access") && (l.contains("timed out") || l.contains("resolve") || l.contains("connect"))) || has("network is unreachable") || has("connection refused") {
         PubErr::Network
-    } else if code("401") || has("bad credentials") || has("authentication failed") || has("invalid username or password") {
-        PubErr::Unauthorized
-    } else if code("403") || has("permission to") || has("permission denied") || has("write access") {
-        PubErr::NoWriteAccess
-    } else if has("repository not found") || code("404") {
-        PubErr::NotFound
+    } else if has("could not read username") || has("could not read password") || has("terminal prompts disabled") || has("no such device or address")
+        || has("permission denied (publickey") || has("host key verification failed") || has("could not read from remote repository")
+        || code("401") || code("403") || code("404") || has("bad credentials") || has("authentication failed") || has("invalid username or password")
+        || has("permission to") || has("permission denied") || has("write access") || has("repository not found")
+    {
+        // The push signs in with the user's own git identity, never with the app's access key: a missing or refused identity, a
+        // wrong account or a repository this account cannot see all need the same fix, in Git.
+        PubErr::GitAuth
     } else if has("non-fast-forward") || has("fetch first") || has("[rejected]") || has("protected branch") || has("hook declined") || has("denied to") {
         PubErr::PushRejected
     } else {
@@ -526,25 +522,25 @@ pub fn classify_push_failure(stderr: &str) -> PubErr {
 pub fn commit_on_new_branch(cwd: &str, branch: &str, title: &str, body: &str, files: &[String]) -> Result<String, PubErr> {
     let prev = current_branch(cwd);
     // Detached HEAD has no branch to go back to: remember the commit instead.
-    let prev_sha = run_git(cwd, &["rev-parse", "HEAD"], None).ok().filter(|o| o.ok).map(|o| o.stdout.trim().to_string());
-    let sw = run_git(cwd, &["switch", "-c", branch], None)?;
+    let prev_sha = run_git(cwd, &["rev-parse", "HEAD"]).ok().filter(|o| o.ok).map(|o| o.stdout.trim().to_string());
+    let sw = run_git(cwd, &["switch", "-c", branch])?;
     if !sw.ok {
         return Err(classify_commit_failure(&sw.stderr));
     }
     let undo = || {
         let back = match (&prev, &prev_sha) {
-            (Some(p), _) => run_git(cwd, &["switch", p], None),
-            (None, Some(sha)) => run_git(cwd, &["switch", "--detach", sha], None),
+            (Some(p), _) => run_git(cwd, &["switch", p]),
+            (None, Some(sha)) => run_git(cwd, &["switch", "--detach", sha]),
             _ => return,
         };
         if back.map(|o| o.ok).unwrap_or(false) {
-            let _ = run_git(cwd, &["branch", "-d", branch], None);
+            let _ = run_git(cwd, &["branch", "-d", branch]);
         }
     };
     // Literal pathspecs: a changed file named `:(top)x` or `*.ts` is that file, never pathspec magic or a glob.
     let mut add: Vec<&str> = vec!["--literal-pathspecs", "add", "--"];
     add.extend(files.iter().map(|s| s.as_str()));
-    match run_git_with(cwd, &add, None, &[("GIT_LITERAL_PATHSPECS", "1")], None) {
+    match run_git_with(cwd, &add, &[("GIT_LITERAL_PATHSPECS", "1")], None) {
         Ok(o) if o.ok => {}
         _ => {
             undo();
@@ -556,7 +552,7 @@ pub fn commit_on_new_branch(cwd: &str, branch: &str, title: &str, body: &str, fi
         commit.push("-m");
         commit.push(body.trim());
     }
-    match run_git(cwd, &commit, None) {
+    match run_git(cwd, &commit) {
         Ok(o) if o.ok => {}
         Ok(o) => {
             undo();
@@ -567,38 +563,7 @@ pub fn commit_on_new_branch(cwd: &str, branch: &str, title: &str, body: &str, fi
             return Err(e);
         }
     }
-    Ok(run_git(cwd, &["rev-parse", "--short", "HEAD"], None).map(|o| o.stdout.trim().to_string()).unwrap_or_default())
-}
-
-/// A 0600 git config include holding the auth header for one push; removed on drop.
-pub struct AuthInclude {
-    path: std::path::PathBuf,
-}
-impl AuthInclude {
-    pub fn create(dir: &Path, pat: &str, tag: &str) -> Result<Self, PubErr> {
-        let path = dir.join(format!("gh-push-{tag}.cfg"));
-        let b64 = base64(format!("x-access-token:{}", pat.trim()).as_bytes());
-        let body = format!("[http \"https://github.com/\"]\n\textraheader = Authorization: Basic {b64}\n");
-        #[cfg(unix)]
-        let f = {
-            use std::os::unix::fs::OpenOptionsExt;
-            std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)
-        };
-        #[cfg(not(unix))]
-        let f = std::fs::OpenOptions::new().write(true).create_new(true).open(&path);
-        let mut f = f.map_err(|_| PubErr::Unknown)?;
-        let guard = AuthInclude { path };
-        f.write_all(body.as_bytes()).map_err(|_| PubErr::Unknown)?;
-        Ok(guard)
-    }
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-}
-impl Drop for AuthInclude {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
+    Ok(run_git(cwd, &["rev-parse", "--short", "HEAD"]).map(|o| o.stdout.trim().to_string()).unwrap_or_default())
 }
 
 // ── GitHub PR over curl (no new crate; the token travels on stdin only) ──────
@@ -798,15 +763,6 @@ mod tests {
     }
 
     #[test]
-    fn base64_matches_rfc4648() {
-        assert_eq!(base64(b""), "");
-        assert_eq!(base64(b"f"), "Zg==");
-        assert_eq!(base64(b"fo"), "Zm8=");
-        assert_eq!(base64(b"foo"), "Zm9v");
-        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
-    }
-
-    #[test]
     fn http_status_table() {
         assert_eq!(classify_http(401, ""), PubErr::Unauthorized);
         assert_eq!(classify_http(403, "Resource not accessible by personal access token"), PubErr::NoWriteAccess);
@@ -821,13 +777,15 @@ mod tests {
     #[test]
     fn push_failures_classified_without_exposing_output() {
         assert_eq!(classify_push_failure("fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host: github.com"), PubErr::Network);
-        assert_eq!(classify_push_failure("remote: Permission to o/r.git denied to u.\nfatal: unable to access '...': The requested URL returned error: 403"), PubErr::NoWriteAccess);
-        assert_eq!(classify_push_failure("fatal: Authentication failed for 'https://github.com/o/r.git/'"), PubErr::Unauthorized);
+        assert_eq!(classify_push_failure("remote: Permission to o/r.git denied to u.\nfatal: unable to access '...': The requested URL returned error: 403"), PubErr::GitAuth);
+        assert_eq!(classify_push_failure("fatal: Authentication failed for 'https://github.com/o/r.git/'"), PubErr::GitAuth);
+        assert_eq!(classify_push_failure("fatal: could not read Username for 'https://github.com': terminal prompts disabled"), PubErr::GitAuth);
+        assert_eq!(classify_push_failure("git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository."), PubErr::GitAuth);
         assert_eq!(classify_push_failure(" ! [rejected]        x -> x (non-fast-forward)"), PubErr::PushRejected);
         assert_eq!(classify_push_failure("remote: error: GH006: Protected branch update failed"), PubErr::PushRejected);
         assert_eq!(classify_commit_failure("fatal: a branch named 'x' already exists"), PubErr::BranchExists);
         assert_eq!(classify_commit_failure("*** Please tell me who you are."), PubErr::Identity);
-        for c in [PubErr::NoPat, PubErr::Network, PubErr::Unauthorized, PubErr::SecretFile] {
+        for c in [PubErr::NoPat, PubErr::Network, PubErr::Unauthorized, PubErr::GitAuth, PubErr::SecretFile] {
             assert!(c.msg().starts_with("publish:") && !c.msg().to_lowercase().contains("ghp_"));
         }
     }
@@ -930,26 +888,6 @@ mod tests {
         assert_eq!(open_pr(GITHUB_API, "x", "../..", "r", "{}").unwrap_err(), PubErr::Unknown);
     }
 
-    #[test]
-    fn auth_include_is_0600_holds_no_token_in_the_path_and_is_removed() {
-        let dir = std::env::temp_dir().join(format!("bv-pub-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let p;
-        {
-            let inc = AuthInclude::create(&dir, "ghp_TESTTOKEN0123456789abcdefghijklmnop", "t1").unwrap();
-            p = inc.path().to_path_buf();
-            assert!(!p.to_string_lossy().contains("ghp_"));
-            assert!(std::fs::read_to_string(&p).unwrap().contains("extraheader"));
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
-            }
-        }
-        assert!(!p.exists(), "temp config removed on drop");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     fn sh(cwd: &Path, args: &[&str]) {
         let o = Command::new("git").args(args).current_dir(cwd).env("GIT_CONFIG_GLOBAL", NULL_CONFIG).output().unwrap();
         assert!(o.status.success(), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
@@ -994,7 +932,7 @@ mod tests {
         assert_eq!(commit_on_new_branch(cwd, "braavo/x", "t", "", &["c.txt".to_string()]), Err(PubErr::BranchExists));
         assert_eq!(current_branch(cwd).as_deref(), Some("braavo/x"));
         // push with the exact allowed argv to the local bare remote
-        let o = run_git(cwd, &["push", "-u", "origin", "braavo/x"], None).unwrap();
+        let o = run_git(cwd, &["push", "-u", "origin", "braavo/x"]).unwrap();
         assert!(o.ok, "{}", o.stderr);
         let heads = Command::new("git").args(["branch", "--list"]).current_dir(&bare).output().unwrap();
         assert!(String::from_utf8_lossy(&heads.stdout).contains("braavo/x"));
@@ -1083,6 +1021,85 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn the_push_path_has_no_token_header_include_or_temp_config() {
+        // Source lock: whatever builds or runs `git push` (publish.rs from run_git_with to current_branch, and the
+        // push command in lib.rs) never reads the keychain or writes an auth header, include or temp config file.
+        let lib = include_str!("lib.rs");
+        let pub_src = include_str!("publish.rs");
+        let a = pub_src.find("pub fn run_git_with").unwrap();
+        let b = pub_src.find("pub fn current_branch").unwrap();
+        let push_a = lib.find("fn publish_push_blocking").unwrap();
+        let push_b = lib.find("struct PrResult").unwrap();
+        let bad = ["extra".to_string() + "header", "include".to_string() + ".path", "Authori".to_string() + "zation", "AuthInc".to_string() + "lude", "gh-push".to_string(), "GH_PAT_ACCOUNT".to_string(), "make_backend".to_string(), "credential.helper".to_string()];
+        for (name, part) in [("publish.rs push half", &pub_src[a..b]), ("lib.rs push command", &lib[push_a..push_b])] {
+            for w in &bad {
+                // the doc comments may name what is absent; code lines may not
+                let hit = part.lines().filter(|l| !l.trim_start().starts_with("//")).any(|l| l.contains(w.as_str()));
+                assert!(!hit, "{name} must not mention {w}");
+            }
+        }
+        assert!(!pub_src.contains(&("fn base".to_string() + "64(")), "the header encoder is gone");
+        assert!(pub_src.contains("Bearer"), "the PAT is still used by the PR call");
+        let open_pr_pos = pub_src.find("pub fn open_pr").unwrap();
+        assert!(pub_src[..open_pr_pos].find("Bearer").is_none(), "the PAT appears only inside the PR call");
+    }
+
+    #[test]
+    fn push_target_must_match_the_approved_repo_whatever_rewrites_it() {
+        let root = tmp("tgt");
+        let d = root.join("w");
+        std::fs::create_dir_all(&d).unwrap();
+        init_repo(&d);
+        sh(&d, &["remote", "add", "origin", "https://github.com/o/r.git"]);
+        let cwd = d.to_str().unwrap();
+        let url = "https://github.com/o/r.git";
+        assert!(push_target_matches(cwd, url, &exp()), "origin and the explicit url name the approved repository");
+        assert!(!push_target_matches(cwd, url, &("o".into(), "other".into())));
+        // a pushurl to another repository: no push
+        sh(&d, &["config", "remote.origin.pushurl", "https://github.com/evil/r.git"]);
+        assert!(!push_target_matches(cwd, url, &exp()), "origin's push URL points elsewhere");
+        sh(&d, &["config", "--unset", "remote.origin.pushurl"]);
+        // an insteadOf that rewrites the explicit url: no push
+        sh(&d, &["config", "url.https://github.com/evil/r.git.insteadOf", url]);
+        assert!(!push_target_matches(cwd, url, &exp()), "the explicit url is rewritten to another repository");
+        sh(&d, &["config", "--unset", "url.https://github.com/evil/r.git.insteadOf"]);
+        // the ssh form of the same repository is the same target
+        sh(&d, &["config", "remote.origin.pushurl", "git@github.com:o/r.git"]);
+        assert!(push_target_matches(cwd, url, &exp()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_push_without_git_credentials_fails_fast_and_is_classified_as_git_auth() {
+        // A loopback http "remote" that always answers 401: git must not prompt (GIT_TERMINAL_PROMPT=0) and must not hang.
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let srv = std::thread::spawn(move || {
+            for _ in 0..4 {
+                if let Ok((mut c, _)) = listener.accept() {
+                    let mut buf = [0u8; 4096];
+                    let _ = c.read(&mut buf);
+                    let _ = c.write_all(b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"x\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                }
+            }
+        });
+        let root = tmp("noauth");
+        let d = root.join("w");
+        std::fs::create_dir_all(&d).unwrap();
+        init_repo(&d);
+        sh(&d, &["checkout", "-q", "-b", "braavo/n"]);
+        let url = format!("http://127.0.0.1:{port}/o/r.git");
+        let t0 = std::time::Instant::now();
+        let o = run_git_with(d.to_str().unwrap(), &["push", "--no-verify", &url, "braavo/n"], &[("GIT_CONFIG_NOSYSTEM", "1"), ("GIT_CONFIG_GLOBAL", NULL_CONFIG)], None).unwrap();
+        assert!(!o.ok);
+        assert!(t0.elapsed() < std::time::Duration::from_secs(20), "no prompt, no hang");
+        assert_eq!(classify_push_failure(&o.stderr), PubErr::GitAuth, "{}", o.stderr);
+        drop(srv);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[cfg(unix)] // the hook is a /bin/sh script made executable with chmod
     #[test]
     fn guarded_push_checks_and_pushes_in_one_call_with_a_fresh_hooks_dir() {
@@ -1104,12 +1121,13 @@ mod tests {
         let tmp_root = root.join("tmp");
         let (cwd, url) = (work.to_str().unwrap(), bare.to_str().unwrap());
         sh(&work, &["config", "http.proxy", "http://127.0.0.1:9"]);
-        assert_eq!(guarded_push(cwd, url, "braavo/g", None, &tmp_root).err(), Some(PubErr::UnsafeConfig));
+        assert_eq!(guarded_push_inner(cwd, url, "braavo/g", &tmp_root, false).err(), Some(PubErr::UnsafeConfig));
         sh(&work, &["config", "--unset", "http.proxy"]);
-        assert_eq!(guarded_push(cwd, url, "+x:y", None, &tmp_root).err(), Some(PubErr::InvalidBranch));
-        let o = guarded_push(cwd, url, "braavo/g", None, &tmp_root).unwrap();
+        assert_eq!(guarded_push_inner(cwd, url, "+x:y", &tmp_root, false).err(), Some(PubErr::InvalidBranch));
+        assert_eq!(guarded_push(cwd, url, "braavo/g", &tmp_root).err(), Some(PubErr::UnsafeConfig), "a target that is not the approved github.com repository is never pushed to");
+        let o = guarded_push_inner(cwd, url, "braavo/g", &tmp_root, false).unwrap();
         assert!(o.ok, "{}", o.stderr);
-        assert!(!marker.exists(), "the repo's pre-push hook must not run on the token push");
+        assert!(!marker.exists(), "the repo's pre-push hook must not run on the push");
         assert_eq!(std::fs::read_dir(&tmp_root).unwrap().count(), 0, "the per-push hooks dir is deleted afterwards");
         let heads = Command::new("git").args(["branch", "--list"]).current_dir(&bare).output().unwrap();
         assert!(String::from_utf8_lossy(&heads.stdout).contains("braavo/g"));
@@ -1135,11 +1153,11 @@ mod tests {
     fn push_failure_ignores_numbers_in_urls_and_non_git_lines() {
         // a repository literally named app404 / a 403 inside a URL must not decide the class
         assert_eq!(classify_push_failure("fatal: unable to access 'https://github.com/o/app404.git/': Could not resolve host: github.com"), PubErr::Network);
-        assert_eq!(classify_push_failure("remote: Permission to o/app403.git denied to u.\nfatal: unable to access 'https://github.com/o/app403.git/': The requested URL returned error: 403"), PubErr::NoWriteAccess);
+        assert_eq!(classify_push_failure("remote: Permission to o/app403.git denied to u.\nfatal: unable to access 'https://github.com/o/app403.git/': The requested URL returned error: 403"), PubErr::GitAuth);
         assert_eq!(classify_push_failure(" ! [rejected]        braavo/x404 -> braavo/x404 (non-fast-forward)"), PubErr::PushRejected);
         assert_eq!(classify_push_failure("fatal: could not read from https://github.com/o/r401/info"), PubErr::Unknown);
         assert_eq!(classify_push_failure("hint: tried 404 times 403 401"), PubErr::Unknown, "hint lines are not diagnostics");
-        assert_eq!(classify_push_failure("fatal: unable to access 'https://github.com/o/r.git/': The requested URL returned error: 404"), PubErr::NotFound);
+        assert_eq!(classify_push_failure("fatal: unable to access 'https://github.com/o/r.git/': The requested URL returned error: 404"), PubErr::GitAuth);
         assert!(has_status_code("returned error: 403", "403") && !has_status_code("o/app403.git", "403") && !has_status_code("v1.403", "403"));
     }
 
@@ -1154,15 +1172,14 @@ mod tests {
     }
 
     #[test]
-    fn stale_auth_includes_and_hooks_dirs_are_swept_but_nothing_else() {
+    fn stale_hooks_dirs_are_swept_but_nothing_else() {
         let d = tmp("sweep");
-        std::fs::write(d.join("gh-push-old.cfg"), "Authorization: Basic x").unwrap();
         std::fs::create_dir_all(d.join("hooks-1-2")).unwrap();
         std::fs::write(d.join("keep.txt"), "x").unwrap();
         sweep_stale(&d, std::time::Duration::from_secs(3600));
-        assert!(d.join("gh-push-old.cfg").exists(), "a fresh file is not swept when min_age is large");
+        assert!(d.join("hooks-1-2").exists(), "a fresh dir is not swept when min_age is large");
         sweep_stale(&d, std::time::Duration::ZERO);
-        assert!(!d.join("gh-push-old.cfg").exists() && !d.join("hooks-1-2").exists());
+        assert!(!d.join("hooks-1-2").exists());
         assert!(d.join("keep.txt").exists());
         let _ = std::fs::remove_dir_all(&d);
     }
