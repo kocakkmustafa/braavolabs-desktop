@@ -69,8 +69,8 @@ export function publishSummary(views: ChangeView[]): PublishSummary {
 export type PublishErrorCode =
   | "invalidBranch" | "invalidText" | "nothingToPublish" | "tooMany" | "secretFile" | "notGithub" | "noPat" | "keychainUnavailable"
   | "branchExists" | "identity" | "commitFailed" | "wrongBranch" | "pushRejected" | "noWriteAccess" | "unauthorized" | "notFound"
-  | "rateLimit" | "network" | "conflict" | "cancelled" | "unknown";
-const CODES: readonly string[] = ["invalidBranch", "invalidText", "nothingToPublish", "tooMany", "secretFile", "notGithub", "noPat", "keychainUnavailable", "branchExists", "identity", "commitFailed", "wrongBranch", "pushRejected", "noWriteAccess", "unauthorized", "notFound", "rateLimit", "network", "conflict", "cancelled", "unknown"];
+  | "rateLimit" | "network" | "conflict" | "unsafeConfig" | "cancelled" | "unknown";
+const CODES: readonly string[] = ["invalidBranch", "invalidText", "nothingToPublish", "tooMany", "secretFile", "notGithub", "noPat", "keychainUnavailable", "branchExists", "identity", "commitFailed", "wrongBranch", "pushRejected", "noWriteAccess", "unauthorized", "notFound", "rateLimit", "network", "conflict", "unsafeConfig", "cancelled", "unknown"];
 
 /** `publish:<code>` from the host becomes a known code; anything else (including free text) becomes "unknown". The text itself is dropped. */
 export function errorCode(e: unknown): PublishErrorCode {

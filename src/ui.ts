@@ -138,6 +138,8 @@ import {
 } from "./brand-motion";
 import { createVoice } from "./voice";
 import { createVoiceChat, isVoiceChatEnabled, markVoiceChatIntroSeen, voiceChatIntroSeen, type VoiceChat } from "./voice-chat";
+import { createPublishUi, type PublishUi } from "./publish-view";
+import { isPublishEnabled } from "./publish";
 import { composeWire, createTray, isAttachmentsEnabled, splitWire, wireExceeds, type AttachmentTray } from "./attachments";
 import { createAttachUi, renderSentChips, type AttachUi } from "./attachments-view";
 import { renderIntro, renderStrip, stripView, summaryLine, vcIcon, type VcAction } from "./voice-chat-view";
@@ -764,7 +766,22 @@ export function renderWorkspace(deps: UiDeps): void {
   changesSec.append(changesHead, changesRow, changesBody);
   changesSec.style.display = "none"; // sağ panelin "Değişiklikler" sekmesi
 
+  // BRA-UI-10: "Yayına hazırla", behind a default-OFF flag (bv.flags.publish = "1"). Flag off: nothing below is created.
+  let lastViews: ChangeView[] = [];
+  let publishUi: PublishUi | null = null;
+  if (isPublishEnabled()) {
+    const invokeFn = (globalThis as Record<string, any>)?.__TAURI__?.core?.invoke as ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>) | undefined;
+    if (invokeFn) {
+      publishUi = createPublishUi({
+        t, invoke: invokeFn, get gov() { return deps.gov; }, cwd: () => changesPathInput.value.trim(), views: () => lastViews, contain: containDialog,
+        setListHidden: (hidden: boolean) => { changesHead.hidden = hidden; changesRow.hidden = hidden; changesBody.hidden = hidden; publishUi?.button && (publishUi.button.hidden = hidden); publishUi?.note && (publishUi.note.hidden = hidden || lastViews.length !== 0); },
+      });
+      changesSec.append(publishUi.button, publishUi.note, publishUi.panel);
+    }
+  }
   const renderChanges = (views: ChangeView[], error?: string) => {
+    lastViews = error ? [] : views;
+    publishUi?.sync();
     changesBody.replaceChildren();
     if (error) {
       changesBody.append(el("div", "changes-error", error));
