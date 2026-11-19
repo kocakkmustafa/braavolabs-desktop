@@ -666,5 +666,7 @@
   "publish.err.invalid": "Dal adı ya da metin geçerli değil. Hiçbir şey gönderilmedi.",
   "publish.err.unknown": "Bir şeyler ters gitti. Değişiklikler listesinden nelerin yapıldığına bakıp tekrar deneyin.",
   "publish.err.unsafeConfig": "Bu deponun Git ayarları gönderimi başka yöne çevirebilir ya da zayıflatabilir (vekil sunucu, başka adres ya da kanca). Hiçbir şey gönderilmedi. Bu ayarları depodan kaldırıp tekrar deneyin.",
+  "publish.err.gitAuth": "Git, yükleme için GitHub'da oturum açamadı ya da Git hesabınızın bu depoya yazma izni yok. Git kimliğinizi kurun (Git kimlik yöneticisi ya da bir SSH anahtarı), sonra tekrar deneyin. Burada bağladığınız erişim anahtarı yalnız PR'ı açmak içindir ve bunu çözmez. Hiçbir şey birleştirilmedi.",
+  "publish.err.noPat": "Dal yüklendi. PR'ı açmak için GitHub erişim anahtarınız gerekiyor. Bağlayın, sonra tekrar deneyin.",
   "publish.err.changesChanged": "Değişen dosyalar artık onayladıklarınız değil. Hiçbir şey gönderilmedi. Değişikliklere yeniden bakıp baştan başlayın."
 }

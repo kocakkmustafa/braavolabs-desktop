@@ -666,5 +666,7 @@
   "publish.err.invalid": "O nome do branch ou o texto não é válido. Nada foi enviado.",
   "publish.err.unknown": "Algo deu errado. Veja na lista de alterações o que foi feito e tente novamente.",
   "publish.err.unsafeConfig": "As configurações do Git deste repositório poderiam redirecionar ou enfraquecer o envio (um proxy, outro endereço ou um hook). Nada foi enviado. Remova essas configurações do repositório e tente novamente.",
+  "publish.err.gitAuth": "O Git não conseguiu entrar no GitHub para o envio, ou sua conta do Git não pode gravar neste repositório. Configure o login do Git (o gerenciador de credenciais do Git ou uma chave SSH) e tente de novo. A chave de acesso conectada aqui serve só para abrir o PR e não resolve isso. Nada foi mesclado.",
+  "publish.err.noPat": "A branch foi enviada. Para abrir o PR, preciso da sua chave de acesso do GitHub. Conecte-a e tente de novo.",
   "publish.err.changesChanged": "Os arquivos alterados não são mais os que você confirmou. Nada foi enviado. Veja as alterações de novo e comece outra vez."
 }
