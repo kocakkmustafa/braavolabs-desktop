@@ -8,6 +8,7 @@ import {
   bannerVisible, createUpdateChecker, isReleaseUrl, isUpdateEnabled,
   type FlagStorage, type Storage2, type UpdateChecker, type UpdateState,
 } from "./update";
+import { ltr } from "./bidi";
 
 type Translate = (key: string, vars?: Record<string, string | number>) => string;
 type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
@@ -84,7 +85,7 @@ export function buildAbout(deps: Pick<UpdateUiDeps, "t" | "version" | "invoke">,
     r.append(make("span", "about-label", label), v);
     return { r, v };
   };
-  const mono = (s: string) => make("span", "mono", s);
+  const mono = (s: string) => ltr(make("span", "mono", s));
   const tag = (tone: "done" | "wait" | "err", glyph: string, word: string) => {
     const s = make("span", `update-tag tone-${tone}`);
     s.append(make("span", "update-glyph", glyph), make("span", undefined, word));
