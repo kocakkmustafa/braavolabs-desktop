@@ -326,12 +326,12 @@ fn remote_keys_ok(listing: &str, expected: &(String, String)) -> bool {
 }
 
 /// A push is only made from a repo whose own config cannot redirect or weaken it. Any repo-level `http.*`,
-/// `url.*` (insteadOf/pushInsteadOf), `include.*` or `core.sshCommand/hooksPath/gitProxy` key refuses it, and the
+/// `url.*` (insteadOf/pushInsteadOf), `include.*`, `credential.*` (a repo-level helper runs a command with the user's identity), `protocol.*` or `core.sshCommand/hooksPath/gitProxy/askPass/fsmonitor/editor` key refuses it, and the
 /// `remote.*` keys must pass `remote_keys_ok` (system/global config is not read: env switches them off).
 /// `git config` exit 1 with no output = no such key.
 pub fn push_config_clean(cwd: &str, expected: &(String, String)) -> bool {
     // No `-c` pins here (they would show up in the listing themselves).
-    let re = r"^(http\.|url\.|include\.|includeif\.|core\.(sshcommand|hookspath|gitproxy))";
+    let re = r"^(http\.|url\.|include\.|includeif\.|credential\.|protocol\.|core\.(sshcommand|hookspath|gitproxy|askpass|fsmonitor|editor))";
     let env = [("GIT_CONFIG_NOSYSTEM", "1"), ("GIT_CONFIG_GLOBAL", NULL_CONFIG)];
     if !matches!(run_git_with(cwd, &["config", "--get-regexp", re], &env, None), Ok(o) if !o.ok && o.stdout.trim().is_empty()) {
         return false;
@@ -1012,6 +1012,14 @@ mod tests {
             ("core.hooksPath", "/tmp/evil-hooks"),
             ("core.gitProxy", "/tmp/evil"),
             ("include.path", "/tmp/evil.cfg"),
+            ("credential.helper", "!echo pwned"),
+            ("credential.useHttpPath", "true"),
+            ("credential.username", "evil"),
+            ("credential.https://github.com.helper", "!echo pwned"),
+            ("core.askPass", "/tmp/evil"),
+            ("core.fsmonitor", "/tmp/evil"),
+            ("core.editor", "/tmp/evil"),
+            ("protocol.ext.allow", "always"),
         ] {
             sh(&d, &["config", key, val]);
             assert!(!push_config_clean(cwd, &exp()), "{key} must refuse the push");
@@ -1120,6 +1128,9 @@ mod tests {
         }
         let tmp_root = root.join("tmp");
         let (cwd, url) = (work.to_str().unwrap(), bare.to_str().unwrap());
+        sh(&work, &["config", "credential.helper", "!echo pwned"]);
+        assert_eq!(guarded_push_inner(cwd, url, "braavo/g", &tmp_root, false).err(), Some(PubErr::UnsafeConfig), "a repo-level credential helper refuses the push");
+        sh(&work, &["config", "--unset", "credential.helper"]);
         sh(&work, &["config", "http.proxy", "http://127.0.0.1:9"]);
         assert_eq!(guarded_push_inner(cwd, url, "braavo/g", &tmp_root, false).err(), Some(PubErr::UnsafeConfig));
         sh(&work, &["config", "--unset", "http.proxy"]);
