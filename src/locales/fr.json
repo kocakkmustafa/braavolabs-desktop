@@ -665,5 +665,6 @@
   "publish.err.keychain": "La clé n’a pas pu être enregistrée dans le trousseau du système ; elle n’a donc pas été enregistrée.",
   "publish.err.invalid": "Le nom de la branche ou le texte n’est pas valide. Rien n’a été envoyé.",
   "publish.err.unknown": "Un problème est survenu. Regardez dans la liste des modifications ce qui a été fait, puis réessayez.",
-  "publish.err.unsafeConfig": "Les réglages Git de ce dépôt pourraient détourner ou affaiblir l’envoi (proxy, autre adresse ou hook). Rien n’a été envoyé. Retirez ces réglages du dépôt, puis réessayez."
+  "publish.err.unsafeConfig": "Les réglages Git de ce dépôt pourraient détourner ou affaiblir l’envoi (proxy, autre adresse ou hook). Rien n’a été envoyé. Retirez ces réglages du dépôt, puis réessayez.",
+  "publish.err.changesChanged": "Les fichiers modifiés ne sont plus ceux que vous avez confirmés. Rien n’a été envoyé. Revoyez les modifications, puis recommencez."
 }

@@ -933,15 +933,19 @@ fn publish_commit_blocking(app: AppHandle, token: String, cwd: String, branch: S
     check_git_cwd(&cwd).map_err(|_| PubErr::Unknown.msg())?;
     if !publish::is_valid_branch(&branch) { return Err(PubErr::InvalidBranch.msg()); }
     if !publish::valid_title(&title) || !publish::valid_body(&body) { return Err(PubErr::InvalidText.msg()); }
-    let changes = changed_files_in(&cwd).map_err(|_| PubErr::Unknown.msg())?;
+    // `git status` paths are relative to the repository ROOT, so everything below runs there, never in a subfolder.
+    let root = publish::repo_root(&cwd).ok_or_else(|| PubErr::Unknown.msg())?;
+    if sandbox::is_sensitive_dir(&root) { return Err(PubErr::Unknown.msg()); }
+    let changes = changed_files_in(&root).map_err(|_| PubErr::Unknown.msg())?;
     if changes.len() >= GIT_MAX_ENTRIES { return Err(PubErr::TooMany.msg()); }
-    let files: Vec<String> = changes.into_iter().map(|c| c.path).collect();
+    // Canonical byte order, the same rule the UI uses: the token is bound to this exact list.
+    let files = publish::canonical_files(changes.into_iter().map(|c| c.path).collect());
     publish::validate_publish_files(&files).map_err(|e| e.msg())?; // empty / traversal / secret-looking
-    // 2. Spend the token bound to exactly these fields.
+    // 2. Spend the token bound to exactly these fields. A refusal here almost always means the list changed after it was approved.
     let detail = ActionDetail { cwd: Some(cwd.clone()), branch: Some(branch.clone()), title: Some(title.clone()), body: Some(body.clone()), files: Some(files.clone()), ..Default::default() };
-    spend_publish_token(&app, &token, "git.commit", &detail, ts, &format!("git commit on {branch}: {} files", files.len()))?;
+    spend_publish_token(&app, &token, "git.commit", &detail, ts, &format!("git commit on {branch}: {} files", files.len())).map_err(|_| PubErr::ChangesChanged.msg())?;
     // 3. Fixed argv (publish::commit_on_new_branch). `switch -c` first: the current branch is never committed to.
-    let sha = publish::commit_on_new_branch(&cwd, &branch, &title, &body, &files).map_err(|e| {
+    let sha = publish::commit_on_new_branch(&root, &branch, &title, &body, &files).map_err(|e| {
         audit_publish(&app, "git.commit", "error", e.code(), ts);
         e.msg()
     })?;
@@ -988,6 +992,7 @@ fn publish_push_blocking(app: AppHandle, token: String, cwd: String, branch: Str
         e.msg()
     })?;
     drop(include);
+    publish::sweep_stale(&tmp_root, std::time::Duration::from_secs(120));
     if out.ok {
         audit_publish(&app, "git.push", "success", &format!("pushed {branch} to {slug}"), ts);
         Ok(())
@@ -3901,6 +3906,37 @@ mod governance_tests {
         assert!(!sanitize_field("failed with github_pat_11ABCDEFG0123456789_abcdefghijklmnop here").contains("github_pat_11"));
     }
 
+    #[test]
+    fn multi_file_mixed_tracked_and_untracked_binds_the_same_list_whatever_the_order() {
+        // A real repo: tracked edits of different sizes plus untracked files, in git's own status order.
+        let dir = std::env::temp_dir().join(format!("bv-order-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let g = |a: &[&str]| { let o = std::process::Command::new("git").args(a).current_dir(&dir).env("GIT_CONFIG_GLOBAL", "/dev/null").output().unwrap(); assert!(o.status.success()); };
+        g(&["init", "-q", "-b", "main"]); g(&["config", "user.email", "t@e.test"]); g(&["config", "user.name", "T"]);
+        for f in ["b.ts", "m.ts", "z.ts"] { fs::write(dir.join(f), "1\n").unwrap(); }
+        g(&["add", "."]); g(&["commit", "-q", "-m", "i"]);
+        fs::write(dir.join("z.ts"), "1\n2\n3\n4\n5\n6\n").unwrap(); // biggest edit
+        fs::write(dir.join("b.ts"), "2\n").unwrap();
+        fs::write(dir.join("new2.ts"), "n").unwrap();
+        fs::write(dir.join("new1.ts"), "n").unwrap();
+        let host: Vec<String> = changed_files_in(dir.to_str().unwrap()).unwrap().into_iter().map(|c| c.path).collect();
+        assert!(host.len() >= 4);
+        // the UI orders by edit size then name (changes.ts); emulate with a different permutation
+        let mut ui = host.clone();
+        ui.reverse();
+        ui.rotate_left(1);
+        assert_ne!(ui, host);
+        let bind = |files: Vec<String>| ActionDetail { cwd: Some("/w".into()), branch: Some("braavo/x".into()), title: Some("t".into()), body: Some("".into()), files: Some(publish::canonical_files(files)), ..Default::default() }.binding("git.commit");
+        assert_eq!(bind(host.clone()), bind(ui), "UI order and host order must bind identically");
+        let mut gate = GateState::default();
+        seed_token(&mut gate, "tok-c", "git.commit", &bind(host.clone()));
+        let mut shuffled = host.clone();
+        shuffled.reverse();
+        assert!(try_consume_token(&mut gate, "tok-c", "git.commit", &bind(shuffled)));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     // ── S-012: native dialog shows the ENFORCED action, not free-text summary ──
 
     #[test]
@@ -4603,6 +4639,11 @@ async fn computer_dispatch(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            // A crashed push may have left its auth include (token header) or hooks dir behind: remove them now.
+            if let Ok(dir) = config_dir(&app.handle()) { publish::sweep_stale(&dir.join("tmp"), std::time::Duration::ZERO); }
+            Ok(())
+        })
         .plugin(tauri_plugin_dialog::init()) // S-012 native approval dialog
         .manage(Governance(Mutex::new(GateState::default())))
         .manage(pty::PtyHostState::default()) // R6 Lane-B real-PTY session registry

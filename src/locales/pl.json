@@ -688,5 +688,6 @@
   "publish.err.keychain": "Nie udało się zapisać klucza w pęku kluczy systemu, więc nie został zapisany wcale.",
   "publish.err.invalid": "Nazwa gałęzi lub tekst jest nieprawidłowy. Nic nie wysłano.",
   "publish.err.unknown": "Coś poszło nie tak. Sprawdź na liście zmian, co zostało zrobione, i spróbuj ponownie.",
-  "publish.err.unsafeConfig": "Ustawienia Git tego repozytorium mogłyby przekierować lub osłabić wysyłkę (proxy, inny adres lub hook). Nic nie wysłano. Usuń te ustawienia z repozytorium i spróbuj ponownie."
+  "publish.err.unsafeConfig": "Ustawienia Git tego repozytorium mogłyby przekierować lub osłabić wysyłkę (proxy, inny adres lub hook). Nic nie wysłano. Usuń te ustawienia z repozytorium i spróbuj ponownie.",
+  "publish.err.changesChanged": "Zmienione pliki nie są już tymi, które potwierdzono. Nic nie wysłano. Sprawdź zmiany jeszcze raz i zacznij od nowa."
 }

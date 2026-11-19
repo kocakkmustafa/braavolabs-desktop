@@ -665,5 +665,6 @@
   "publish.err.keychain": "Anahtar işletim sisteminin anahtarlığına yazılamadı, bu yüzden hiç kaydedilmedi.",
   "publish.err.invalid": "Dal adı ya da metin geçerli değil. Hiçbir şey gönderilmedi.",
   "publish.err.unknown": "Bir şeyler ters gitti. Değişiklikler listesinden nelerin yapıldığına bakıp tekrar deneyin.",
-  "publish.err.unsafeConfig": "Bu deponun Git ayarları gönderimi başka yöne çevirebilir ya da zayıflatabilir (vekil sunucu, başka adres ya da kanca). Hiçbir şey gönderilmedi. Bu ayarları depodan kaldırıp tekrar deneyin."
+  "publish.err.unsafeConfig": "Bu deponun Git ayarları gönderimi başka yöne çevirebilir ya da zayıflatabilir (vekil sunucu, başka adres ya da kanca). Hiçbir şey gönderilmedi. Bu ayarları depodan kaldırıp tekrar deneyin.",
+  "publish.err.changesChanged": "Değişen dosyalar artık onayladıklarınız değil. Hiçbir şey gönderilmedi. Değişikliklere yeniden bakıp baştan başlayın."
 }

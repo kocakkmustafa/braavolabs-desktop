@@ -44,6 +44,7 @@ pub enum PubErr {
     Network,
     Conflict,
     UnsafeConfig,
+    ChangesChanged,
     Unknown,
 }
 
@@ -70,6 +71,7 @@ impl PubErr {
             PubErr::Network => "network",
             PubErr::Conflict => "conflict",
             PubErr::UnsafeConfig => "unsafeConfig",
+            PubErr::ChangesChanged => "changesChanged",
             PubErr::Unknown => "unknown",
         }
     }
@@ -140,6 +142,15 @@ pub fn is_secret_path(path: &str) -> bool {
     b == ".npmrc" || b == ".netrc" || b == ".pypirc"
 }
 
+/// THE canonical order of the file list: plain UTF-8 byte order, duplicates dropped. The UI sorts with the same rule
+/// (`byteSort` in publish.ts) and the host sorts before it builds the token binding, so both sides bind the same bytes
+/// whatever order git or the changes list produced them in.
+pub fn canonical_files(mut files: Vec<String>) -> Vec<String> {
+    files.sort();
+    files.dedup();
+    files
+}
+
 /// The paths `git add` may receive. They come from `changed_files_in`, and are re-checked here so the
 /// choke point does not trust its caller: relative, no `..`, not an option, not inside `.git`.
 pub fn validate_publish_files(files: &[String]) -> Result<(), PubErr> {
@@ -151,6 +162,7 @@ pub fn validate_publish_files(files: &[String]) -> Result<(), PubErr> {
         let bad = f.is_empty()
             || f.contains('\0')
             || f.contains('\n')
+            || f.starts_with('"') // git quoted an unusual name (quote/control char): refuse rather than guess
             || norm.starts_with('/')
             || norm.starts_with('-')
             || norm.starts_with(':') // pathspec magic (`:(glob)…`, `:/…`)
@@ -353,6 +365,24 @@ pub fn push_config_clean(cwd: &str, expected: &(String, String)) -> bool {
     }
 }
 
+/// Remove leftovers of a crashed push: auth includes (`gh-push-*`, which held the token header) and hooks dirs (`hooks-*`) older
+/// than `min_age` (zero at startup). Best effort; never touches anything else.
+pub fn sweep_stale(tmp_root: &Path, min_age: std::time::Duration) {
+    let Ok(rd) = std::fs::read_dir(tmp_root) else { return };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).map_or(true, |a| a >= min_age);
+        if !old {
+            continue;
+        }
+        if name.starts_with("gh-push-") && e.path().is_file() {
+            let _ = std::fs::remove_file(e.path());
+        } else if name.starts_with("hooks-") && e.path().is_dir() {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
 /// A fresh, empty, owner-only hooks directory for ONE push; removed on drop.
 struct TempHooks(std::path::PathBuf);
 impl TempHooks {
@@ -405,6 +435,13 @@ pub fn current_branch(cwd: &str) -> Option<String> {
     (o.ok && !b.is_empty() && b != "HEAD").then_some(b)
 }
 
+/// The repository root. `git status` reports paths relative to it, so `git add` must run there, not in a subfolder.
+pub fn repo_root(cwd: &str) -> Option<String> {
+    let o = run_git(cwd, &["rev-parse", "--show-toplevel"], None).ok()?;
+    let r = o.stdout.trim().to_string();
+    (o.ok && !r.is_empty()).then_some(r)
+}
+
 pub fn origin_remote(cwd: &str) -> Option<(String, String, bool)> {
     let o = run_git(cwd, &["remote", "get-url", "origin"], None).ok()?;
     if !o.ok {
@@ -441,18 +478,43 @@ pub fn classify_commit_failure(stderr: &str) -> PubErr {
     }
 }
 
-/// Classify a failed `git push`.
+/// True when `code` appears in `line` as a standalone number: not part of a longer word or path (`app404`, `/404/`, `1.404`).
+fn has_status_code(line: &str, code: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut from = 0;
+    while let Some(i) = line[from..].find(code) {
+        let at = from + i;
+        let before = if at == 0 { b' ' } else { bytes[at - 1] };
+        let after = bytes.get(at + code.len()).copied().unwrap_or(b' ');
+        let edge = |c: u8| !(c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.' | b'/' | b':'));
+        if edge(before) && edge(after) {
+            return true;
+        }
+        from = at + code.len();
+    }
+    false
+}
+
+/// Classify a failed `git push`. Only git's own diagnostic lines count (`remote:`, `fatal:`, `error:`, ` ! [...]`), and
+/// HTTP codes only as whole numbers, so a repository called `app404` or a number in a URL cannot steer the result.
 pub fn classify_push_failure(stderr: &str) -> PubErr {
-    let s = stderr.to_ascii_lowercase();
-    if s.contains("could not resolve host") || s.contains("unable to access") && (s.contains("timed out") || s.contains("resolve") || s.contains("connect")) || s.contains("network is unreachable") || s.contains("connection refused") {
+    let lines: Vec<String> = stderr
+        .lines()
+        .map(|l| l.trim().to_ascii_lowercase())
+        .filter(|l| l.starts_with("remote:") || l.starts_with("fatal:") || l.starts_with("error:") || l.starts_with("! ["))
+        .collect();
+    let any = |f: &dyn Fn(&str) -> bool| lines.iter().any(|l| f(l));
+    let has = |w: &str| any(&|l: &str| l.contains(w));
+    let code = |c: &str| any(&|l: &str| has_status_code(l, c));
+    if has("could not resolve host") || any(&|l: &str| l.contains("unable to access") && (l.contains("timed out") || l.contains("resolve") || l.contains("connect"))) || has("network is unreachable") || has("connection refused") {
         PubErr::Network
-    } else if s.contains("401") || s.contains("bad credentials") || s.contains("authentication failed") || s.contains("invalid username or password") {
+    } else if code("401") || has("bad credentials") || has("authentication failed") || has("invalid username or password") {
         PubErr::Unauthorized
-    } else if s.contains("403") || s.contains("permission to") || s.contains("permission denied") || s.contains("write access") {
+    } else if code("403") || has("permission to") || has("permission denied") || has("write access") {
         PubErr::NoWriteAccess
-    } else if s.contains("repository not found") || s.contains("404") {
+    } else if has("repository not found") || code("404") {
         PubErr::NotFound
-    } else if s.contains("non-fast-forward") || s.contains("fetch first") || s.contains("[rejected]") || s.contains("protected branch") || s.contains("hook declined") || s.contains("denied to") {
+    } else if has("non-fast-forward") || has("fetch first") || has("[rejected]") || has("protected branch") || has("hook declined") || has("denied to") {
         PubErr::PushRejected
     } else {
         PubErr::Unknown
@@ -463,15 +525,20 @@ pub fn classify_push_failure(stderr: &str) -> PubErr {
 /// On a failure after the switch it goes back to the previous branch and removes the new one with the safe `-d`.
 pub fn commit_on_new_branch(cwd: &str, branch: &str, title: &str, body: &str, files: &[String]) -> Result<String, PubErr> {
     let prev = current_branch(cwd);
+    // Detached HEAD has no branch to go back to: remember the commit instead.
+    let prev_sha = run_git(cwd, &["rev-parse", "HEAD"], None).ok().filter(|o| o.ok).map(|o| o.stdout.trim().to_string());
     let sw = run_git(cwd, &["switch", "-c", branch], None)?;
     if !sw.ok {
         return Err(classify_commit_failure(&sw.stderr));
     }
     let undo = || {
-        if let Some(p) = &prev {
-            if run_git(cwd, &["switch", p], None).map(|o| o.ok).unwrap_or(false) {
-                let _ = run_git(cwd, &["branch", "-d", branch], None);
-            }
+        let back = match (&prev, &prev_sha) {
+            (Some(p), _) => run_git(cwd, &["switch", p], None),
+            (None, Some(sha)) => run_git(cwd, &["switch", "--detach", sha], None),
+            _ => return,
+        };
+        if back.map(|o| o.ok).unwrap_or(false) {
+            let _ = run_git(cwd, &["branch", "-d", branch], None);
         }
     };
     // Literal pathspecs: a changed file named `:(top)x` or `*.ts` is that file, never pathspec magic or a glob.
@@ -572,7 +639,7 @@ pub fn classify_http(status: u16, message: &str) -> PubErr {
         429 => PubErr::RateLimit,
         403 if m.contains("rate limit") || m.contains("abuse") || m.contains("secondary") => PubErr::RateLimit,
         403 => PubErr::NoWriteAccess,
-        404 => PubErr::NotFound,
+        404 | 301 | 307 | 308 => PubErr::NotFound, // 30x: the repository moved or was renamed
         422 if m.contains("already exists") => PubErr::Conflict,
         422 if m.contains("no commits between") => PubErr::NothingToPublish,
         422 => PubErr::Conflict,
@@ -610,16 +677,26 @@ pub fn open_pr(api_base: &str, pat: &str, owner: &str, repo: &str, payload: &str
         cfg.push_str(&format!("header = {}\n", cfg_quote(h)));
     }
     cfg.push_str(&format!("data-binary = {}\n", cfg_quote(payload)));
+    // `-q` MUST be the first argument: curl then ignores ~/.curlrc (a proxy or extra header there must not apply).
     let mut child = Command::new(curl_bin())
-        .args(["--config", "-"])
+        .args(["-q", "--config", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|_| PubErr::Network)?;
-    child.stdin.take().ok_or(PubErr::Unknown)?.write_all(cfg.as_bytes()).map_err(|_| PubErr::Unknown)?;
     let mut out = String::new();
-    child.stdout.take().ok_or(PubErr::Unknown)?.take(1 << 20).read_to_string(&mut out).map_err(|_| PubErr::Network)?;
+    let io = (|| -> Result<(), PubErr> {
+        child.stdin.take().ok_or(PubErr::Unknown)?.write_all(cfg.as_bytes()).map_err(|_| PubErr::Unknown)?;
+        child.stdout.take().ok_or(PubErr::Unknown)?.take(1 << 20).read_to_string(&mut out).map_err(|_| PubErr::Network)?;
+        Ok(())
+    })();
+    if let Err(e) = io {
+        // never leave the child (and its stdin config) behind
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(e);
+    }
     let status = child.wait().map_err(|_| PubErr::Network)?;
     if !status.success() {
         return Err(PubErr::Network); // DNS, connect, TLS, timeout: no HTTP answer at all
@@ -1048,5 +1125,69 @@ mod tests {
         drop(a);
         assert!(!p.exists());
         let _ = std::fs::remove_dir_all(&root);
+    }
+    #[test]
+    fn push_failure_ignores_numbers_in_urls_and_non_git_lines() {
+        // a repository literally named app404 / a 403 inside a URL must not decide the class
+        assert_eq!(classify_push_failure("fatal: unable to access 'https://github.com/o/app404.git/': Could not resolve host: github.com"), PubErr::Network);
+        assert_eq!(classify_push_failure("remote: Permission to o/app403.git denied to u.\nfatal: unable to access 'https://github.com/o/app403.git/': The requested URL returned error: 403"), PubErr::NoWriteAccess);
+        assert_eq!(classify_push_failure(" ! [rejected]        braavo/x404 -> braavo/x404 (non-fast-forward)"), PubErr::PushRejected);
+        assert_eq!(classify_push_failure("fatal: could not read from https://github.com/o/r401/info"), PubErr::Unknown);
+        assert_eq!(classify_push_failure("hint: tried 404 times 403 401"), PubErr::Unknown, "hint lines are not diagnostics");
+        assert_eq!(classify_push_failure("fatal: unable to access 'https://github.com/o/r.git/': The requested URL returned error: 404"), PubErr::NotFound);
+        assert!(has_status_code("returned error: 403", "403") && !has_status_code("o/app403.git", "403") && !has_status_code("v1.403", "403"));
+    }
+
+    #[test]
+    fn canonical_order_is_byte_order_and_stable_for_any_input_order() {
+        let a = vec!["src/z.ts".to_string(), "README.md".to_string(), "src/a.ts".to_string(), "ü.txt".to_string(), "src/a.ts".to_string(), "Z.md".to_string()];
+        let mut b = a.clone();
+        b.reverse();
+        let ca = canonical_files(a);
+        assert_eq!(ca, canonical_files(b));
+        assert_eq!(ca, vec!["README.md", "Z.md", "src/a.ts", "src/z.ts", "ü.txt"]);
+    }
+
+    #[test]
+    fn stale_auth_includes_and_hooks_dirs_are_swept_but_nothing_else() {
+        let d = tmp("sweep");
+        std::fs::write(d.join("gh-push-old.cfg"), "Authorization: Basic x").unwrap();
+        std::fs::create_dir_all(d.join("hooks-1-2")).unwrap();
+        std::fs::write(d.join("keep.txt"), "x").unwrap();
+        sweep_stale(&d, std::time::Duration::from_secs(3600));
+        assert!(d.join("gh-push-old.cfg").exists(), "a fresh file is not swept when min_age is large");
+        sweep_stale(&d, std::time::Duration::ZERO);
+        assert!(!d.join("gh-push-old.cfg").exists() && !d.join("hooks-1-2").exists());
+        assert!(d.join("keep.txt").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn commit_from_a_subfolder_and_from_detached_head() {
+        let d = tmp("sub");
+        init_repo(&d);
+        std::fs::create_dir_all(d.join("pkg")).unwrap();
+        std::fs::write(d.join("pkg/x.ts"), "x").unwrap();
+        let root = repo_root(d.join("pkg").to_str().unwrap()).unwrap();
+        assert_eq!(std::fs::canonicalize(&root).unwrap(), std::fs::canonicalize(&d).unwrap());
+        commit_on_new_branch(&root, "braavo/sub", "t", "", &["pkg/x.ts".to_string()]).unwrap();
+        // detached HEAD + failing commit goes back to the same commit and drops the new branch
+        sh(&d, &["checkout", "-q", "--detach", "main"]);
+        let hook = d.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::write(d.join("a.txt"), "changed\n").unwrap();
+        let before = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&d).output().unwrap().stdout;
+        assert_eq!(commit_on_new_branch(d.to_str().unwrap(), "braavo/det", "t", "", &["a.txt".to_string()]), Err(PubErr::CommitFailed));
+        assert_eq!(Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&d).output().unwrap().stdout, before);
+        assert_eq!(current_branch(d.to_str().unwrap()), None, "still detached");
+        let l = Command::new("git").args(["branch", "--list", "braavo/det"]).current_dir(&d).output().unwrap();
+        assert!(l.stdout.is_empty());
+        assert_eq!(classify_http(301, ""), PubErr::NotFound);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -688,5 +688,6 @@
   "publish.err.keychain": "Non è stato possibile salvare la chiave nel portachiavi del sistema, quindi non è stata salvata.",
   "publish.err.invalid": "Il nome del branch o il testo non è valido. Non è stato inviato nulla.",
   "publish.err.unknown": "Qualcosa è andato storto. Controlla nell’elenco delle modifiche cosa è stato fatto e riprova.",
-  "publish.err.unsafeConfig": "Le impostazioni Git di questo repository potrebbero deviare o indebolire l’invio (proxy, altro indirizzo o hook). Non è stato inviato nulla. Rimuovi queste impostazioni dal repository e riprova."
+  "publish.err.unsafeConfig": "Le impostazioni Git di questo repository potrebbero deviare o indebolire l’invio (proxy, altro indirizzo o hook). Non è stato inviato nulla. Rimuovi queste impostazioni dal repository e riprova.",
+  "publish.err.changesChanged": "I file modificati non sono più quelli che hai confermato. Non è stato inviato nulla. Controlla di nuovo le modifiche e ricomincia."
 }

@@ -4,7 +4,7 @@ import { createMemoryGovernance, classifyAction, ACTION_KINDS, type Governance }
 import { LOCALES, MESSAGES, makeT } from "../i18n";
 import { toChangeViews } from "../changes";
 import {
-  PUBLISH_FLAG_KEY, draftProblems, errorCode, isPublishEnabled, isSecretPath, isValidBranch, publishSummary, runPublish, suggestBranch,
+  PUBLISH_FLAG_KEY, byteSort, draftProblems, errorCode, isPublishEnabled, isSecretPath, isValidBranch, publishSummary, runPublish, suggestBranch,
   type PublishDraft, type PublishInfo,
 } from "../publish";
 
@@ -88,9 +88,10 @@ describe("draft validation (criterion 2)", () => {
 });
 
 /** An invoke mock that records every host call. */
-function host(fail?: { cmd: string; msg: string }) {
+function host(fail?: { cmd: string; msg: string }, listing: unknown = [{ path: "a.ts", status: "M", added: 1, removed: 0 }]) {
   const calls: { cmd: string; args: Record<string, unknown> }[] = [];
   const invoke = async (cmd: string, args: Record<string, unknown> = {}) => {
+    if (cmd === "git_changed_files") return listing; // read-only; not a write, so not recorded in `calls`
     calls.push({ cmd, args });
     if (fail && fail.cmd === cmd) throw new Error(fail.msg);
     if (cmd === "git_publish_commit") return "abc1234";
@@ -136,7 +137,7 @@ describe("approval gate (criterion 3)", () => {
     expect(h2.calls.map(c => c.cmd)).toEqual(["git_publish_push", "github_open_pr"]);
   });
   it("refuses a PR link that is not a github.com page", async () => {
-    const invoke = async (cmd: string): Promise<unknown> => (cmd === "github_open_pr" ? { number: 1, url: "https://evil.example/x" } : "sha");
+    const invoke = async (cmd: string): Promise<unknown> => (cmd === "git_changed_files" ? [{ path: "a.ts", status: "M" }] : cmd === "github_open_pr" ? { number: 1, url: "https://evil.example/x" } : "sha");
     expect(await run(createMemoryGovernance(), invoke)).toMatchObject({ ok: false, step: "pr", code: "unknown" });
   });
   it("registers the three kinds as approval-required, denies a bad branch, and offers no merge action", () => {
@@ -161,6 +162,46 @@ describe("approval gate (criterion 3)", () => {
   });
 });
 
+describe("file list order and freshness (reviewer HIGH/MEDIUM)", () => {
+  // The host's own order for a real mixed working tree: tracked edits and untracked (??) files.
+  const hostRaw = [
+    { path: "src/zeta.ts", status: "M", added: 2, removed: 1 },
+    { path: "README.md", status: "M", added: 40, removed: 3 },
+    { path: "new/b.ts", status: "??" },
+    { path: "src/alpha.ts", status: "M", added: 9, removed: 0 },
+    { path: "new/a.ts", status: "??" },
+  ];
+  it("UI order (by edit size, changes.ts) and host order bind the same token", async () => {
+    const ui = toChangeViews(hostRaw).map(v => v.path);
+    expect(ui).not.toEqual(hostRaw.map(r => r.path)); // the orders really differ
+    expect(byteSort(ui)).toEqual(byteSort(hostRaw.map(r => r.path)));
+    expect(byteSort(ui)).toEqual(["README.md", "new/a.ts", "new/b.ts", "src/alpha.ts", "src/zeta.ts"]);
+    const gov = createMemoryGovernance();
+    const d = { cwd: "/w", branch: "braavo/x", title: "t", body: "" };
+    const r = await gov.request("git.commit", { ...d, files: byteSort(ui) });
+    const { token } = await gov.approve(r.actionId);
+    expect(await gov.consume(token, "git.commit", { ...d, files: byteSort([...hostRaw.map(x => x.path)].reverse()) })).toBe(true);
+  });
+  it("sorts by UTF-8 bytes, not UTF-16 units", () => {
+    // U+FF5E (BMP, UTF-8 EF BD 9E) vs U+1F600 (astral, UTF-8 F0 9F 98 80): bytes put the astral one last; UTF-16 units would not
+    expect(byteSort(["\u{1F600}.ts", "\uFF5E.ts", "a.ts", "a.ts"])).toEqual(["a.ts", "\uFF5E.ts", "\u{1F600}.ts"]);
+    expect(["\u{1F600}.ts", "\uFF5E.ts"].sort()[0]).toBe("\u{1F600}.ts");
+  });
+  it("runs a real multi-file commit end to end with the host's list in a different order", async () => {
+    const h = host(undefined, hostRaw);
+    const r = await run(createMemoryGovernance(), h.invoke, { files: toChangeViews(hostRaw).map(v => v.path) });
+    expect(r.ok).toBe(true);
+    expect(h.calls.map(c => c.cmd)).toEqual(["git_publish_commit", "git_publish_push", "github_open_pr"]);
+  });
+  it("stops with an explicit changesChanged (not unknown) when the list changed after confirmation, before any approval", async () => {
+    const h = host(undefined, [...hostRaw, { path: "extra.ts", status: "??" }]);
+    const r = await run(createMemoryGovernance(), h.invoke, { files: hostRaw.map(x => x.path) });
+    expect(r).toEqual({ ok: false, step: "commit", code: "changesChanged" });
+    expect(h.calls).toEqual([]);
+    expect(errorCode(new Error("publish:changesChanged"))).toBe("changesChanged");
+  });
+});
+
 describe("secrets and errors (criteria 4, 5, 6)", () => {
   it("maps only publish:<code> to a code and drops any other text, so no token can appear in an error", () => {
     expect(errorCode(new Error("publish:network"))).toBe("network");
@@ -171,7 +212,7 @@ describe("secrets and errors (criteria 4, 5, 6)", () => {
     }
   });
   it("renders a message for every code with no token wording, in all fourteen languages", () => {
-    const codes = ["pushRejected", "network", "noWriteAccess", "unauthorized", "notFound", "rateLimit", "conflict", "branchExists", "identity", "commitFailed", "wrongBranch", "nothingToPublish", "tooMany", "cancelled", "keychain", "invalid", "unknown", "unsafeConfig"];
+    const codes = ["pushRejected", "network", "noWriteAccess", "unauthorized", "notFound", "rateLimit", "conflict", "branchExists", "identity", "commitFailed", "wrongBranch", "nothingToPublish", "tooMany", "cancelled", "keychain", "invalid", "unknown", "unsafeConfig", "changesChanged"];
     for (const l of LOCALES) for (const c of codes) {
       const m = MESSAGES[l][`publish.err.${c}`];
       expect(m, `${l}:${c}`).toBeTruthy();

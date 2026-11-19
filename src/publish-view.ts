@@ -9,7 +9,7 @@
 import type { Governance } from "./governance";
 import type { ChangeView } from "./changes";
 import {
-  draftProblems, errorCode, publishSummary, runPublish, suggestBranch,
+  byteSort, draftProblems, errorCode, publishSummary, runPublish, suggestBranch,
   type PublishDraft, type PublishErrorCode, type PublishFailure, type PublishInfo, type PublishStep,
 } from "./publish";
 
@@ -66,6 +66,7 @@ function errorKey(code: PublishErrorCode): string {
     case "nothingToPublish": return "publish.err.nothingToPublish";
     case "tooMany": return "publish.err.tooMany";
     case "unsafeConfig": return "publish.err.unsafeConfig";
+    case "changesChanged": return "publish.err.changesChanged";
     case "cancelled": return "publish.err.cancelled";
     case "keychainUnavailable": return "publish.err.keychain";
     case "invalidBranch": case "invalidText": case "secretFile": return "publish.err.invalid";
@@ -111,7 +112,7 @@ export function createPublishUi(deps: PublishUiDeps): PublishUi {
     if (!cwd || views.length === 0) return;
     try { info = (await deps.invoke("git_publish_info", { cwd })) as PublishInfo; } catch { info = { branch: null, repo: null, base: "main" }; }
     const sum = publishSummary(views);
-    files = views.map(v => v.path);
+    files = byteSort(views.map(v => v.path));
     if (!info?.repo) return showError("notGithub", "commit", false);
     if (sum.secrets.length) return showSecrets(sum.secrets);
     const names = views.slice(0, 3).map(v => v.file).join(", ");
@@ -314,7 +315,8 @@ export function createPublishUi(deps: PublishUiDeps): PublishUi {
     actions.append(btn("set-btn", t("publish.close"), () => { close(); refreshList(); }));
     if (KEY_CODES.has(code)) actions.append(btn("set-btn", t("publish.keyUpdate"), () => connectDialog(() => void start(fail?.step ?? step))));
     if (retry && step === "commit" && code !== "cancelled" && code !== "identity") actions.append(btn("set-btn", t("publish.changeBranch"), () => showPrepare(deps.views())));
-    if (retry) actions.append(btn("set-btn primary", t("publish.retry"), () => void start(fail?.step ?? step)));
+    // A changed file list needs a fresh look at the changes, not a blind retry of the same list.
+    if (retry) actions.append(btn("set-btn primary", t("publish.retry"), () => void (code === "changesChanged" ? open() : start(fail?.step ?? step))));
     show(header(t("publish.title"), false), card, actions);
   }
 

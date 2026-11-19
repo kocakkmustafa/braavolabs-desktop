@@ -688,5 +688,6 @@
   "publish.err.keychain": "Kunci tidak dapat disimpan ke keychain sistem, jadi tidak disimpan sama sekali.",
   "publish.err.invalid": "Nama branch atau teks tidak valid. Tidak ada yang dikirim.",
   "publish.err.unknown": "Terjadi kesalahan. Periksa di daftar perubahan apa yang sudah dilakukan, lalu coba lagi.",
-  "publish.err.unsafeConfig": "Pengaturan Git repositori ini dapat mengalihkan atau melemahkan pengiriman (proxy, alamat lain, atau hook). Tidak ada yang dikirim. Hapus pengaturan itu dari repositori lalu coba lagi."
+  "publish.err.unsafeConfig": "Pengaturan Git repositori ini dapat mengalihkan atau melemahkan pengiriman (proxy, alamat lain, atau hook). Tidak ada yang dikirim. Hapus pengaturan itu dari repositori lalu coba lagi.",
+  "publish.err.changesChanged": "File yang berubah tidak lagi sama dengan yang Anda konfirmasi. Tidak ada yang dikirim. Lihat perubahan lagi, lalu mulai dari awal."
 }

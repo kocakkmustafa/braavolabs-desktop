@@ -665,5 +665,6 @@
   "publish.err.keychain": "A chave não pôde ser salva no chaveiro do sistema, então não foi salva.",
   "publish.err.invalid": "O nome do branch ou o texto não é válido. Nada foi enviado.",
   "publish.err.unknown": "Algo deu errado. Veja na lista de alterações o que foi feito e tente novamente.",
-  "publish.err.unsafeConfig": "As configurações do Git deste repositório poderiam redirecionar ou enfraquecer o envio (um proxy, outro endereço ou um hook). Nada foi enviado. Remova essas configurações do repositório e tente novamente."
+  "publish.err.unsafeConfig": "As configurações do Git deste repositório poderiam redirecionar ou enfraquecer o envio (um proxy, outro endereço ou um hook). Nada foi enviado. Remova essas configurações do repositório e tente novamente.",
+  "publish.err.changesChanged": "Os arquivos alterados não são mais os que você confirmou. Nada foi enviado. Veja as alterações de novo e comece outra vez."
 }

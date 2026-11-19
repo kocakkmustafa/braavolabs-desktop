@@ -7,7 +7,7 @@
  * is stored and used by the host only. Errors arrive as `publish:<code>` and map to words, never raw output.
  */
 import type { ActionDetail, Governance } from "./governance";
-import { changeSummary, type ChangeView } from "./changes";
+import { changeSummary, toChangeViews, type ChangeView } from "./changes";
 
 // UI-10b'ye kadar kapalı: bu bayrak BRA-UI-10b (PAT yalnız PR REST'te, push kullanıcının git kimliğiyle) merge edilene dek
 // hiçbir yapıda açılmaz ve varsayılanı açılmaz. Kodda bu anahtara "1" yazan bir yol yoktur (publish.test.ts kilitler).
@@ -71,13 +71,24 @@ export function publishSummary(views: ChangeView[]): PublishSummary {
 export type PublishErrorCode =
   | "invalidBranch" | "invalidText" | "nothingToPublish" | "tooMany" | "secretFile" | "notGithub" | "noPat" | "keychainUnavailable"
   | "branchExists" | "identity" | "commitFailed" | "wrongBranch" | "pushRejected" | "noWriteAccess" | "unauthorized" | "notFound"
-  | "rateLimit" | "network" | "conflict" | "unsafeConfig" | "cancelled" | "unknown";
-const CODES: readonly string[] = ["invalidBranch", "invalidText", "nothingToPublish", "tooMany", "secretFile", "notGithub", "noPat", "keychainUnavailable", "branchExists", "identity", "commitFailed", "wrongBranch", "pushRejected", "noWriteAccess", "unauthorized", "notFound", "rateLimit", "network", "conflict", "unsafeConfig", "cancelled", "unknown"];
+  | "rateLimit" | "network" | "conflict" | "unsafeConfig" | "changesChanged" | "cancelled" | "unknown";
+const CODES: readonly string[] = ["invalidBranch", "invalidText", "nothingToPublish", "tooMany", "secretFile", "notGithub", "noPat", "keychainUnavailable", "branchExists", "identity", "commitFailed", "wrongBranch", "pushRejected", "noWriteAccess", "unauthorized", "notFound", "rateLimit", "network", "conflict", "unsafeConfig", "changesChanged", "cancelled", "unknown"];
 
 /** `publish:<code>` from the host becomes a known code; anything else (including free text) becomes "unknown". The text itself is dropped. */
 export function errorCode(e: unknown): PublishErrorCode {
   const m = /^publish:(\w+)$/.exec(String(e instanceof Error ? e.message : e).trim());
   return m && CODES.includes(m[1]) ? (m[1] as PublishErrorCode) : "unknown";
+}
+
+const utf8 = new TextEncoder();
+/** THE canonical file order: UTF-8 byte order, duplicates dropped. The host sorts the same way before it binds the token
+ * (`publish::canonical_files`), so both sides bind identical bytes whatever order git or the changes list used. */
+export function byteSort(files: readonly string[]): string[] {
+  return [...new Set(files)].map(f => ({ f, b: utf8.encode(f) })).sort((x, y) => {
+    const n = Math.min(x.b.length, y.b.length);
+    for (let i = 0; i < n; i++) if (x.b[i] !== y.b[i]) return x.b[i] - y.b[i];
+    return x.b.length - y.b.length;
+  }).map(o => o.f);
 }
 
 export type PublishStep = "commit" | "push" | "pr";
@@ -111,12 +122,19 @@ async function gated<T>(deps: RunDeps, kind: string, detail: ActionDetail, run: 
 const ORDER: PublishStep[] = ["commit", "push", "pr"];
 /** Runs commit, push, PR in order (from `from` on a retry). Stops at the first failure and says which step. */
 export async function runPublish(deps: RunDeps, input: RunInput): Promise<PublishOutcome | PublishFailure> {
-  const { cwd, info, draft, files } = input;
+  const { cwd, info, draft } = input;
+  let files = byteSort(input.files);
   const branch = draft.branch.trim(), title = draft.title.trim(), body = draft.body.trim();
   const repo = info.repo ?? "";
   let sha = "";
   let step: PublishStep = input.from ?? "commit";
   try {
+    if (step === "commit") {
+      // The list the user confirmed must still be what is on disk. Read it from the host right now, not from the screen.
+      const fresh = byteSort(toChangeViews(await deps.invoke("git_changed_files", { cwd })).map(v => v.path));
+      if (fresh.length !== files.length || fresh.some((f, i) => f !== files[i])) return { ok: false, step: "commit", code: "changesChanged" };
+      files = fresh;
+    }
     for (const s of ORDER.slice(ORDER.indexOf(step))) {
       step = s;
       deps.onStep?.(s, "run");

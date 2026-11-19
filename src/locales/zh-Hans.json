@@ -688,5 +688,6 @@
   "publish.err.keychain": "无法将密钥保存到系统钥匙串，因此根本没有保存。",
   "publish.err.invalid": "分支名称或文本无效。未发送任何内容。",
   "publish.err.unknown": "出了点问题。请在更改列表中查看已完成的内容，然后重试。",
-  "publish.err.unsafeConfig": "此仓库的 Git 设置可能改变或削弱上传（代理、其他地址或钩子）。未发送任何内容。请从仓库中移除这些设置后重试。"
+  "publish.err.unsafeConfig": "此仓库的 Git 设置可能改变或削弱上传（代理、其他地址或钩子）。未发送任何内容。请从仓库中移除这些设置后重试。",
+  "publish.err.changesChanged": "已更改的文件与您确认的不再一致。未发送任何内容。请重新查看更改后重新开始。"
 }

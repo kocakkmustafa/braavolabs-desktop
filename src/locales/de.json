@@ -665,5 +665,6 @@
   "publish.err.keychain": "Der Schlüssel konnte nicht im Schlüsselbund des Systems gespeichert werden und wurde daher gar nicht gespeichert.",
   "publish.err.invalid": "Branch-Name oder Text ist ungültig. Es wurde nichts gesendet.",
   "publish.err.unknown": "Etwas ist schiefgelaufen. Prüfen Sie in der Änderungsliste, was erledigt wurde, und versuchen Sie es erneut.",
-  "publish.err.unsafeConfig": "Die Git-Einstellungen dieses Repositorys könnten den Upload umleiten oder abschwächen (Proxy, andere Adresse oder Hook). Es wurde nichts gesendet. Entfernen Sie diese Einstellungen aus dem Repository und versuchen Sie es erneut."
+  "publish.err.unsafeConfig": "Die Git-Einstellungen dieses Repositorys könnten den Upload umleiten oder abschwächen (Proxy, andere Adresse oder Hook). Es wurde nichts gesendet. Entfernen Sie diese Einstellungen aus dem Repository und versuchen Sie es erneut.",
+  "publish.err.changesChanged": "Die geänderten Dateien sind nicht mehr die, die Sie bestätigt haben. Es wurde nichts gesendet. Sehen Sie sich die Änderungen erneut an und beginnen Sie von vorn."
 }
