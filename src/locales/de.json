@@ -731,5 +731,16 @@
   "setup.sum.perms": "{n} von {total} Berechtigungen erlaubt",
   "setup.sum.keyDone": "Schlüssel für {provider} gespeichert",
   "setup.sum.keyLater": "Noch kein Schlüssel hinzugefügt",
-  "setup.state.pending": "Wartet auf Sie"
+  "setup.state.pending": "Wartet auf Sie",
+  "update.eng.hint": "Die Signatur wird vor der Installation geprüft.",
+  "update.eng.downloading": "{version} wird geladen… {percent} %",
+  "update.eng.downloadingNoPct": "{version} wird geladen…",
+  "update.eng.ready": "{version} ist bereit zur Installation",
+  "update.eng.readyHint": "Starten Sie Braavolabs neu, um die Installation abzuschließen.",
+  "update.eng.restart": "Neu starten",
+  "update.eng.failed": "Update nicht abgeschlossen",
+  "update.eng.failedHint": "Versuchen Sie es gleich noch einmal.",
+  "update.eng.sigFailed": "Die Signatur des Updates stimmt nicht",
+  "update.eng.sigFailedHint": "Es wurde nicht installiert.",
+  "about.engine": "Braavolabs lädt ein Update nur auf Ihren Wunsch herunter und prüft vor der Installation die Signatur. Der Neustart schließt die Installation ab."
 }

@@ -754,5 +754,16 @@
   "setup.sum.perms": "{n} dari {total} izin diizinkan",
   "setup.sum.keyDone": "Kunci {provider} disimpan",
   "setup.sum.keyLater": "Belum ada kunci yang ditambahkan",
-  "setup.state.pending": "Menunggu Anda"
+  "setup.state.pending": "Menunggu Anda",
+  "update.eng.hint": "Tanda tangan diperiksa sebelum pemasangan.",
+  "update.eng.downloading": "Mengunduh {version}… {percent}%",
+  "update.eng.downloadingNoPct": "Mengunduh {version}…",
+  "update.eng.ready": "{version} siap dipasang",
+  "update.eng.readyHint": "Mulai ulang Braavolabs untuk menyelesaikan pemasangan.",
+  "update.eng.restart": "Mulai ulang",
+  "update.eng.failed": "Pembaruan tidak dapat diselesaikan",
+  "update.eng.failedHint": "Coba lagi sebentar lagi.",
+  "update.eng.sigFailed": "Tanda tangan pembaruan tidak cocok",
+  "update.eng.sigFailedHint": "Tidak dipasang.",
+  "about.engine": "Braavolabs hanya mengunduh pembaruan saat Anda memilihnya dan memeriksa tanda tangannya sebelum memasang. Mulai ulang menyelesaikan pemasangan."
 }

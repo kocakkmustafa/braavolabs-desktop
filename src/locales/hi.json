@@ -754,5 +754,16 @@
   "setup.sum.perms": "{total} में से {n} अनुमतियाँ दी गईं",
   "setup.sum.keyDone": "{provider} की कुंजी सहेजी गई",
   "setup.sum.keyLater": "अभी कोई कुंजी नहीं जोड़ी गई",
-  "setup.state.pending": "आपके जवाब की प्रतीक्षा"
+  "setup.state.pending": "आपके जवाब की प्रतीक्षा",
+  "update.eng.hint": "इंस्टॉल से पहले हस्ताक्षर जाँचा जाता है।",
+  "update.eng.downloading": "{version} डाउनलोड हो रहा है… {percent}%",
+  "update.eng.downloadingNoPct": "{version} डाउनलोड हो रहा है…",
+  "update.eng.ready": "{version} इंस्टॉल के लिए तैयार है",
+  "update.eng.readyHint": "इंस्टॉल पूरा करने के लिए Braavolabs को रीस्टार्ट करें।",
+  "update.eng.restart": "रीस्टार्ट करें",
+  "update.eng.failed": "अपडेट पूरा नहीं हो सका",
+  "update.eng.failedHint": "थोड़ी देर बाद फिर कोशिश करें।",
+  "update.eng.sigFailed": "अपडेट का हस्ताक्षर मेल नहीं खाता",
+  "update.eng.sigFailedHint": "इंस्टॉल नहीं किया गया।",
+  "about.engine": "Braavolabs अपडेट तभी डाउनलोड करता है जब आप चुनते हैं, और इंस्टॉल से पहले उसका हस्ताक्षर जाँचता है। रीस्टार्ट करने पर इंस्टॉल पूरा होता है।"
 }

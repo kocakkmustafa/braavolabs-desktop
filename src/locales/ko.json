@@ -754,5 +754,16 @@
   "setup.sum.perms": "권한 {total}개 중 {n}개 허용됨",
   "setup.sum.keyDone": "{provider} 키 저장됨",
   "setup.sum.keyLater": "아직 추가된 키 없음",
-  "setup.state.pending": "확인 대기 중"
+  "setup.state.pending": "확인 대기 중",
+  "update.eng.hint": "설치 전에 서명을 확인합니다.",
+  "update.eng.downloading": "{version} 내려받는 중… {percent}%",
+  "update.eng.downloadingNoPct": "{version} 내려받는 중…",
+  "update.eng.ready": "{version} 설치 준비 완료",
+  "update.eng.readyHint": "Braavolabs를 다시 시작하면 설치가 끝납니다.",
+  "update.eng.restart": "다시 시작",
+  "update.eng.failed": "업데이트를 완료하지 못했습니다",
+  "update.eng.failedHint": "잠시 후 다시 시도하세요.",
+  "update.eng.sigFailed": "업데이트 서명이 일치하지 않습니다",
+  "update.eng.sigFailedHint": "설치되지 않았습니다.",
+  "about.engine": "Braavolabs는 사용자가 선택할 때만 업데이트를 내려받고, 설치 전에 서명을 확인합니다. 다시 시작하면 설치가 끝납니다."
 }

@@ -731,5 +731,16 @@
   "setup.sum.perms": "{n} autorisations sur {total} accordées",
   "setup.sum.keyDone": "Clé {provider} enregistrée",
   "setup.sum.keyLater": "Aucune clé ajoutée pour l'instant",
-  "setup.state.pending": "En attente de votre réponse"
+  "setup.state.pending": "En attente de votre réponse",
+  "update.eng.hint": "La signature est vérifiée avant l'installation.",
+  "update.eng.downloading": "Téléchargement de {version}… {percent} %",
+  "update.eng.downloadingNoPct": "Téléchargement de {version}…",
+  "update.eng.ready": "{version} est prête à être installée",
+  "update.eng.readyHint": "Redémarrez Braavolabs pour terminer l'installation.",
+  "update.eng.restart": "Redémarrer",
+  "update.eng.failed": "La mise à jour n'a pas abouti",
+  "update.eng.failedHint": "Réessayez dans un instant.",
+  "update.eng.sigFailed": "La signature de la mise à jour ne correspond pas",
+  "update.eng.sigFailedHint": "Elle n'a pas été installée.",
+  "about.engine": "Braavolabs ne télécharge une mise à jour que sur votre demande et vérifie sa signature avant de l'installer. Le redémarrage termine l'installation."
 }

@@ -731,5 +731,16 @@
   "setup.sum.perms": "{total} izinden {n} tanesi verildi",
   "setup.sum.keyDone": "{provider} anahtarı kaydedildi",
   "setup.sum.keyLater": "Henüz anahtar eklenmedi",
-  "setup.state.pending": "Yanıtınız bekleniyor"
+  "setup.state.pending": "Yanıtınız bekleniyor",
+  "update.eng.hint": "Kurulumdan önce imza denetlenir.",
+  "update.eng.downloading": "{version} indiriliyor… %{percent}",
+  "update.eng.downloadingNoPct": "{version} indiriliyor…",
+  "update.eng.ready": "{version} kurulmaya hazır",
+  "update.eng.readyHint": "Kurulumu bitirmek için Braavolabs'u yeniden başlatın.",
+  "update.eng.restart": "Yeniden başlat",
+  "update.eng.failed": "Güncelleme tamamlanamadı",
+  "update.eng.failedHint": "Biraz sonra tekrar deneyin.",
+  "update.eng.sigFailed": "Güncellemenin imzası eşleşmedi",
+  "update.eng.sigFailedHint": "Kurulmadı.",
+  "about.engine": "Braavolabs bir güncellemeyi yalnız siz isteyince indirir ve kurmadan önce imzasını denetler. Yeniden başlatmak kurulumu tamamlar."
 }

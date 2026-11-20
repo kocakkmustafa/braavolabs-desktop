@@ -731,5 +731,16 @@
   "setup.sum.perms": "{total} 件中 {n} 件の権限を許可済み",
   "setup.sum.keyDone": "{provider} のキーを保存しました",
   "setup.sum.keyLater": "キーはまだ追加されていません",
-  "setup.state.pending": "確認待ち"
+  "setup.state.pending": "確認待ち",
+  "update.eng.hint": "インストール前に署名を確認します。",
+  "update.eng.downloading": "{version} をダウンロード中… {percent}%",
+  "update.eng.downloadingNoPct": "{version} をダウンロード中…",
+  "update.eng.ready": "{version} をインストールできます",
+  "update.eng.readyHint": "Braavolabs を再起動するとインストールが完了します。",
+  "update.eng.restart": "再起動",
+  "update.eng.failed": "アップデートを完了できませんでした",
+  "update.eng.failedHint": "しばらくしてからもう一度お試しください。",
+  "update.eng.sigFailed": "アップデートの署名が一致しません",
+  "update.eng.sigFailedHint": "インストールされていません。",
+  "about.engine": "Braavolabs はお客様が選んだときだけアップデートをダウンロードし、インストール前に署名を確認します。再起動するとインストールが完了します。"
 }

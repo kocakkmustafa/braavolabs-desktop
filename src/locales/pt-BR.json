@@ -731,5 +731,16 @@
   "setup.sum.perms": "{n} de {total} permissões permitidas",
   "setup.sum.keyDone": "Chave de {provider} salva",
   "setup.sum.keyLater": "Nenhuma chave adicionada ainda",
-  "setup.state.pending": "Aguardando sua resposta"
+  "setup.state.pending": "Aguardando sua resposta",
+  "update.eng.hint": "A assinatura é verificada antes da instalação.",
+  "update.eng.downloading": "Baixando {version}… {percent}%",
+  "update.eng.downloadingNoPct": "Baixando {version}…",
+  "update.eng.ready": "{version} está pronta para instalar",
+  "update.eng.readyHint": "Reinicie o Braavolabs para concluir a instalação.",
+  "update.eng.restart": "Reiniciar",
+  "update.eng.failed": "Não foi possível concluir a atualização",
+  "update.eng.failedHint": "Tente de novo em instantes.",
+  "update.eng.sigFailed": "A assinatura da atualização não confere",
+  "update.eng.sigFailedHint": "Não foi instalada.",
+  "about.engine": "O Braavolabs só baixa uma atualização quando você escolhe e verifica a assinatura antes de instalar. Reiniciar conclui a instalação."
 }

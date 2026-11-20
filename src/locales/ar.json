@@ -731,5 +731,16 @@
   "setup.sum.perms": "تم السماح بـ {n} من {total} أذونات",
   "setup.sum.keyDone": "تم حفظ مفتاح {provider}",
   "setup.sum.keyLater": "لم تتم إضافة مفتاح بعد",
-  "setup.state.pending": "بانتظار ردك"
+  "setup.state.pending": "بانتظار ردك",
+  "update.eng.hint": "يُتحقَّق من التوقيع قبل التثبيت.",
+  "update.eng.downloading": "تنزيل {version}… {percent}%",
+  "update.eng.downloadingNoPct": "تنزيل {version}…",
+  "update.eng.ready": "{version} جاهز للتثبيت",
+  "update.eng.readyHint": "أعد تشغيل Braavolabs لإكمال التثبيت.",
+  "update.eng.restart": "إعادة التشغيل",
+  "update.eng.failed": "تعذّر إكمال التحديث",
+  "update.eng.failedHint": "حاول مرة أخرى بعد قليل.",
+  "update.eng.sigFailed": "توقيع التحديث غير مطابق",
+  "update.eng.sigFailedHint": "لم يتم التثبيت.",
+  "about.engine": "ينزّل Braavolabs التحديث عندما تختار ذلك فقط، ويتحقق من توقيعه قبل التثبيت. تكتمل عملية التثبيت بإعادة التشغيل."
 }

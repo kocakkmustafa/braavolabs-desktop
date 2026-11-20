@@ -731,5 +731,16 @@
   "setup.sum.perms": "{n} of {total} permissions allowed",
   "setup.sum.keyDone": "{provider} key saved",
   "setup.sum.keyLater": "No key added yet",
-  "setup.state.pending": "Waiting for you"
+  "setup.state.pending": "Waiting for you",
+  "update.eng.hint": "The signature is checked before anything is installed.",
+  "update.eng.downloading": "Downloading {version}… {percent}%",
+  "update.eng.downloadingNoPct": "Downloading {version}…",
+  "update.eng.ready": "{version} is ready to install",
+  "update.eng.readyHint": "Restart Braavolabs to finish installing.",
+  "update.eng.restart": "Restart",
+  "update.eng.failed": "The update could not be completed",
+  "update.eng.failedHint": "Try again in a moment.",
+  "update.eng.sigFailed": "The update's signature did not match",
+  "update.eng.sigFailedHint": "It was not installed.",
+  "about.engine": "Braavolabs downloads an update only when you choose, and checks its signature before installing. Restarting finishes the install."
 }
