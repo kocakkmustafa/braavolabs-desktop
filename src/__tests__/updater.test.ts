@@ -86,7 +86,11 @@ describe("update engine state machine", () => {
     expect(downloadLinksOk(GOOD_RAW)).toBe(true);
     expect(downloadLinksOk({ url: "http://github.com/kocakkmustafa/x" })).toBe(false);
     expect(downloadLinksOk({ platforms: { a: { url: "https://github.com.evil.io/kocakkmustafa/x" } } })).toBe(false);
-    expect(downloadLinksOk(undefined)).toBe(true);
+    expect(downloadLinksOk(undefined)).toBe(false); // fail closed
+    expect(downloadLinksOk("x")).toBe(false);
+    expect(downloadLinksOk({ version: "1.2.0" })).toBe(false); // no link at all
+    expect(downloadLinksOk({ url: "https://github.com/kocakkmustafa/other/releases/download/v1/x" })).toBe(false); // another repo of the account
+    expect(downloadLinksOk({ url: "https://github.com/kocakkmustafa/braavolabs-desktop/releases/tag/v1.2.0" })).toBe(false); // not a download link
   });
   it("a failed download can be retried; a signature failure is its own state with no retry and no install", async () => {
     let n = 0;
@@ -105,6 +109,22 @@ describe("update engine state machine", () => {
     await sig.download(); await sig.restart(); // neither moves it on
     expect(sig.state().failure).toBe("signature");
     expect(install).not.toHaveBeenCalled();
+  });
+  it("a TLS or network 'verify failed' error is not a signature failure", async () => {
+    const e = createUpdateEngine({ current: "1.1.0", backend: backend(handle({ download: async () => { throw new Error("certificate verify failed"); } })).b, storage: mem() });
+    await e.check(); await e.download();
+    expect(e.state()).toMatchObject({ phase: "failed", failure: "download" });
+  });
+  it("after a successful install, a failed restart retries only the restart", async () => {
+    const install = vi.fn(async () => {});
+    let n = 0;
+    const r = vi.fn(async () => { if (n++ === 0) throw new Error("relaunch failed"); });
+    const e = createUpdateEngine({ current: "1.1.0", backend: backend(handle({ install }), r).b, storage: mem() });
+    await e.check(); await e.download(); await e.restart();
+    expect(e.state()).toMatchObject({ phase: "failed", failure: "install" });
+    await e.restart();
+    expect(install).toHaveBeenCalledTimes(1);
+    expect(r).toHaveBeenCalledTimes(2);
   });
   it("an install failure keeps the download and can retry the install", async () => {
     let n = 0;

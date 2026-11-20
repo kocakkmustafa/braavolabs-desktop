@@ -9,6 +9,7 @@
  * tauri.conf.json and cannot be switched off from here; a signature failure has no "install anyway" path.
  * Error texts never carry the host's raw message (it can hold a URL); only a fixed failure kind is kept.
  */
+import { DOWNLOAD_PREFIX } from "./latest-json";
 import { compareSemver, parseSemver, formatVersion, isReleaseUrl, UPDATE_DISMISSED_KEY, UPDATE_LAST_KEY, type Storage2 } from "./update";
 
 export interface UpdaterHandle {
@@ -37,18 +38,19 @@ export interface EngineState {
   dismissed: boolean;
 }
 
-/** Every download link inside latest.json must stay under the project's own GitHub account. */
+/** Every download link inside latest.json must be a release download of this project (same rule as latest-json.ts). Fails closed: no data or no link is a refusal. */
 export function downloadLinksOk(raw: unknown): boolean {
-  if (!raw || typeof raw !== "object") return true;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
   const r = raw as Record<string, unknown>;
   const urls: unknown[] = [];
   if ("url" in r) urls.push(r.url);
   const p = r.platforms;
   if (p && typeof p === "object") for (const e of Object.values(p as Record<string, unknown>)) if (e && typeof e === "object" && "url" in e) urls.push((e as { url: unknown }).url);
-  return urls.every(isReleaseUrl);
+  return urls.length > 0 && urls.every(u => isReleaseUrl(u) && (u as string).startsWith(DOWNLOAD_PREFIX));
 }
 
-const isSignatureError = (e: unknown): boolean => /signature|minisign|verif/i.test(e instanceof Error ? e.message : typeof e === "string" ? e : "");
+/** Only a signature/minisign message counts. A TLS "certificate verify failed" or similar network error is an ordinary failure. */
+const isSignatureError = (e: unknown): boolean => /signature|minisign/i.test(e instanceof Error ? e.message : typeof e === "string" ? e : "");
 
 export interface EngineDeps {
   current: string;
@@ -82,6 +84,7 @@ export function createUpdateEngine(deps: EngineDeps): UpdateEngine {
   let st: EngineState = { phase: "idle", dismissed: false };
   let handle: UpdaterHandle | null = null;
   let busy = false;
+  let installed = false; // install() succeeded: a retry after a failed restart must not install again
 
   const set = (next: Omit<EngineState, "dismissed">) => {
     st = { ...next, dismissed: !!next.version && rd(store(deps), UPDATE_DISMISSED_KEY) === next.version };
@@ -104,7 +107,7 @@ export function createUpdateEngine(deps: EngineDeps): UpdateEngine {
         if (!h) { handle = null; set({ phase: "current", lastCheck: at }); }
         else if (!v || !cur || compareSemver(v, cur) <= 0) { handle = null; set({ phase: "current", lastCheck: at }); }
         else if (!downloadLinksOk(h.rawJson)) { handle = null; set({ phase: "failed", failure: "check", lastCheck: at }); }
-        else { handle = h; set({ phase: "available", version: formatVersion(v), lastCheck: at }); }
+        else { handle = h; installed = false; set({ phase: "available", version: formatVersion(v), lastCheck: at }); }
       } catch {
         handle = null;
         set({ phase: "failed", failure: "check", lastCheck: at });
@@ -136,7 +139,7 @@ export function createUpdateEngine(deps: EngineDeps): UpdateEngine {
       busy = true;
       const { version, lastCheck } = st;
       try {
-        await handle.install();
+        if (!installed) { await handle.install(); installed = true; }
         await deps.backend.restart();
       } catch (e) {
         set({ phase: "failed", version, failure: isSignatureError(e) ? "signature" : "install", lastCheck });
