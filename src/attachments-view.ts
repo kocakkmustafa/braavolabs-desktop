@@ -7,6 +7,7 @@ import {
   MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, MAX_TOTAL_BYTES, attachNoticeSeen, formatSize, inspectFile, isAttachError, isSecretName,
   markAttachNoticeSeen, readAttachment, type AttachError, type AttachStorage, type Attachment, type AttachmentTray, type PickedFile,
 } from "./attachments";
+import { ltr } from "./bidi";
 
 type Translate = (key: string, vars?: Record<string, string | number>) => string;
 type IconName = "plus" | "file" | "x" | "warn" | "lock" | "retry";
@@ -45,7 +46,7 @@ function button(cls: string, label: string, onClick: () => void): HTMLButtonElem
 // ── chips ────────────────────────────────────────────────────────────────────
 function chip(name: string, size: number, locale: string, remove: HTMLButtonElement | null): HTMLElement {
   const c = make("span", "att-chip");
-  c.append(icon("file", 15), make("span", "att-nm", name), make("span", "att-sz mono", formatSize(size, locale)));
+  c.append(icon("file", 15), ltr(make("span", "att-nm", name)), make("span", "att-sz mono", formatSize(size, locale)));
   if (remove) c.append(remove);
   return c;
 }

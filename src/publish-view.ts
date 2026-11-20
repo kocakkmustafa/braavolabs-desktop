@@ -8,6 +8,7 @@
  */
 import type { Governance } from "./governance";
 import type { ChangeView } from "./changes";
+import { ltr } from "./bidi";
 import {
   byteSort, draftProblems, errorCode, publishSummary, runPublish, suggestBranch,
   type PublishDraft, type PublishErrorCode, type PublishFailure, type PublishInfo, type PublishStep,
@@ -151,7 +152,7 @@ export function createPublishUi(deps: PublishUiDeps): PublishUi {
 
     const b = field(t("publish.branch"), t("publish.branchAuto"));
     const branchIn = make("input", "pb-input mono"); branchIn.type = "text"; branchIn.value = draft.branch; branchIn.maxLength = 100; branchIn.spellcheck = false;
-    b.wrap.append(branchIn, b.err);
+    ltr(branchIn); b.wrap.append(branchIn, b.err);
     const ti = field(t("publish.prTitle"));
     const titleIn = make("input", "pb-input"); titleIn.type = "text"; titleIn.value = draft.title; titleIn.maxLength = 200;
     ti.wrap.append(titleIn, ti.err);
@@ -209,7 +210,7 @@ export function createPublishUi(deps: PublishUiDeps): PublishUi {
     const chip = status("ask", t("publish.pending"));
     const intro = make("div", "approve-body", t("publish.confirmIntro"));
     const kv = make("div", "approve-detail");
-    const row = (k: string, v: string, mono = false) => { const r = make("div", "approve-kv"); r.append(make("span", "approve-k", k), make("span", `approve-v${mono ? " mono" : ""}`, v)); kv.append(r); };
+    const row = (k: string, v: string, mono = false) => { const r = make("div", "approve-kv"); r.append(make("span", "approve-k", k), mono ? ltr(make("span", "approve-v mono", v)) : make("span", "approve-v", v)); kv.append(r); };
     row(t("publish.repo"), info.repo ?? "", true);
     row(t("publish.branchRow"), `${draft.branch.trim()} → ${info.base}`, true);
     row(t("publish.prTitle"), draft.title.trim());
@@ -292,9 +293,9 @@ export function createPublishUi(deps: PublishUiDeps): PublishUi {
     const card = make("div", "pb-card");
     card.append(status("done", t("publish.doneTitle")), make("span", "pb-sub", ` · ${t("publish.doneSub")}`));
     const pr = make("div", "pb-line");
-    pr.append(make("span", "mono", `#${number}`), document.createTextNode(` · ${draft.title.trim()}`));
-    const br = make("div", "pb-line mono", `${draft.branch.trim()} → ${info.base}`);
-    const link = make("div", "pb-line mono pb-url", url);
+    pr.append(ltr(make("span", "mono", `#${number}`)), document.createTextNode(` · ${draft.title.trim()}`));
+    const br = ltr(make("div", "pb-line mono", `${draft.branch.trim()} → ${info.base}`));
+    const link = ltr(make("div", "pb-line mono pb-url", url));
     const copied = make("span", "pb-copied"); copied.setAttribute("role", "status");
     const actions = make("div", "pb-actions");
     actions.append(

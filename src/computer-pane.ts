@@ -5,6 +5,7 @@
  * Stop). The test button takes one governed screenshot of an allowed app.
  */
 import type { GateFn } from "./browser";
+import { ltr } from "./bidi";
 import { computerActionToGate, governedComputer, type ComputerAction, type ComputerDriver, type ComputerResult, type TargetApp } from "./computer";
 import type { Translator } from "./i18n";
 
@@ -87,7 +88,7 @@ export function createComputerPane(deps: ComputerPaneDeps) {
         const next = rows.filter(r => r.bundleId === a.bundleId ? box.checked : allowed.has(r.bundleId)).map(r => r.bundleId);
         void invoke("computer_set_allow", { apps: next }).then(refresh, e => say(message(e), true));
       });
-      label.append(box, el("span", "", a.name || a.bundleId), el("span", "cp-sub mono", a.bundleId));
+      label.append(box, el("span", "", a.name || a.bundleId), ltr(el("span", "cp-sub mono", a.bundleId)));
       if (a.blocked) label.append(el("span", "cp-sub", `· ${a.blocked}`));
       appsBox.append(label);
     }

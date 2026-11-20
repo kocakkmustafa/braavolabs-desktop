@@ -149,6 +149,7 @@ import { buildAbout, mountUpdate } from "./update-view";
 import { renderIntro, renderStrip, stripView, summaryLine, vcIcon, type VcAction } from "./voice-chat-view";
 import { createBrowserPane } from "./browser-pane";
 import { createComputerPane } from "./computer-pane";
+import { ltr } from "./bidi";
 
 /** How an approval was settled. `token` is present only when the resolver
  *  ALREADY minted one (companion approve) — the local click mints its own. */
@@ -756,7 +757,7 @@ export function renderWorkspace(deps: UiDeps): void {
    */
   const changesSec = el("div", "changes-sec");
   const changesHead = el("div", "rail-section-label", t("changes.title"));
-  const changesPathInput = el("input", "changes-path");
+  const changesPathInput = ltr(el("input", "changes-path"));
   changesPathInput.type = "text";
   changesPathInput.placeholder = t("changes.pathPlaceholder");
   try {
@@ -823,11 +824,12 @@ export function renderWorkspace(deps: UiDeps): void {
     for (const [dir, files] of [...byDir].sort(([a], [b]) => a.localeCompare(b))) {
       const group = el("div", "changes-dir");
       const head = el("div", "changes-dir-head mono");
-      head.append(icon("folder", 14), el("span", undefined, dir ? `${dir}/` : t("changes.root")));
+      const dirLabel = el("span", undefined, dir ? `${dir}/` : t("changes.root"));
+      head.append(icon("folder", 14), dir ? ltr(dirLabel) : dirLabel);
       group.append(head);
       for (const v of files) {
         const row = el("div", "changes-item");
-        const name = el("span", "changes-file mono", v.file);
+        const name = ltr(el("span", "changes-file mono", v.file));
         name.title = v.path; // full path without widening the row
         const counts = el("span", `changes-counts mono${v.countless ? " faint" : ""}`);
         if (v.countless) counts.textContent = changeCounts(v);
@@ -3215,7 +3217,7 @@ function renderLaneBSection(deps: UiDeps): HTMLElement {
       const cmdBox = el("div", "laneb-cmd mono");
       cmdBox.style.display = "none";
       cmdBox.append(el("div", "laneb-cmd-hint", t("laneB.launchHint")));
-      cmdBox.append(el("code", undefined, cmdText));
+      cmdBox.append(ltr(el("code", undefined, cmdText)));
       const gateErr = el("div", "laneb-gate-err");
       gateErr.style.display = "none";
       copyBtn.addEventListener("click", () => {
@@ -3317,7 +3319,7 @@ function renderMcpSection(deps: UiDeps): HTMLElement {
     for (const tool of tools) {
       const row = el("div", "mcp-tool-row");
       const head = el("div", "mcp-tool-head");
-      head.append(el("span", "mcp-tool-name mono", tool.name));
+      head.append(ltr(el("span", "mcp-tool-name mono", tool.name)));
       row.append(head);
       if (typeof tool.description === "string" && tool.description) {
         row.append(el("div", "mcp-tool-desc", tool.description.split("\n")[0]));
@@ -3429,8 +3431,8 @@ function renderMcpSection(deps: UiDeps): HTMLElement {
       const def = cfg[name];
       const row = el("div", "mcp-row");
       const info = el("div", "mcp-row-info");
-      info.append(el("span", "mcp-name mono", name));
-      info.append(el("span", "mcp-cmd mono", [def.command, ...def.args].join(" ")));
+      info.append(ltr(el("span", "mcp-name mono", name)));
+      info.append(ltr(el("span", "mcp-cmd mono", [def.command, ...def.args].join(" "))));
       info.setAttribute("role", "button"); info.tabIndex = 0;
       info.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void loadTools(name); } });
       info.addEventListener("click", () => void loadTools(name));
