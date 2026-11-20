@@ -4641,6 +4641,8 @@ pub fn run() {
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init()) // S-012 native approval dialog
+        .plugin(tauri_plugin_updater::Builder::new().build()) // BRA-UI-11c: signed updates (pubkey in tauri.conf.json; verification cannot be turned off)
+        .plugin(tauri_plugin_process::init()) // BRA-UI-11c: restart after an update (only process:allow-restart is granted)
         .manage(Governance(Mutex::new(GateState::default())))
         .manage(pty::PtyHostState::default()) // R6 Lane-B real-PTY session registry
         .manage(daemon::DaemonStreams::default()) // in-flight daemon chat turns (cancel on kill/exit)

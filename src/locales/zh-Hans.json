@@ -754,5 +754,16 @@
   "setup.sum.perms": "{total} 项权限中已允许 {n} 项",
   "setup.sum.keyDone": "已保存 {provider} 密钥",
   "setup.sum.keyLater": "尚未添加密钥",
-  "setup.state.pending": "等待你的操作"
+  "setup.state.pending": "等待你的操作",
+  "update.eng.hint": "安装前会先校验签名。",
+  "update.eng.downloading": "正在下载 {version}… {percent}%",
+  "update.eng.downloadingNoPct": "正在下载 {version}…",
+  "update.eng.ready": "{version} 已可安装",
+  "update.eng.readyHint": "重启 Braavolabs 即可完成安装。",
+  "update.eng.restart": "重启",
+  "update.eng.failed": "更新未能完成",
+  "update.eng.failedHint": "请稍后重试。",
+  "update.eng.sigFailed": "更新签名不匹配",
+  "update.eng.sigFailedHint": "未安装。",
+  "about.engine": "Braavolabs 仅在你选择时才下载更新，并在安装前校验其签名。重启后安装完成。"
 }

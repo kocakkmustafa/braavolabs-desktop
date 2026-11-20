@@ -37,6 +37,8 @@ portable-pty = "0.9"
 # futures-util gives the Sink/Stream (send/next) extension traits it needs.
 tokio-tungstenite = "0.21"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 # OS keychain (S-010) — only on the platforms this app actually ships to
 # (macOS Keychain / Windows Credential Manager). Deliberately NOT pulled in on

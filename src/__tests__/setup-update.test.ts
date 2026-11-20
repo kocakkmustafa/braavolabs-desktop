@@ -440,7 +440,7 @@ describe("banner and About", () => {
 });
 
 describe("security scan (sources)", () => {
-  const files = ["../update.ts", "../update-view.ts", "../setup.ts", "../setup-view.ts"];
+  const files = ["../update.ts", "../update-view.ts", "../updater.ts", "../setup.ts", "../setup-view.ts"];
   it("holds no token, key, PAT or secret value, no markup injection and only the two GitHub hosts", () => {
     for (const f of files) {
       const src = read(f);
@@ -452,13 +452,21 @@ describe("security scan (sources)", () => {
     }
     expect(read("../setup-view.ts")).not.toMatch(/vault\.get\(/);
   });
-  it("adds no update engine: no updater plugin, key or config, and the CSP is unchanged", () => {
-    const conf = read("../../src-tauri/tauri.conf.json");
-    expect(conf).not.toMatch(/updater|pubkey/i);
-    expect(read("../../src-tauri/Cargo.toml")).not.toMatch(/updater|tauri-plugin-process/);
-    expect(read("../../src-tauri/capabilities/default.json")).not.toMatch(/updater|process/);
-    expect(read("../../package.json")).not.toMatch(/updater|plugin-process/);
+  it("BRA-UI-11c: the engine is narrow, verification stays on, and a build without the key keeps working", () => {
+    // Deliberately replaces the UI-11 "adds no update engine" lock: the engine now exists (behind the flag); these pin how.
+    const conf = JSON.parse(read("../../src-tauri/tauri.conf.json"));
+    expect(conf.plugins.updater.endpoints).toEqual(["https://github.com/kocakkmustafa/braavolabs-desktop/releases/latest/download/latest.json"]);
+    expect(conf.plugins.updater.pubkey).toMatch(/^[A-Za-z0-9+/=]{100,}$/);
+    expect(JSON.stringify(conf)).not.toMatch(/dangerousInsecureTransportProtocol|dangerousRemoteDomainIpcAccess/);
+    expect(conf.bundle.createUpdaterArtifacts).toBeUndefined(); // CI builds NSIS without the signing key
+    expect(JSON.parse(read("../../src-tauri/tauri.updater.conf.json"))).toEqual({ bundle: { createUpdaterArtifacts: true } });
+    const caps = JSON.parse(read("../../src-tauri/capabilities/default.json")).permissions as string[];
+    expect(caps).toEqual(expect.arrayContaining(["updater:allow-check", "updater:allow-download", "updater:allow-install", "process:allow-restart"]));
+    expect(caps.filter(c => /^(updater|process):/.test(c))).toHaveLength(4); // no updater:default, no process:default / exit
+    expect(read("../../src-tauri/Cargo.toml")).toMatch(/tauri-plugin-updater[\s\S]*tauri-plugin-process/);
+    expect(read("../../src-tauri/src/lib.rs")).toContain("tauri_plugin_updater::Builder::new().build()");
     expect(read("../../src-tauri/src/lib.rs")).toContain("open_release_page,");
+    expect(read("../../src/updater.ts")).not.toMatch(/downloadAndInstall|dangerous|allowDowngrades|verify\w*\s*[:=]\s*false/i);
   });
 });
 
@@ -484,14 +492,28 @@ describe("i18n (14 languages)", () => {
     for (const id of ["screen", "accessibility", "microphone"]) expect(keys).toContain(`setup.perm.${id}Why`);
     for (const s of ["granted", "pending", "notGranted", "later"]) expect(keys).toContain(`setup.state.${s}`);
   });
-  it("never promises an automatic update or a restart, in any language", () => {
-    const banned: Record<string, RegExp> = {
-      en: /automatic|restart|relaunch/i, tr: /otomatik|yeniden başlat/i, "es-419": /automátic|reinici/i, "pt-BR": /automátic|reinici/i, de: /automatisch|neu starten|neustart/i,
-      fr: /automatique|redémarr/i, ja: /自動|再起動|再開/, ar: /تلقائي|إعادة التشغيل|إعادة تشغيل/, it: /automatic|riavvi/i, ko: /자동|다시 시작|재시작/,
-      id: /otomatis|mulai ulang/i, pl: /automatyczn|uruchom ponownie|restart/i, hi: /स्वचालित|रीस्टार्ट|पुनः आरंभ/, "zh-Hans": /自动|重启|重新启动/,
+  it("never promises an automatic update, in any language; a restart is named only in the engine texts, and none promises that jobs resume", () => {
+    // UI-11 banned "restart" everywhere. BRA-UI-11c makes Restart a real, user-pressed step, so that part now applies only
+    // to the keys outside the engine set. "Automatic" stays banned everywhere: nothing downloads or installs without a press.
+    const auto: Record<string, RegExp> = {
+      en: /automatic/i, tr: /otomatik/i, "es-419": /automátic/i, "pt-BR": /automátic/i, de: /automatisch/i, fr: /automatique/i, ja: /自動/, ar: /تلقائي/,
+      it: /automatic/i, ko: /자동/, id: /otomatis/i, pl: /automatyczn/i, hi: /स्वचालित/, "zh-Hans": /自动/,
     };
-    for (const l of LOCALES) for (const k of keys) expect(MESSAGES[l][k], `${l}:${k}`).not.toMatch(banned[l]);
-    for (const f of ["../update.ts", "../update-view.ts", "../setup.ts", "../setup-view.ts"]) expect(read(f).replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "").replace("computer.restartNote", ""), f).not.toMatch(/relaunch|restart|autoUpdate/i);
+    const restart: Record<string, RegExp> = {
+      en: /restart|relaunch/i, tr: /yeniden başlat/i, "es-419": /reinici/i, "pt-BR": /reinici/i, de: /neu starten|neustart/i,
+      fr: /redémarr/i, ja: /再起動|再開/, ar: /إعادة التشغيل|إعادة تشغيل/, it: /riavvi/i, ko: /다시 시작|재시작/,
+      id: /mulai ulang/i, pl: /uruchom ponownie|restart/i, hi: /रीस्टार्ट|पुनः आरंभ/, "zh-Hans": /重启|重新启动/,
+    };
+    const resume = /resum|pick up|continue|carry on|kaldığı yerden|devam|reanud|retom|fortsetz|reprend|続き|استئناف|riprend|이어|lanjut|wznow|जारी|继续/i;
+    const engineKey = (k: string) => k.startsWith("update.eng.") || k === "about.engine";
+    for (const l of LOCALES) for (const k of keys) {
+      expect(MESSAGES[l][k], `${l}:${k}`).not.toMatch(auto[l]);
+      if (engineKey(k)) expect(MESSAGES[l][k], `${l}:${k}`).not.toMatch(resume);
+      else expect(MESSAGES[l][k], `${l}:${k}`).not.toMatch(restart[l]);
+    }
+    // Source lock: only the engine files may mention a restart; the manual notice and the setup flow still may not.
+    for (const f of ["../update.ts", "../setup.ts", "../setup-view.ts"]) expect(read(f).replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "").replace("computer.restartNote", ""), f).not.toMatch(/relaunch|restart|autoUpdate/i);
+    for (const f of ["../update-view.ts", "../updater.ts"]) expect(read(f).replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, ""), f).not.toMatch(/autoUpdate|installAnyway|ignoreSignature/i);
     expect(MESSAGES.en["about.manual"]).toMatch(/download and install/);
   });
 });
